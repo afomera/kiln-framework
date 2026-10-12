@@ -1,0 +1,21 @@
+[package]
+name = "kiln"
+description = "A full-stack Rust web framework where the compiler is the reviewer."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kiln-macros.workspace = true
+axum.workspace = true
+inventory.workspace = true
+jiff.workspace = true
+minijinja.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true

@@ -1,0 +1,5 @@
+error: template `templates/posts/missing.html.jinja` does not exist
+ --> tests/ui/missing_template.rs:5:19
+  |
+5 | #[view(template = "posts/missing")]
+  |                   ^^^^^^^^^^^^^^^

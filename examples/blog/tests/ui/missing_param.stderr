@@ -1,0 +1,5 @@
+error: the route captures `{slug}`, but `show` has no `slug: Param<_>` argument
+ --> tests/ui/missing_param.rs:4:14
+  |
+4 | #[action(GET "/posts/{slug}")]
+  |              ^^^^^^^^^^^^^^^

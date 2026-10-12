@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/wrong_id.rs:6:16
+  |
+6 |     Post::find(user.id)
+  |     ---------- ^^^^^^^ expected `Id<Post>`, found `Id<User>`
+  |     |
+  |     arguments to this function are incorrect
+  |
+  = note: expected struct `Id<blog::records::Post>`
+             found struct `Id<blog::records::User>`
+note: associated function defined here
+ --> $WORKSPACE/crates/kiln/src/lib.rs
+  |
+  |     fn find(id: Id<Self>) -> Query<Self> {
+  |        ^^^^

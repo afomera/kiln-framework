@@ -1,0 +1,14 @@
+{% set title = post.title %}
+<article>
+  <h1>{{ post.title }}</h1>
+  <p class="meta">{{ by_line }} · {{ post.reading_time }}{% if post.editor %} · edited by {{ post.editor.name }}{% endif %}</p>
+  <p>{{ post.body }}</p>
+</article>
+<section>
+  <h2>Comments</h2>
+  <ul>
+    {% for comment in post.comments %}
+    <li><strong>{{ comment.author.name }}</strong>: {{ comment.body }}</li>
+    {% endfor %}
+  </ul>
+</section>

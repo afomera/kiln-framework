@@ -1,0 +1,21 @@
+error[E0277]: the trait bound `&str: PathArg<i64>` is not satisfied
+  --> tests/ui/path_arg_type.rs:12:24
+   |
+12 |     let _ = show::path("ada");
+   |             ---------- ^^^^^ the trait `PathArg<i64>` is not implemented for `&str`
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the trait `PathArg<i64>` is not implemented for `&str`
+      but trait `PathArg<String>` is implemented for it
+  --> $WORKSPACE/crates/kiln/src/routing.rs
+   |
+   | impl PathArg<String> for &str {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `String`, found `i64`
+note: required by a bound in `path`
+  --> tests/ui/path_arg_type.rs:5:5
+   |
+ 5 |     #[action(GET "/users/{id}")]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `path`
+   = note: this error originates in the attribute macro `action` (in Nightly builds, run with -Z macro-backtrace for more info)

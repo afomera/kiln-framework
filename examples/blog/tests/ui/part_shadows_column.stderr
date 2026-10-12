@@ -1,0 +1,15 @@
+error[E0080]: evaluation panicked: a `#[part]` method has the same name as a column; rename the method
+  --> tests/ui/part_shadows_column.rs:11:1
+   |
+11 | #[part]
+   | ^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `kiln::view::assert_no_overlap`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: $WORKSPACE/crates/kiln/src/view.rs
+   |
+   |                 panic!("a `#[part]` method has the same name as a column; rename the method");
+   |                 ----------------------------------------------------------------------------- in this macro invocation

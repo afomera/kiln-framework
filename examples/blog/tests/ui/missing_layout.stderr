@@ -1,0 +1,5 @@
+error: layout `templates/layouts/admin.html.jinja` does not exist
+ --> tests/ui/missing_layout.rs:5:42
+  |
+5 | #[view(template = "posts/show", layout = "admin")]
+  |                                          ^^^^^^^

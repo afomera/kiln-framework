@@ -1,0 +1,15 @@
+[package]
+name = "blog"
+description = "M0 example app: posts, authors and comments."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+kiln.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true

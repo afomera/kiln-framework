@@ -1,0 +1,27 @@
+error[E0277]: relation `comments<_>` was not preloaded
+ --> tests/ui/n_plus_one.rs:6:28
+  |
+6 |     posts.iter().map(|p| p.comments().len()).collect()
+  |                            ^^^^^^^^ the preloaded relations are `(blog::records::post::author,)`
+  |
+  = help: the trait `HasRel<blog::records::Post, comments<_>, _>` is not implemented for `(blog::records::post::author,)`
+  = note: add `.preload(...)` for this relation to the query, and include it in the `Loaded<..>` type
+  = help: the following other types implement trait `HasRel<T, X, I>`:
+            `(A, B)` implements `HasRel<T, A, I0>`
+            `(A, B)` implements `HasRel<T, B, I1>`
+            `(A, B, C)` implements `HasRel<T, A, I0>`
+            `(A, B, C)` implements `HasRel<T, B, I1>`
+            `(A, B, C)` implements `HasRel<T, C, I2>`
+            `(A, B, C, D)` implements `HasRel<T, A, I0>`
+            `(A, B, C, D)` implements `HasRel<T, B, I1>`
+            `(A, B, C, D)` implements `HasRel<T, C, I2>`
+          and $N others
+  = note: required for `kiln::Loaded<blog::records::Post, (blog::records::post::author,)>` to implement `HasRelation<blog::records::Post, comments<_>, _>`
+note: required by a bound in `blog::records::PostRelations::comments`
+ --> src/records/post.rs
+  |
+  | #[derive(Record, Debug, Clone)]
+  |          ^^^^^^ required by this bound in `PostRelations::comments`
+  | #[record(table = "posts", belongs_to(author: User, editor: User), has_many(comments: Comment), parts)]
+  |                                                                            -------- required by a bound in this associated function
+  = note: this error originates in the derive macro `Record` (in Nightly builds, run with -Z macro-backtrace for more info)

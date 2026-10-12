@@ -1,0 +1,13 @@
+error[E0277]: `Note` opts into parts but has no `#[part] impl Note` block
+ --> tests/ui/flag_without_part.rs:4:10
+  |
+4 | #[derive(Record, Debug, Clone)]
+  |          ^^^^^^ declared with `#[record(.., parts)]`
+  |
+help: the trait `Part` is not implemented for `Note`
+ --> tests/ui/flag_without_part.rs:6:1
+  |
+6 | pub struct Note {
+  | ^^^^^^^^^^^^^^^
+  = note: add `#[part] impl Note { .. }` in `src/parts/`, or remove `parts` from `#[record(..)]`
+  = note: this error originates in the derive macro `Record` (in Nightly builds, run with -Z macro-backtrace for more info)

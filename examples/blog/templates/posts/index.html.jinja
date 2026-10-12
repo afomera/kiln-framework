@@ -1,0 +1,10 @@
+{% set title = "Posts" %}
+<h1>Posts</h1>
+<ul>
+  {% for post in posts %}
+  <li>
+    <a href="{{ path("posts::show", slug=post.slug) }}">{{ post.title }}</a>
+    <div class="meta">{{ post.author.name }} · {{ post.reading_time }} · {{ post.comments | length }} comments</div>
+  </li>
+  {% endfor %}
+</ul>

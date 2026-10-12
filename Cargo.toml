@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/kiln", "crates/kiln-macros", "examples/blog"]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.1"
+license = "MIT OR Apache-2.0"
+rust-version = "1.88"
+
+[workspace.dependencies]
+kiln = { path = "crates/kiln" }
+kiln-macros = { path = "crates/kiln-macros" }
+axum = "0.8"
+inventory = "0.3"
+jiff = "0.2"
+minijinja = { version = "2", features = ["loader"] }
+percent-encoding = "2"
+proc-macro2 = "1"
+quote = "1"
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+syn = { version = "2", features = ["full"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+trybuild = "1"

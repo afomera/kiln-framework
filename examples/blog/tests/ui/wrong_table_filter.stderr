@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/wrong_table_filter.rs:6:26
+  |
+6 |     Post::query().filter(comment::body.eq("hi"))
+  |                   ------ ^^^^^^^^^^^^^^^^^^^^^^ expected `Expr<Post>`, found `Expr<Comment>`
+  |                   |
+  |                   arguments to this method are incorrect
+  |
+  = note: expected struct `Expr<blog::records::Post>`
+             found struct `Expr<Comment>`
+note: method defined here
+ --> $WORKSPACE/crates/kiln/src/query.rs
+  |
+  |     pub fn filter(mut self, expr: Expr<T>) -> Self {
+  |            ^^^^^^

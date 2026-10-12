@@ -1,0 +1,5 @@
+error: part methods take only `&self`, so templates can read them as values: `fn reading_time(&self) -> String`
+  --> tests/ui/part_takes_args.rs:13:9
+   |
+13 |     pub fn excerpt(&self, len: usize) -> String {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
