@@ -1,0 +1,14 @@
+{% set title = "Bookmarks" %}
+<h1>Bookmarks</h1>
+{% if current_user %}
+<p><a href="{{ path("bookmarks::new") }}">New bookmark</a></p>
+{% endif %}
+{% if bookmarks %}
+<ul>
+  {% for bookmark in bookmarks %}
+  <li><a href="{{ path("bookmarks::show", id=bookmark.id) }}">{{ bookmark.title }}</a></li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>No bookmarks yet.</p>
+{% endif %}

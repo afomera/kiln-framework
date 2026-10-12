@@ -96,3 +96,23 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     })
 }
+
+/// Stand-in used when the derive fails, so only the real error is reported.
+pub fn stub(name: &syn::Ident) -> TokenStream {
+    quote! {
+        impl ::kiln::View for #name {
+            const TEMPLATE: &'static str = "";
+            const ROOT: &'static str = "";
+        }
+        impl ::kiln::__private::serde::Serialize for #name {
+            fn serialize<__KilnS: ::kiln::__private::serde::Serializer>(&self, _: __KilnS) -> ::core::result::Result<__KilnS::Ok, __KilnS::Error> {
+                ::core::unreachable!()
+            }
+        }
+        impl ::kiln::__private::IntoResponse for #name {
+            fn into_response(self) -> ::kiln::__private::Response {
+                ::core::unreachable!()
+            }
+        }
+    }
+}

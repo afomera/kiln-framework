@@ -64,6 +64,26 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         }
 
+        impl #name {
+            /// Every variant, e.g. for `<select>` options.
+            pub const ALL: &'static [Self] = &[#( Self::#variants ),*];
+        }
+
+        impl ::kiln::form::FormField for #name {
+            const INPUT: &'static str = "select";
+            const OPTIONS: &'static [&'static str] = &[#( #values ),*];
+
+            fn from_field(__kiln_raw: ::core::option::Option<&str>) -> ::core::result::Result<Self, ::std::string::String> {
+                let __kiln_raw = __kiln_raw.map(str::trim).filter(|__kiln_s| !__kiln_s.is_empty())
+                    .ok_or_else(|| ::std::string::ToString::to_string("can't be blank"))?;
+                __kiln_raw.parse().map_err(|_: ::kiln::Error| ::std::format!("must be one of: {}", #expected))
+            }
+
+            fn to_field(&self) -> ::std::string::String {
+                ::std::string::ToString::to_string(self.as_str())
+            }
+        }
+
         impl ::kiln::SqlType for #name {
             const SQL: &'static str = "TEXT";
             const VARIANTS: &'static [&'static str] = &[#( #values ),*];

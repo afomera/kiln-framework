@@ -109,6 +109,56 @@ impl Timestamp {
     pub fn as_jiff(&self) -> jiff::Timestamp {
         self.0
     }
+
+    /// `Timestamp::now() + SignedDuration::from_hours(2)`, saturating at the representable range.
+    fn shifted(self, by: jiff::SignedDuration) -> Self {
+        Self(self.0.checked_add(by).unwrap_or(if by.is_negative() {
+            jiff::Timestamp::MIN
+        } else {
+            jiff::Timestamp::MAX
+        }))
+    }
+
+    pub fn minutes_from_now(n: i64) -> Self {
+        Self::now().shifted(jiff::SignedDuration::from_mins(n))
+    }
+
+    pub fn hours_from_now(n: i64) -> Self {
+        Self::now().shifted(jiff::SignedDuration::from_hours(n))
+    }
+
+    pub fn days_from_now(n: i64) -> Self {
+        Self::now().shifted(jiff::SignedDuration::from_hours(24 * n))
+    }
+
+    pub fn minutes_ago(n: i64) -> Self {
+        Self::minutes_from_now(-n)
+    }
+
+    pub fn hours_ago(n: i64) -> Self {
+        Self::hours_from_now(-n)
+    }
+
+    pub fn days_ago(n: i64) -> Self {
+        Self::days_from_now(-n)
+    }
+}
+
+/// `ts + kiln::time::SignedDuration::from_mins(30)`
+impl std::ops::Add<jiff::SignedDuration> for Timestamp {
+    type Output = Timestamp;
+
+    fn add(self, by: jiff::SignedDuration) -> Timestamp {
+        self.shifted(by)
+    }
+}
+
+impl std::ops::Sub<jiff::SignedDuration> for Timestamp {
+    type Output = Timestamp;
+
+    fn sub(self, by: jiff::SignedDuration) -> Timestamp {
+        self.shifted(-by)
+    }
 }
 
 impl fmt::Debug for Timestamp {

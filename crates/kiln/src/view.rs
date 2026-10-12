@@ -4,15 +4,18 @@
 //! Missing variables and attributes are errors (strict undefined), never empty strings.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex, OnceLock},
 };
 
-use axum::response::{Html, IntoResponse, Response};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use minijinja::{AutoEscape, Environment, ErrorKind, UndefinedBehavior, Value, context, value::Kwargs};
 use serde::{Serialize, ser::SerializeStruct};
 
-use crate::{Result, routing};
+use crate::{Result, routing, session};
 
 /// Implemented by `#[derive(View)]`.
 pub trait View: Serialize {
@@ -23,9 +26,66 @@ pub trait View: Serialize {
     /// Layout file the page renders inside, e.g. `layouts/app.html.jinja`.
     const LAYOUT: Option<&'static str> = None;
 
+    /// Renders now. Actions don't call this: returning the view lets kiln render it after
+    /// the action, once the `current_*` values its templates use are loaded.
     fn render(&self) -> Result<String> {
-        render(Self::ROOT, Self::TEMPLATE, Self::LAYOUT, self)
+        PendingRender::of(self).render()
     }
+}
+
+/// A view whose data is captured but not yet rendered. Kiln renders it as the last step
+/// of a request, so templates (and layouts) can use request-wide values like
+/// `current_user` that have to be loaded from the database first.
+#[derive(Debug, Clone)]
+pub struct PendingRender {
+    root: &'static str,
+    template: &'static str,
+    layout: Option<&'static str>,
+    context: Value,
+}
+
+impl PendingRender {
+    pub fn of<V: View + ?Sized>(view: &V) -> Self {
+        Self { root: V::ROOT, template: V::TEMPLATE, layout: V::LAYOUT, context: Value::from_serialize(view) }
+    }
+
+    pub fn render(&self) -> Result<String> {
+        render_value(self.root, self.template, self.layout, self.context.clone())
+    }
+
+    /// Variables read by the page, its layout, and everything they include or extend.
+    pub(crate) fn variables(&self) -> Result<HashSet<String>> {
+        let env = environment(self.root);
+        let mut seen = HashSet::new();
+        let mut variables = HashSet::new();
+        collect_variables(&env, self.template, &mut seen, &mut variables)?;
+        if let Some(layout) = self.layout {
+            collect_variables(&env, layout, &mut seen, &mut variables)?;
+        }
+        Ok(variables)
+    }
+}
+
+fn collect_variables(
+    env: &Environment<'static>,
+    name: &str,
+    seen: &mut HashSet<String>,
+    variables: &mut HashSet<String>,
+) -> Result<()> {
+    if !seen.insert(name.to_owned()) {
+        return Ok(());
+    }
+    let template = env.get_template(name)?;
+    variables.extend(template.undeclared_variables(false));
+    let source = template.source().to_owned();
+    for keyword in ["include", "extends", "import", "from"] {
+        for chunk in source.split(&format!("{keyword} \"")).skip(1) {
+            if let Some(other) = chunk.split('"').next() {
+                collect_variables(env, other, seen, variables)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Renders `template`, then, when a layout is given, renders the layout with the same
@@ -36,17 +96,26 @@ pub fn render<S: Serialize + ?Sized>(
     layout: Option<&str>,
     context: &S,
 ) -> Result<String> {
+    render_value(root, template, layout, Value::from_serialize(context))
+}
+
+fn render_value(root: &'static str, template: &str, layout: Option<&str>, context: Value) -> Result<String> {
     let env = environment(root);
     let page = env.get_template(template)?;
+    // Request-wide values (`flash`, `current_*`); the view's own fields win on a name clash.
+    let scope = session::current_scope();
+    let mut globals: BTreeMap<String, Value> = scope.as_ref().map(|s| s.cache.template_values()).unwrap_or_default();
+    globals.insert("flash".to_owned(), Value::from_serialize(scope.map(|s| s.flash.0).unwrap_or_default()));
+    let context = context! { ..context, ..Value::from(globals) };
     let Some(layout) = layout else {
-        return Ok(page.render(context)?);
+        return Ok(page.render(&context)?);
     };
-    let captured = page.render_captured(context)?;
+    let captured = page.render_captured(&context)?;
     let state = captured.state();
     let mut exports: BTreeMap<String, Value> =
         state.exports().into_iter().filter_map(|name| Some((name.to_owned(), state.lookup(name)?))).collect();
     exports.insert("content".to_owned(), Value::from_safe_string(captured.output().to_owned()));
-    let layout_context = context! { ..Value::from(exports), ..Value::from_serialize(context) };
+    let layout_context = context! { ..Value::from(exports), ..context };
     Ok(env.get_template(layout)?.render(layout_context)?)
 }
 
@@ -102,12 +171,12 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
+/// The response for a view: rendered by kiln after the action (see [`PendingRender`]).
 #[doc(hidden)]
 pub fn respond<V: View>(view: &V) -> Response {
-    match view.render() {
-        Ok(html) => Html(html).into_response(),
-        Err(e) => e.into_response(),
-    }
+    let mut response = StatusCode::OK.into_response();
+    response.extensions_mut().insert(PendingRender::of(view));
+    response
 }
 
 fn environment(root: &'static str) -> Arc<Environment<'static>> {
@@ -128,7 +197,42 @@ fn build_environment(root: &'static str) -> Environment<'static> {
     env.set_lstrip_blocks(true);
     env.set_auto_escape_callback(|name| if name.contains(".html") { AutoEscape::Html } else { AutoEscape::None });
     env.add_function("path", path);
+    env.add_function("csrf_field", csrf_field);
+    env.add_function("csrf_token", csrf_token);
+    env.add_filter("datetime", datetime);
+    env.add_function("form_start", forms::form_start);
+    env.add_function("form_end", forms::form_end);
+    env.add_function("fields", forms::fields);
+    env.add_function("field", forms::field);
     env
+}
+
+/// `{{ csrf_token() }}`: the session's CSRF token, for `X-CSRF-Token` headers in JS.
+fn csrf_token() -> std::result::Result<String, minijinja::Error> {
+    session::current_scope().map(|scope| scope.session.csrf_token()).ok_or_else(|| {
+        minijinja::Error::new(
+            ErrorKind::InvalidOperation,
+            "csrf_token() needs a request; render the view from an action",
+        )
+    })
+}
+
+/// `{{ post.published_at | datetime }}` → `Oct 20, 2026 18:00 UTC`. Takes an optional
+/// strftime format: `{{ starts_at | datetime("%Y-%m-%d") }}`. Missing values render empty.
+fn datetime(value: Value, format: Option<String>) -> std::result::Result<String, minijinja::Error> {
+    if value.is_none() || value.is_undefined() {
+        return Ok(String::new());
+    }
+    let ts: jiff::Timestamp = value.to_string().parse().map_err(|e| {
+        minijinja::Error::new(ErrorKind::InvalidOperation, format!("datetime: `{value}` isn't a timestamp ({e})"))
+    })?;
+    Ok(ts.strftime(format.as_deref().unwrap_or("%b %-d, %Y %H:%M UTC")).to_string())
+}
+
+/// `{{ csrf_field() }}`: the hidden input every POST form needs.
+fn csrf_field() -> std::result::Result<Value, minijinja::Error> {
+    let token = csrf_token()?;
+    Ok(Value::from_safe_string(format!("<input type=\"hidden\" name=\"_csrf\" value=\"{token}\">")))
 }
 
 /// `{{ path("posts::show", slug=post.slug) }}`: builds a URL from a registered route.
@@ -155,4 +259,249 @@ fn path(name: String, kwargs: Kwargs) -> std::result::Result<minijinja::Value, m
     kwargs.assert_all_used()?;
     // Segments are percent-encoded above, so the URL is safe to emit unescaped.
     Ok(minijinja::Value::from_safe_string(url))
+}
+
+/// Form helpers. Markup comes from the form's `#[derive(Form)]` metadata, so inputs carry
+/// the same constraints as the validation rules. Apps restyle every field by adding
+/// `templates/kiln/field.html.jinja`, which receives `field`, `label`, `input`, `hint`
+/// and `placeholder`.
+mod forms {
+    use std::fmt::Write as _;
+
+    use minijinja::{Error, ErrorKind, State, Value, context, value::Kwargs};
+
+    use super::csrf_token;
+
+    fn esc(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&#x27;"),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// `{{ form_start(path("posts::update", slug=post.slug), method="patch") }}`: the
+    /// `<form>` tag, its CSRF token, and the `_method` override for PATCH/PUT/DELETE.
+    pub fn form_start(action: String, kwargs: Kwargs) -> Result<Value, Error> {
+        let method: Option<String> = kwargs.get("method")?;
+        let class: Option<String> = kwargs.get("class")?;
+        kwargs.assert_all_used()?;
+        let method = method.unwrap_or_else(|| "post".into()).to_ascii_lowercase();
+        let class = class.map(|c| format!(" class=\"{}\"", esc(&c))).unwrap_or_default();
+        if method == "get" {
+            return Ok(Value::from_safe_string(format!("<form method=\"get\" action=\"{}\"{class}>", esc(&action))));
+        }
+        if !matches!(method.as_str(), "post" | "patch" | "put" | "delete") {
+            return Err(Error::new(ErrorKind::InvalidOperation, format!("form_start: unknown method `{method}`")));
+        }
+        let mut html = format!(
+            "<form method=\"post\" action=\"{}\"{class}>\n<input type=\"hidden\" name=\"_csrf\" value=\"{}\">",
+            esc(&action),
+            esc(&csrf_token()?)
+        );
+        if method != "post" {
+            let _ =
+                write!(html, "\n<input type=\"hidden\" name=\"_method\" value=\"{}\">", method.to_ascii_uppercase());
+        }
+        Ok(Value::from_safe_string(html))
+    }
+
+    pub fn form_end() -> Value {
+        Value::from_safe_string("</form>".into())
+    }
+
+    /// `{{ fields(form) }}`: form-wide errors, then every field in declaration order.
+    pub fn fields(state: &State, form: Value) -> Result<Value, Error> {
+        let names = form.get_attr("_fields")?;
+        if names.is_undefined() {
+            return Err(Error::new(ErrorKind::InvalidOperation, "fields() takes a form, e.g. `fields(form)`"));
+        }
+        let mut html = String::new();
+        let base: Vec<String> = form.get_attr("_errors")?.try_iter()?.map(|e| e.to_string()).collect();
+        if !base.is_empty() {
+            html.push_str("<div class=\"form-errors\" role=\"alert\">");
+            for message in base {
+                let _ = write!(html, "<p>{}</p>", esc(&message));
+            }
+            html.push_str("</div>\n");
+        }
+        for name in names.try_iter()? {
+            let field = form.get_attr(&name.to_string())?;
+            html.push_str(&render(state, &field, Overrides::default())?);
+            html.push('\n');
+        }
+        Ok(Value::from_safe_string(html))
+    }
+
+    /// `{{ field(form.title, label="Headline", hint="Shown on the home page") }}`.
+    /// Also `as="textarea"` and `placeholder="..."`.
+    pub fn field(state: &State, field: Value, kwargs: Kwargs) -> Result<Value, Error> {
+        let overrides = Overrides {
+            label: kwargs.get("label")?,
+            input: kwargs.get("as")?,
+            hint: kwargs.get("hint")?,
+            placeholder: kwargs.get("placeholder")?,
+        };
+        kwargs.assert_all_used()?;
+        if field.get_attr("input")?.is_undefined() {
+            return Err(Error::new(
+                ErrorKind::InvalidOperation,
+                "field() takes a form field, e.g. `field(form.title)`",
+            ));
+        }
+        Ok(Value::from_safe_string(render(state, &field, overrides)?))
+    }
+
+    #[derive(Default)]
+    struct Overrides {
+        label: Option<String>,
+        input: Option<String>,
+        hint: Option<String>,
+        placeholder: Option<String>,
+    }
+
+    fn text(field: &Value, key: &str) -> Result<String, Error> {
+        let value = field.get_attr(key)?;
+        Ok(if value.is_none() || value.is_undefined() { String::new() } else { value.to_string() })
+    }
+
+    /// `200.0` → `200`.
+    fn number(value: &Value) -> Option<String> {
+        if value.is_none() || value.is_undefined() {
+            return None;
+        }
+        let n = f64::try_from(value.clone()).ok()?;
+        Some(if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() })
+    }
+
+    fn render(state: &State, field: &Value, o: Overrides) -> Result<String, Error> {
+        let name = text(field, "name")?;
+        let label = o.label.unwrap_or(text(field, "label")?);
+        let input = o.input.unwrap_or(text(field, "input")?);
+        let spec_text = |key: &str| text(field, key).map(|t| Some(t).filter(|t| !t.is_empty()));
+        // Times are read as UTC (see `FormField for Timestamp`), so say so.
+        let default_hint = (input == "datetime-local").then(|| "Time in UTC.".to_owned());
+        let o = Overrides {
+            label: None,
+            input: None,
+            hint: o.hint.or(spec_text("hint")?).or(default_hint),
+            placeholder: o.placeholder.or(spec_text("placeholder")?),
+        };
+
+        // An app-wide field template replaces the built-in markup.
+        if let Ok(custom) = state.env().get_template("kiln/field.html.jinja") {
+            return custom.render(context! {
+                field => field, label => label, input => input, hint => o.hint, placeholder => o.placeholder,
+            });
+        }
+
+        let value = text(field, "value")?;
+        let errors: Vec<String> = field.get_attr("errors")?.try_iter()?.map(|e| e.to_string()).collect();
+        let required = field.get_attr("required")?.is_true();
+        let id = esc(&name);
+        let mut attrs = format!("id=\"{id}\" name=\"{id}\"");
+        if required {
+            attrs.push_str(" required");
+        }
+        if !errors.is_empty() {
+            let _ = write!(attrs, " aria-invalid=\"true\" aria-describedby=\"{id}-error\"");
+        }
+        if let Some(placeholder) = &o.placeholder {
+            let _ = write!(attrs, " placeholder=\"{}\"", esc(placeholder));
+        }
+        let lengths = |attrs: &mut String| -> Result<(), Error> {
+            if let Some(min) = number(&field.get_attr("min_length")?).filter(|m| m != "1" && m != "0") {
+                let _ = write!(attrs, " minlength=\"{min}\"");
+            }
+            if let Some(max) = number(&field.get_attr("max_length")?) {
+                let _ = write!(attrs, " maxlength=\"{max}\"");
+            }
+            Ok(())
+        };
+        let range = |attrs: &mut String| -> Result<(), Error> {
+            if let Some(min) = number(&field.get_attr("min")?) {
+                let _ = write!(attrs, " min=\"{min}\"");
+            }
+            if let Some(max) = number(&field.get_attr("max")?) {
+                let _ = write!(attrs, " max=\"{max}\"");
+            }
+            Ok(())
+        };
+
+        let mut html = format!("<div class=\"field{}\">\n", if errors.is_empty() { "" } else { " field-with-errors" });
+        match input.as_str() {
+            "checkbox" => {
+                let checked = if value == "true" { " checked" } else { "" };
+                let _ = writeln!(
+                    html,
+                    "  <label><input type=\"checkbox\" id=\"{id}\" name=\"{id}\" value=\"true\"{checked}> {}</label>",
+                    esc(&label)
+                );
+            }
+            "textarea" => {
+                lengths(&mut attrs)?;
+                let _ = write!(
+                    html,
+                    "  <label for=\"{id}\">{}</label>\n  <textarea {attrs} rows=\"6\">{}</textarea>\n",
+                    esc(&label),
+                    esc(&value)
+                );
+            }
+            "select" => {
+                let _ = write!(html, "  <label for=\"{id}\">{}</label>\n  <select {attrs}>\n", esc(&label));
+                if !required || value.is_empty() {
+                    html.push_str("    <option value=\"\">Choose…</option>\n");
+                }
+                for option in field.get_attr("options")?.try_iter()? {
+                    let option = option.to_string();
+                    let selected = if option == value { " selected" } else { "" };
+                    let shown = option.replace('_', " ");
+                    let shown = shown
+                        .chars()
+                        .next()
+                        .map(|c| c.to_uppercase().chain(shown.chars().skip(1)).collect::<String>())
+                        .unwrap_or_default();
+                    let _ = writeln!(html, "    <option value=\"{}\"{selected}>{}</option>", esc(&option), esc(&shown));
+                }
+                html.push_str("  </select>\n");
+            }
+            other => {
+                let kind = match other {
+                    "decimal" => {
+                        attrs.push_str(" step=\"any\"");
+                        "number"
+                    }
+                    other => other,
+                };
+                if matches!(kind, "number") {
+                    range(&mut attrs)?;
+                } else {
+                    lengths(&mut attrs)?;
+                }
+                let _ = write!(
+                    html,
+                    "  <label for=\"{id}\">{}</label>\n  <input type=\"{}\" {attrs} value=\"{}\">\n",
+                    esc(&label),
+                    esc(kind),
+                    esc(&value)
+                );
+            }
+        }
+        if let Some(hint) = &o.hint {
+            let _ = writeln!(html, "  <p class=\"field-hint\">{}</p>", esc(hint));
+        }
+        for (i, message) in errors.iter().enumerate() {
+            let id_attr = if i == 0 { format!(" id=\"{id}-error\"") } else { String::new() };
+            let _ = writeln!(html, "  <p class=\"field-error\"{id_attr}>{} {}</p>", esc(&label), esc(message));
+        }
+        html.push_str("</div>");
+        Ok(html)
+    }
 }

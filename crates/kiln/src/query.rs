@@ -229,6 +229,22 @@ impl<T: Record, R> Query<T, R> {
     pub async fn exists(self, db: &Db) -> Result<bool> {
         Ok(self.limit(1).count(db).await? > 0)
     }
+
+    /// Deletes every matching row and returns how many. Order and limit are ignored.
+    pub async fn delete_all(self, db: &Db) -> Result<u64> {
+        let mut sql = format!("DELETE FROM \"{}\"", T::TABLE);
+        let mut binds = Vec::new();
+        if !self.filters.is_empty() {
+            let clauses: Vec<String> = self.filters.iter().map(|f| format!("({})", f.sql)).collect();
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+            for f in self.filters {
+                binds.extend(f.binds);
+            }
+        }
+        sql.push_str(" RETURNING \"id\"");
+        Ok(db.fetch_all(&sql, binds).await?.len() as u64)
+    }
 }
 
 impl<T: Record, R: RelSet<T>> Query<T, R> {
@@ -321,5 +337,25 @@ impl<T: Record> Update<T> {
         binds.push(self.id.to_value());
         let rows = db.fetch_all(&sql, binds).await?;
         Ok(T::from_row(rows.first().ok_or(Error::NotFound)?)?)
+    }
+}
+
+pub struct Delete<T> {
+    id: Id<T>,
+}
+
+impl<T: Record> Delete<T> {
+    pub(crate) fn new(id: Id<T>) -> Self {
+        Self { id }
+    }
+
+    /// Deletes the row. A missing row is `Error::MissingRecord` (404).
+    pub async fn run(self, db: &Db) -> Result<()> {
+        let sql = format!("DELETE FROM \"{}\" WHERE \"id\" = ? RETURNING \"id\"", T::TABLE);
+        let rows = db.fetch_all(&sql, vec![self.id.to_value()]).await?;
+        if rows.is_empty() {
+            return Err(Error::MissingRecord { table: T::TABLE });
+        }
+        Ok(())
     }
 }

@@ -6,29 +6,45 @@
 extern crate self as kiln;
 
 mod app;
+mod cli;
 mod db;
 mod error;
 mod error_page;
+pub mod form;
+mod migrate;
+pub mod policy;
 mod query;
+mod redirect;
 pub mod rel;
 mod routing;
 mod schema;
+pub mod session;
 pub mod testing;
 mod types;
 pub mod view;
 
 pub use app::{App, Ctx};
-pub use axum::response::Redirect;
+pub use axum::Json;
+pub use cli::Cli;
 pub use db::Db;
 pub use error::{Error, Result};
-pub use query::{Column, Expr, Insert, Order, Query, Update};
+pub use migrate::{
+    ColumnSnapshot, Diff, Migration, RecordDef, Snapshot, TableSnapshot, diff, load_migrations, records,
+    write_migration,
+};
+pub use query::{Column, Delete, Expr, Insert, Order, Query, Update};
+pub use redirect::Redirect;
 pub use rel::{Append, BoxFuture, HasRel, HasRelation, Loaded, RelSet, Relation};
 pub use routing::{Param, PathArg, RouteDef, routes, routes_table};
 pub use schema::{ColumnSchema, TableSchema};
+pub use session::{Current, Flash, SecretKey, Session};
 pub use types::{FromColumn, Id, SqlType, Timestamp, ToValue, Value};
 pub use view::{Part, PartsEnabled, View};
 
-pub use kiln_macros::{DbEnum, Record, View, action, part};
+/// Dates and times (the `jiff` crate), e.g. `kiln::time::SignedDuration`.
+pub use jiff as time;
+
+pub use kiln_macros::{DbEnum, Form, Record, View, action, part, test};
 
 use sqlx::sqlite::SqliteRow;
 
@@ -65,11 +81,21 @@ pub trait Record: Sized + Clone + Send + Sync + serde::Serialize + 'static {
     fn update(id: Id<Self>) -> Update<Self> {
         Update::new(id)
     }
+
+    fn delete(id: Id<Self>) -> Delete<Self> {
+        Delete::new(id)
+    }
 }
 
 pub mod prelude {
+    pub use kiln_macros::Form;
+
     pub use crate::{
-        App, Ctx, Db, DbEnum, Error, Id, Loaded, Param, Query, Record, Redirect, Result, Timestamp, View, action, part,
+        App, Ctx, Current, Db, DbEnum, Error, Id, Json, Loaded, Param, Query, Record, Redirect, Result, Session,
+        Timestamp, View, action,
+        form::{Form, FormState, OrRender, Valid},
+        part,
+        policy::{Allows, Authorize, Authorized},
     };
 }
 
@@ -81,6 +107,7 @@ pub mod __private {
     pub use serde;
     pub use sqlx;
     pub use sqlx::sqlite::SqliteRow;
+    pub use tokio;
 
     pub use crate::routing::RawParams;
     pub use crate::view::assert_no_overlap;

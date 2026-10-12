@@ -2,12 +2,12 @@ use kiln::prelude::*;
 
 use crate::records::*;
 
-/// Creates the tables and some sample content.
-pub async fn seed(db: &Db) -> Result {
-    db.create_table::<User>().await?;
-    db.create_table::<Post>().await?;
-    db.create_table::<Comment>().await?;
-
+/// Sample content for development. Does nothing if there are already users.
+pub async fn seed(db: Db) -> Result {
+    let db = &db;
+    if User::query().exists(db).await? {
+        return Ok(());
+    }
     let ada = User::insert(NewUser { name: "Ada Lovelace".into(), email: "ada@example.com".into() }).run(db).await?;
     let grace =
         User::insert(NewUser { name: "Grace Hopper".into(), email: "grace@example.com".into() }).run(db).await?;

@@ -25,11 +25,25 @@ pub struct ErrorReport {
     pub hints: Vec<String>,
     /// Shown as a table of the app's routes (for 404/405 on unknown paths).
     pub show_routes: bool,
+    /// Validation messages by field, for invalid input.
+    pub fields: Option<crate::form::Errors>,
+    /// For sign-in errors: the table of the record type that must be signed in.
+    pub sign_in_for: Option<&'static str>,
 }
 
 impl ErrorReport {
     pub fn new(status: StatusCode, code: &'static str, title: &'static str, message: String) -> Self {
-        Self { status, code, title, message, source: None, hints: vec![], show_routes: false }
+        Self {
+            status,
+            code,
+            title,
+            message,
+            source: None,
+            hints: vec![],
+            show_routes: false,
+            fields: None,
+            sign_in_for: None,
+        }
     }
 
     pub fn hint(&mut self, hint: impl Into<String>) {
@@ -92,16 +106,22 @@ pub(crate) struct RequestInfo<'a> {
     pub action: Option<&'static str>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Format {
+    Html,
+    Markdown,
+    Json,
+}
+
 /// Replaces `response`'s body with the rendered report, keeping status and headers.
-pub(crate) fn render(response: Response, report: &ErrorReport, request: &RequestInfo<'_>, html: bool) -> Response {
+pub(crate) fn render(response: Response, report: &ErrorReport, request: &RequestInfo<'_>, format: Format) -> Response {
     let detailed = cfg!(debug_assertions);
     let markdown = if detailed { markdown(report, request) } else { public_markdown(report) };
-    let (body, content_type) = if !html {
-        (markdown, "text/markdown; charset=utf-8")
-    } else if detailed {
-        (html_page(report, request, &markdown), "text/html; charset=utf-8")
-    } else {
-        (public_html(report), "text/html; charset=utf-8")
+    let (body, content_type) = match format {
+        Format::Json => (json(report, request, detailed), "application/problem+json"),
+        Format::Markdown => (markdown, "text/markdown; charset=utf-8"),
+        Format::Html if detailed => (html_page(report, request, &markdown), "text/html; charset=utf-8"),
+        Format::Html => (public_html(report), "text/html; charset=utf-8"),
     };
     let (mut parts, _) = response.into_parts();
     parts.headers.remove(header::CONTENT_LENGTH);
@@ -152,6 +172,16 @@ pub(crate) fn markdown(report: &ErrorReport, request: &RequestInfo<'_>) -> Strin
         let _ = writeln!(md, "{fence}{}\n{body}{fence}\n", source.lang);
     }
 
+    if let Some(fields) = &report.fields {
+        let _ = writeln!(md, "## Field errors\n");
+        for (field, messages) in fields.iter() {
+            for message in messages {
+                let _ = writeln!(md, "- `{field}` {message}");
+            }
+        }
+        md.push('\n');
+    }
+
     if !report.hints.is_empty() {
         let _ = writeln!(md, "## How to fix\n");
         for hint in &report.hints {
@@ -177,6 +207,31 @@ pub(crate) fn markdown(report: &ErrorReport, request: &RequestInfo<'_>) -> Strin
     }
     md.push_str("_Kiln debug error report. Production responses show only the status._\n");
     md
+}
+
+/// RFC 9457 problem details. Release builds keep the message and field errors for client
+/// errors (clients need them) and drop internals for server errors.
+fn json(report: &ErrorReport, request: &RequestInfo<'_>, detailed: bool) -> String {
+    let mut body = serde_json::json!({
+        "type": format!("https://kiln.dev/errors/{}", report.code),
+        "title": report.title,
+        "status": report.status.as_u16(),
+        "code": report.code,
+    });
+    if detailed || report.status.is_client_error() {
+        body["detail"] = serde_json::Value::from(report.message.clone());
+        if let Some(fields) = &report.fields {
+            body["errors"] = serde_json::to_value(fields).unwrap_or_default();
+        }
+    }
+    if detailed {
+        body["instance"] = serde_json::Value::from(format!("{} {}", request.method, request.path));
+        body["action"] = serde_json::Value::from(request.action);
+        body["hints"] = serde_json::Value::from(report.hints.clone());
+    }
+    let mut text = serde_json::to_string_pretty(&body).expect("problem serializes");
+    text.push('\n');
+    text
 }
 
 fn public_markdown(report: &ErrorReport) -> String {
@@ -222,7 +277,7 @@ fn html_page(report: &ErrorReport, request: &RequestInfo<'_>, markdown: &str) ->
         h,
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <meta name=\"robots\" content=\"noindex\">\
+         <meta name=\"robots\" content=\"noindex\">{FAVICON}\
          <title>{status} {title} · Kiln</title><style>{CSS}</style></head>\
          <body class=\"{severity}\"><div class=\"page\">",
         title = esc(report.title),
@@ -325,7 +380,7 @@ fn public_html(report: &ErrorReport) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>{status} {reason}</title><style>{PUBLIC_CSS}</style></head>\
+         {FAVICON}<title>{status} {reason}</title><style>{PUBLIC_CSS}</style></head>\
          <body><main><p class=\"status\">{status}</p><h1>{reason}</h1></main></body></html>"
     )
 }
@@ -392,6 +447,9 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--rule);
 footer p { margin: 0 0 6px; }
 @media (max-width: 560px) { .page { padding: 20px 16px 48px; } .copy kbd { display: none; } }
 "#;
+
+/// The Kiln mark (`assets/brand/favicon.svg`), so error tabs are recognizable.
+const FAVICON: &str = "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cstyle%3E.s{fill:%23a3401b}@media (prefers-color-scheme:dark){.s{fill:%23f2a35e}}%3C/style%3E%3Cpath class='s' d='M10 7h12v50H10Z'/%3E%3Cpath d='M42 7h14L39 32l17 25H42L27 32Z' fill='%23e8772e'/%3E%3C/svg%3E\">";
 
 const PUBLIC_CSS: &str = r#"
 :root { color-scheme: light dark; }

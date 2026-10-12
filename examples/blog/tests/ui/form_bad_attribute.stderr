@@ -1,0 +1,5 @@
+error: expected `textarea`, `label = ".."`, `hint = ".."` or `placeholder = ".."`
+ --> tests/ui/form_bad_attribute.rs:6:12
+  |
+6 |     #[form(tooltip = "When it starts")]
+  |            ^^^^^^^

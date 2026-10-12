@@ -18,6 +18,8 @@ pub struct RouteDef {
     pub function: &'static str,
     pub file: &'static str,
     pub line: u32,
+    /// `browser` (session, CSRF, HTML errors) or `api` (no session, JSON errors).
+    pub pipeline: &'static str,
     pub mount: fn(axum::Router<Ctx>) -> axum::Router<Ctx>,
 }
 

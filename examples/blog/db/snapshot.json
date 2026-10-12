@@ -1,0 +1,217 @@
+{
+  "tables": {
+    "bookmarks": {
+      "columns": [
+        {
+          "name": "id",
+          "sql_type": "INTEGER",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "name": "title",
+          "sql_type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "url",
+          "sql_type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "notes",
+          "sql_type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "rating",
+          "sql_type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "pinned",
+          "sql_type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "owner_id",
+          "sql_type": "INTEGER",
+          "nullable": false,
+          "indexed": true,
+          "references": "users"
+        },
+        {
+          "name": "created_at",
+          "sql_type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "sql_type": "INTEGER",
+          "nullable": false
+        }
+      ]
+    },
+    "comments": {
+      "columns": [
+        {
+          "name": "id",
+          "sql_type": "INTEGER",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "name": "post_id",
+          "sql_type": "INTEGER",
+          "nullable": false,
+          "indexed": true,
+          "references": "posts"
+        },
+        {
+          "name": "author_id",
+          "sql_type": "INTEGER",
+          "nullable": false,
+          "indexed": true,
+          "references": "users"
+        },
+        {
+          "name": "body",
+          "sql_type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "sql_type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "sql_type": "INTEGER",
+          "nullable": false
+        }
+      ]
+    },
+    "posts": {
+      "columns": [
+        {
+          "name": "id",
+          "sql_type": "INTEGER",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "name": "slug",
+          "sql_type": "TEXT",
+          "nullable": false,
+          "unique": true
+        },
+        {
+          "name": "title",
+          "sql_type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "body",
+          "sql_type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "sql_type": "TEXT",
+          "nullable": false,
+          "variants": [
+            "draft",
+            "published",
+            "archived"
+          ]
+        },
+        {
+          "name": "author_id",
+          "sql_type": "INTEGER",
+          "nullable": false,
+          "indexed": true,
+          "references": "users"
+        },
+        {
+          "name": "editor_id",
+          "sql_type": "INTEGER",
+          "nullable": true,
+          "indexed": true,
+          "references": "users"
+        },
+        {
+          "name": "published_at",
+          "sql_type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "sql_type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "sql_type": "INTEGER",
+          "nullable": false
+        }
+      ]
+    },
+    "subscriptions": {
+      "columns": [
+        {
+          "name": "id",
+          "sql_type": "INTEGER",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "name": "email",
+          "sql_type": "TEXT",
+          "nullable": false,
+          "unique": true
+        },
+        {
+          "name": "created_at",
+          "sql_type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "sql_type": "INTEGER",
+          "nullable": false
+        }
+      ]
+    },
+    "users": {
+      "columns": [
+        {
+          "name": "id",
+          "sql_type": "INTEGER",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "name": "name",
+          "sql_type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "email",
+          "sql_type": "TEXT",
+          "nullable": false,
+          "unique": true
+        },
+        {
+          "name": "created_at",
+          "sql_type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "sql_type": "INTEGER",
+          "nullable": false
+        }
+      ]
+    }
+  }
+}

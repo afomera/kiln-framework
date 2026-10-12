@@ -1,21 +1,25 @@
 use blog::{actions::posts, records::*};
-use kiln::{App, Db, prelude::*, testing::TestClient};
+use std::path::Path;
 
-async fn app() -> App {
-    let db = Db::memory().await.unwrap();
-    blog::seed(&db).await.unwrap();
-    App::new(db)
+use kiln::{prelude::*, testing::TestApp};
+
+/// A test app with the development seed data.
+async fn app() -> TestApp {
+    let migrations = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/db/migrations"));
+    let app = TestApp::configured(migrations, blog::app::configure).await.unwrap();
+    blog::seed(app.db.clone()).await.unwrap();
+    app
 }
 
 #[tokio::test]
 async fn root_redirects_to_posts() {
-    let client = TestClient::new(&app().await);
+    let client = app().await.client();
     client.get("/").await.assert_redirect(&posts::index::path());
 }
 
 #[tokio::test]
 async fn index_lists_published_posts_with_authors() {
-    let client = TestClient::new(&app().await);
+    let client = app().await.client();
     client
         .get(posts::index::path())
         .await
@@ -28,7 +32,7 @@ async fn index_lists_published_posts_with_authors() {
 
 #[tokio::test]
 async fn show_renders_nested_relations() {
-    let client = TestClient::new(&app().await);
+    let client = app().await.client();
     client
         .get(posts::show::path("hello-kiln"))
         .await
@@ -40,7 +44,7 @@ async fn show_renders_nested_relations() {
 
 #[tokio::test]
 async fn unknown_slug_is_404() {
-    let client = TestClient::new(&app().await);
+    let client = app().await.client();
     client.get(posts::show::path("nope")).await.assert_status(404);
 }
 
@@ -52,10 +56,26 @@ fn path_helpers_encode_segments() {
 
 #[test]
 fn routes_are_registered_from_action_files() {
-    let names: Vec<_> = kiln::routes().iter().map(|r| (r.method, r.path, r.name())).collect();
+    let names: Vec<_> = kiln::routes()
+        .iter()
+        .map(|r| (r.method, r.path, r.name()))
+        .filter(|(_, _, name)| ["home", "posts", "sessions"].iter().any(|p| name.starts_with(p)))
+        .collect();
     assert_eq!(
         names,
-        [("GET", "/", "home::index"), ("GET", "/posts", "posts::index"), ("GET", "/posts/{slug}", "posts::show")]
+        [
+            ("GET", "/", "home::index"),
+            ("GET", "/posts", "posts::index"),
+            ("POST", "/posts", "posts::create"),
+            ("GET", "/posts/new", "posts::new"),
+            ("DELETE", "/posts/{slug}", "posts::destroy"),
+            ("GET", "/posts/{slug}", "posts::show"),
+            ("PATCH", "/posts/{slug}", "posts::update"),
+            ("GET", "/posts/{slug}/edit", "posts::edit"),
+            ("DELETE", "/session", "sessions::destroy"),
+            ("POST", "/session", "sessions::create"),
+            ("GET", "/session/new", "sessions::new"),
+        ]
     );
 }
 
@@ -63,7 +83,7 @@ fn routes_are_registered_from_action_files() {
 #[tokio::test]
 async fn preloading_is_one_query_per_relation() {
     let app = app().await;
-    let db = &app.ctx().db;
+    let db = &app.db;
 
     let before = db.query_count();
     let posts =
@@ -80,7 +100,7 @@ async fn preloading_is_one_query_per_relation() {
 #[tokio::test]
 async fn plain_queries_return_plain_records() {
     let app = app().await;
-    let db = &app.ctx().db;
+    let db = &app.db;
     let post: Post = Post::find_by(post::slug.eq("hello-kiln")).one_or_404(db).await.unwrap();
     let author: User = User::find(post.author_id).one_or_404(db).await.unwrap();
     assert_eq!(author.name, "Ada Lovelace");
@@ -90,7 +110,7 @@ async fn plain_queries_return_plain_records() {
 #[tokio::test]
 async fn update_sets_columns_and_touches_updated_at() {
     let app = app().await;
-    let db = &app.ctx().db;
+    let db = &app.db;
     let draft = Post::find_by(post::slug.eq("draft-post")).one_or_404(db).await.unwrap();
     let published = Post::update(draft.id)
         .set(post::status, PostStatus::Published)
@@ -109,26 +129,26 @@ fn schema_comes_from_the_struct() {
     assert!(sql.contains(r#""status" TEXT NOT NULL CHECK ("status" IN ('draft', 'published', 'archived'))"#), "{sql}");
     assert!(sql.contains(r#""author_id" INTEGER NOT NULL REFERENCES "users" ("id")"#), "{sql}");
     assert!(sql.contains(r#""published_at" INTEGER,"#), "{sql}");
-    assert!(sql.contains(r#"CREATE UNIQUE INDEX IF NOT EXISTS "idx_posts_slug""#), "{sql}");
+    assert!(sql.contains(r#"CREATE UNIQUE INDEX "idx_posts_slug""#), "{sql}");
 }
 
 #[tokio::test]
 async fn pages_render_inside_the_default_layout() {
-    let client = TestClient::new(&app().await);
+    let client = app().await.client();
     client
         .get(posts::show::path("hello-kiln"))
         .await
         .assert_status(200)
         // `{% set title = post.title %}` in the page reaches the layout
         .assert_contains("<title>Hello, Kiln · Kiln blog</title>")
-        .assert_contains(r#"<header><a href="/posts">Kiln blog</a></header>"#)
+        .assert_contains(r#"<a href="/posts">Kiln blog</a>"#)
         // page HTML is inserted unescaped
         .assert_contains("<main><article>");
 }
 
 #[tokio::test]
 async fn optional_relation_renders_when_present() {
-    let client = TestClient::new(&app().await);
+    let client = app().await.client();
     client.get(posts::show::path("typed-paths")).await.assert_contains("edited by Ada Lovelace");
     client.get(posts::show::path("hello-kiln")).await.assert_not_contains("edited by");
 }
@@ -136,7 +156,7 @@ async fn optional_relation_renders_when_present() {
 #[tokio::test]
 async fn optional_relation_loads_some_and_none() {
     let app = app().await;
-    let db = &app.ctx().db;
+    let db = &app.db;
     let posts = Post::query().preload(post::editor).all(db).await.unwrap();
     let editors: Vec<(&str, Option<&str>)> =
         posts.iter().map(|p| (p.slug.as_str(), p.editor().as_ref().map(|u| u.name.as_str()))).collect();
@@ -149,7 +169,7 @@ async fn optional_relation_loads_some_and_none() {
 #[tokio::test]
 async fn optional_relation_skips_the_query_when_every_key_is_empty() {
     let app = app().await;
-    let db = &app.ctx().db;
+    let db = &app.db;
     let before = db.query_count();
     let posts = Post::query().filter(post::editor_id.is_null()).preload(post::editor).all(db).await.unwrap();
     assert_eq!(posts.len(), 3);
@@ -177,7 +197,7 @@ fn parts_are_plain_methods_too() {
 
 #[tokio::test]
 async fn agents_get_error_reports_as_markdown() {
-    let client = TestClient::new(&app().await);
+    let client = app().await.client();
     let res = client.get("/nowhere").await;
     res.assert_status(404)
         .assert_contains("# 404 Not Found · No route (K1001)")
@@ -188,7 +208,7 @@ async fn agents_get_error_reports_as_markdown() {
 
 #[tokio::test]
 async fn browsers_get_an_html_error_page_with_a_copy_button() {
-    let client = TestClient::new(&app().await);
+    let client = app().await.client();
     let res = client.get_html(posts::show::path("nope")).await;
     res.assert_status(404)
         .assert_contains("<span class=\"status\">404</span>")
@@ -202,10 +222,10 @@ async fn browsers_get_an_html_error_page_with_a_copy_button() {
 
 #[tokio::test]
 async fn wrong_method_is_405_with_a_report() {
-    let client = TestClient::new(&app().await);
+    let client = app().await.client();
     client
-        .request(kiln::__private::axum::http::Method::POST, "/posts", None)
+        .request(kiln::__private::axum::http::Method::PUT, "/posts", None)
         .await
         .assert_status(405)
-        .assert_contains("`/posts` exists, but not for `POST`.");
+        .assert_contains("`/posts` exists, but not for `PUT`.");
 }

@@ -6,8 +6,10 @@ use syn::{DeriveInput, parse_macro_input};
 
 mod action;
 mod db_enum;
+mod form;
 mod part;
 mod record;
+mod test;
 mod util;
 mod view;
 
@@ -33,13 +35,42 @@ pub fn derive_record(input: TokenStream) -> TokenStream {
 /// `content` (the rendered page), and any top-level `{% set %}` from the page, such as `title`.
 #[proc_macro_derive(View, attributes(view))]
 pub fn derive_view(input: TokenStream) -> TokenStream {
-    view::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident.clone();
+    view::expand(input).unwrap_or_else(|e| with_stub(e, view::stub(&name))).into()
 }
 
 /// Derives storage for a unit-only enum as snake_case text with a CHECK constraint.
 #[proc_macro_derive(DbEnum)]
 pub fn derive_db_enum(input: TokenStream) -> TokenStream {
     db_enum::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Derives `kiln::form::FormInput`: parsing and validation of submitted forms.
+///
+/// Field rules: `#[validate(length(min = 1, max = 200))]`, `range(min = 0, max = 10)`,
+/// `email`, `required` (for `Option` fields). Optional fields are `Option<T>`; checkboxes
+/// are `bool`. Rendering: `#[form(textarea)]`, `#[form(label = "Starts")]`,
+/// `#[form(hint = "Shown under the input")]`, `#[form(placeholder = "..")]`.
+#[proc_macro_derive(Form, attributes(validate, form))]
+pub fn derive_form(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident.clone();
+    form::expand(input).unwrap_or_else(|e| with_stub(e, form::stub(&name))).into()
+}
+
+/// The error, plus a stand-in impl so the compiler reports only the real mistake and not
+/// a cascade of "trait not implemented" errors from code that uses the type.
+fn with_stub(error: syn::Error, stub: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    let error = error.into_compile_error();
+    quote::quote! { #error #stub }
+}
+
+/// A test against a fresh in-memory app with the crate's migrations applied:
+/// `#[kiln::test] async fn creates_post(app: TestApp) -> kiln::Result { .. }`.
+#[proc_macro_attribute]
+pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
+    test::expand(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// Exposes a record's presentation methods to templates: `#[part] impl Post { .. }` in

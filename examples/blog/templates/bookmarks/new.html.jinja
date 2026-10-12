@@ -1,0 +1,7 @@
+{% set title = "New bookmark" %}
+<h1>New bookmark</h1>
+{{ form_start(path("bookmarks::create")) }}
+  {{ fields(form) }}
+  <button>Create bookmark</button>
+{{ form_end() }}
+<p><a href="{{ path("bookmarks::index") }}">Cancel</a></p>

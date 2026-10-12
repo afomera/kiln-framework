@@ -1,0 +1,7 @@
+{% set title = "Edit bookmark" %}
+<h1>Edit bookmark</h1>
+{{ form_start(path("bookmarks::update", id=bookmark.id), method="patch") }}
+  {{ fields(form) }}
+  <button>Save bookmark</button>
+{{ form_end() }}
+<p><a href="{{ path("bookmarks::show", id=bookmark.id) }}">Cancel</a></p>

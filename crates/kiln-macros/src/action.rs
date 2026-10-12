@@ -10,6 +10,7 @@ const METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 struct Args {
     method: Ident,
     path: LitStr,
+    pipeline: String,
 }
 
 impl Parse for Args {
@@ -19,10 +20,23 @@ impl Parse for Args {
             return Err(Error::new_spanned(&method, format!("expected an HTTP method: {}", METHODS.join(", "))));
         }
         let path: LitStr = input.parse()?;
-        if !input.is_empty() {
-            return Err(input.error("unexpected tokens; options like `pipeline = ..` arrive in M1"));
+        let mut pipeline = "browser".to_owned();
+        while !input.is_empty() {
+            input.parse::<syn::Token![,]>()?;
+            if input.is_empty() {
+                break;
+            }
+            let key: Ident = input.parse()?;
+            input.parse::<syn::Token![=]>()?;
+            let value: Ident = input.parse()?;
+            match (key.to_string().as_str(), value.to_string().as_str()) {
+                ("pipeline", "Browser") => pipeline = "browser".into(),
+                ("pipeline", "Api") => pipeline = "api".into(),
+                ("pipeline", _) => return Err(Error::new_spanned(value, "expected `Browser` (the default) or `Api`")),
+                _ => return Err(Error::new_spanned(key, "unknown option; expected `pipeline = Browser | Api`")),
+            }
         }
-        Ok(Self { method, path })
+        Ok(Self { method, path, pipeline })
     }
 }
 
@@ -72,7 +86,7 @@ fn param_inner(ty: &Type) -> Option<&Type> {
 }
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
-    let Args { method, path } = syn::parse2(attr)?;
+    let Args { method, path, pipeline } = syn::parse2(attr)?;
     let func: ItemFn = syn::parse2(item)?;
     let fn_name = &func.sig.ident;
     if func.sig.asyncness.is_none() {
@@ -184,6 +198,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                 function: #fn_name_str,
                 file: ::core::file!(),
                 line: ::core::line!(),
+                pipeline: #pipeline,
                 mount: __kiln_mount,
             }
         }

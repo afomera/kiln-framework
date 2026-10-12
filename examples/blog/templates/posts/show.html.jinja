@@ -1,8 +1,14 @@
 {% set title = post.title %}
 <article>
-  <h1>{{ post.title }}</h1>
+  <h1>{{ post.title }}{% if post.is_draft %} <small>(draft)</small>{% endif %}</h1>
   <p class="meta">{{ by_line }} · {{ post.reading_time }}{% if post.editor %} · edited by {{ post.editor.name }}{% endif %}</p>
   <p>{{ post.body }}</p>
+  {% if can_edit %}
+  <p>
+    <a href="{{ path("posts::edit", slug=post.slug) }}">Edit</a>
+    {{ form_start(path("posts::destroy", slug=post.slug), method="delete", class="inline") }}<button>Delete</button>{{ form_end() }}
+  </p>
+  {% endif %}
 </article>
 <section>
   <h2>Comments</h2>

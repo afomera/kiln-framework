@@ -322,6 +322,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
 
         #parts_enabled
+
+        ::kiln::__private::inventory::submit! {
+            ::kiln::RecordDef { name: #name_str, table: #table, schema: <#name as ::kiln::Record>::schema }
+        }
     })
 }
 

@@ -1,0 +1,15 @@
+{% set title = bookmark.title %}
+<h1>{{ title }}</h1>
+<dl>
+  <dt>Url</dt><dd>{{ bookmark.url }}</dd>
+  <dt>Notes</dt><dd>{{ bookmark.notes if bookmark.notes is not none else "—" }}</dd>
+  <dt>Rating</dt><dd>{{ bookmark.rating if bookmark.rating is not none else "—" }}</dd>
+  <dt>Pinned</dt><dd>{{ "Yes" if bookmark.pinned else "No" }}</dd>
+</dl>
+{% if can_edit %}
+<p>
+  <a href="{{ path("bookmarks::edit", id=bookmark.id) }}">Edit</a>
+  {{ form_start(path("bookmarks::destroy", id=bookmark.id), method="delete", class="inline") }}<button>Delete</button>{{ form_end() }}
+</p>
+{% endif %}
+<p><a href="{{ path("bookmarks::index") }}">All bookmarks</a></p>

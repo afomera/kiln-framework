@@ -1,0 +1,14 @@
+[package]
+name = "@@app@@"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+kiln = { path = "@@kiln_path@@" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tracing-subscriber = "0.3"
+
+# A standalone app, even when created inside another Cargo workspace.
+[workspace]

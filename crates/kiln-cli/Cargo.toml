@@ -1,0 +1,18 @@
+[package]
+name = "kiln-cli"
+description = "The kiln command: generators, schema workflow and convention checks."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kiln"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+proc-macro2 = { workspace = true, features = ["span-locations"] }
+quote.workspace = true
+serde_json.workspace = true
+syn.workspace = true

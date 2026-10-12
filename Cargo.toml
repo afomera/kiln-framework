@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/kiln", "crates/kiln-macros", "examples/blog"]
+members = ["crates/kiln", "crates/kiln-cli", "crates/kiln-macros", "examples/blog"]
 
 [workspace.package]
 edition = "2024"
@@ -22,8 +22,15 @@ serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 syn = { version = "2", features = ["full"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 trybuild = "1"
+serde_json = "1"
+serde_urlencoded = "0.7"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+clap = { version = "4", features = ["derive"] }

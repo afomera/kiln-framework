@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cstyle%3E.s{fill:%23a3401b}@media (prefers-color-scheme:dark){.s{fill:%23f2a35e}}%3C/style%3E%3Cpath class='s' d='M10 7h12v50H10Z'/%3E%3Cpath d='M42 7h14L39 32l17 25H42L27 32Z' fill='%23e8772e'/%3E%3C/svg%3E">
+  <title>{% if title is defined %}{{ title }} · {% endif %}@@App@@</title>
+  <style>
+    body { font: 16px/1.6 system-ui, sans-serif; max-width: 44rem; margin: 2.5rem auto; padding: 0 1rem; color: #1b1e22; }
+    a { color: #a3401b; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
+    nav { display: flex; gap: 1rem; align-items: center; }
+    form.inline { display: inline; }
+    .flash { padding: .5rem .75rem; border-radius: 6px; background: #eef6ee; }
+    .flash.alert { background: #fdf0e6; }
+    .field { margin: 0 0 1rem; }
+    .field label { display: block; font-weight: 600; }
+    .field-hint { color: #5a6370; font-size: .9rem; margin: .25rem 0 0; }
+    .field-error, .form-errors { color: #a3401b; font-size: .9rem; margin: .25rem 0 0; }
+    input:not([type=checkbox]), textarea, select { width: 100%; font: inherit; padding: .4rem; box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="{{ path("home::index") }}">@@App@@</a>
+    <nav>
+      {% if current_user %}
+      <span>{{ current_user.name }}</span>
+      {{ form_start(path("sessions::destroy"), method="delete", class="inline") }}<button>Sign out</button>{{ form_end() }}
+      {% else %}
+      <a href="{{ path("sessions::new") }}">Sign in</a>
+      {% endif %}
+    </nav>
+  </header>
+  {% for kind, message in flash | items %}
+  <p class="flash {{ kind }}">{{ message }}</p>
+  {% endfor %}
+  <main>{{ content }}</main>
+</body>
+</html>

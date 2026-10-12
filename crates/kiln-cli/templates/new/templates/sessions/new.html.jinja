@@ -1,0 +1,7 @@
+{% set title = "Sign in" %}
+<h1>Sign in</h1>
+<p>Demo sign-in by email (try <code>ada@example.com</code> or <code>grace@example.com</code> after <code>kiln db seed</code>).</p>
+{{ form_start(path("sessions::create")) }}
+  {{ field(form.email) }}
+  <button>Sign in</button>
+{{ form_end() }}
