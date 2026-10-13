@@ -49,6 +49,7 @@ const RICH_TEXT_JS: &str = include_str!("../assets/rich-text.js");
 const RICH_TEXT_CSS: &str = include_str!("../assets/rich-text.css");
 const RICH_TEXT_DISPLAY_JS: &str = include_str!("../assets/rich-text-display.js");
 const CONFIRM_JS: &str = include_str!("../assets/confirm.js");
+const DIRECT_UPLOAD_JS: &str = include_str!("../assets/direct-upload.js");
 const DEV_RELOAD_JS: &str = include_str!("../assets/dev-reload.js");
 
 /// A file Kiln serves at `/kiln/<name>-<hash>.<ext>`, built once.
@@ -82,6 +83,11 @@ fn lexxy_js() -> &'static Served {
 fn rich_text_display_js() -> &'static Served {
     static SERVED: OnceLock<Served> = OnceLock::new();
     SERVED.get_or_init(|| Served::new("rich-text-display", "js", RICH_TEXT_DISPLAY_JS.to_owned()))
+}
+
+fn direct_upload_js() -> &'static Served {
+    static SERVED: OnceLock<Served> = OnceLock::new();
+    SERVED.get_or_init(|| Served::new("direct-upload", "js", DIRECT_UPLOAD_JS.to_owned()))
 }
 
 fn confirm_js() -> &'static Served {
@@ -205,6 +211,8 @@ impl Assets {
             ("@hotwired/turbo".to_owned(), turbo_url().to_owned()),
             // Loaded only by pages with an editor (`{{ field(..) }}` on a `RichText`).
             ("lexxy".to_owned(), lexxy_js().url.clone()),
+            // Lexxy uploads attachments through Active Storage's `DirectUpload`; Kiln's own.
+            ("@rails/activestorage".to_owned(), direct_upload_js().url.clone()),
             ("kiln/confirm".to_owned(), confirm_js().url.clone()),
             ("kiln/dev-reload".to_owned(), dev_reload_js().url.clone()),
             ("kiln/rich-text".to_owned(), rich_text_js().url.clone()),
@@ -265,6 +273,7 @@ pub(crate) fn serve_kiln(request_path: &str) -> Option<Response> {
         (rich_text_js(), "rich-text.js"),
         (rich_text_display_js(), "rich-text-display.js"),
         (confirm_js(), "confirm.js"),
+        (direct_upload_js(), "direct-upload.js"),
         (dev_reload_js(), "dev-reload.js"),
         (rich_text_css(), "rich-text.css"),
     ]

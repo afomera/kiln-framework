@@ -42,6 +42,7 @@ ammonia = "4"
 object_store = { version = "0.14", default-features = false, features = ["aws", "gcp", "fs"] }
 multer = "3"
 bytes = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 # Debug builds keep file:line backtraces but not full debuginfo, and none for
 # dependencies: most of target/ was debuginfo object files.
@@ -53,4 +54,29 @@ debug = false
 
 # Password hashing is slow without optimizations.
 [profile.dev.package.argon2]
+opt-level = 3
+
+# Image variants resize in-process; unoptimized, a large image takes seconds.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.fdeflate]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.zune-core]
+opt-level = 3
+
+[profile.dev.package.image-webp]
+opt-level = 3
+
+[profile.dev.package.gif]
+opt-level = 3
+
+[profile.dev.package.weezl]
 opt-level = 3

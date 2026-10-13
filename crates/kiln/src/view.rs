@@ -244,9 +244,14 @@ fn build_environment(root: &'static str) -> Environment<'static> {
         if clean.is_empty() {
             return Value::from_safe_string(String::new());
         }
-        if state.lookup("__kiln_mail").is_some_and(|v| v.is_true()) {
+        let mail = state.lookup("__kiln_mail").is_some_and(|v| v.is_true());
+        // Attachments show only with links Kiln signed; mail needs them absolute.
+        let html = crate::rich_text::render_attachments(clean.as_html(), &|url| {
+            crate::storage::verified_file_link(url).map(|url| if mail { crate::mail::absolute_url(&url) } else { url })
+        });
+        if mail {
             // Email: no stylesheet or script to load; the mail layout styles the content.
-            return Value::from_safe_string(format!("<div class=\"kiln-rich-text-content\">{}</div>", clean.as_html()));
+            return Value::from_safe_string(format!("<div class=\"kiln-rich-text-content\">{html}</div>"));
         }
         // Code blocks are highlighted in the browser, so only pages with one load the script.
         let highlight = if clean.contains("<pre") {
@@ -257,8 +262,32 @@ fn build_environment(root: &'static str) -> Environment<'static> {
         Value::from_safe_string(format!(
             "<link rel=\"stylesheet\" href=\"{}\"><div class=\"lexxy-content kiln-rich-text-content\">{}</div>{highlight}",
             crate::assets::rich_text_css_url(),
-            clean.as_html()
+            html
         ))
+    });
+    // `{{ post.cover | variant(width=400) }}`, `variant(width=200, height=200, crop=true)`:
+    // a resized copy's URL (made on first request, then kept).
+    env.add_filter("variant", |file: Value, kwargs: Kwargs| -> std::result::Result<Value, minijinja::Error> {
+        let width: Option<u32> = kwargs.get("width")?;
+        let height: Option<u32> = kwargs.get("height")?;
+        let crop: Option<bool> = kwargs.get("crop")?;
+        kwargs.assert_all_used()?;
+        if file.is_none() || file.is_undefined() {
+            return Ok(Value::from(""));
+        }
+        let url = file.get_attr("url")?.as_str().map(str::to_owned).unwrap_or_default();
+        let variant = crate::storage::Variant {
+            width: width.unwrap_or(0),
+            height: height.unwrap_or(0),
+            crop: crop.unwrap_or(false),
+        };
+        let resized = crate::storage::variant_for_url(&url, variant).ok_or_else(|| {
+            minijinja::Error::new(
+                ErrorKind::InvalidOperation,
+                "variant() takes a stored file, e.g. `post.cover | variant(width=400)`",
+            )
+        })?;
+        Ok(Value::from_safe_string(resized))
     });
     // `{{ post.body | plain_text }}`: rich text as words, for excerpts and mail.
     env.add_filter("plain_text", |html: String| crate::RichText::new(&html).to_plain_text());
@@ -655,7 +684,7 @@ mod forms {
                 // `name`; Kiln's module configures it and the stylesheet skins it.
                 let _ = write!(
                     html,
-                    "  <label for=\"{id}\">{}</label>\n  <link rel=\"stylesheet\" href=\"{}\">\n  <lexxy-editor {attrs} class=\"kiln-rich-text lexxy-content\" value=\"{}\"></lexxy-editor>\n  <script type=\"module\">import \"kiln/rich-text\"</script>\n",
+                    "  <label for=\"{id}\">{}</label>\n  <link rel=\"stylesheet\" href=\"{}\">\n  <lexxy-editor {attrs} class=\"kiln-rich-text lexxy-content\" data-direct-upload-url=\"/kiln/uploads\" data-blob-url-template=\"/kiln/files/:signed_id/:filename\" value=\"{}\"></lexxy-editor>\n  <script type=\"module\">import \"kiln/rich-text\"</script>\n",
                     esc(&label),
                     crate::assets::rich_text_css_url(),
                     esc(&value)

@@ -878,7 +878,7 @@ impl Resource {
                     (Kind::Timestamp, _) => format!("{{{{ @@name@@.{} | datetime }}}}", f.column()),
                     (Kind::RichText, _) => format!("{{{{ @@name@@.{} | rich_text }}}}", f.column()),
                     (Kind::Image, _) => format!(
-                        "{{% if @@name@@.{c} %}}<img src=\"{{{{ @@name@@.{c}.url }}}}\" alt=\"\" width=\"320\">{{% else %}}—{{% endif %}}",
+                        "{{% if @@name@@.{c} %}}<img src=\"{{{{ @@name@@.{c} | variant(width=640) }}}}\" alt=\"\">{{% else %}}—{{% endif %}}",
                         c = f.column()
                     ),
                     (Kind::File, _) => format!(

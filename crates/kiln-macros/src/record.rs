@@ -213,6 +213,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 references: #references,
                 variants: <#ty as ::kiln::SqlType>::VARIANTS,
                 attachment: <#ty as ::kiln::SqlType>::ATTACHMENT,
+                rich_text: <#ty as ::kiln::SqlType>::RICH_TEXT,
             }
         }
     });

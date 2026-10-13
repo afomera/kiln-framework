@@ -58,6 +58,14 @@ impl Upload {
         Self::new(filename, "image/png", PIXEL)
     }
 
+    /// A `width` × `height` PNG (a gradient), for testing image variants.
+    pub fn png_sized(filename: &str, width: u32, height: u32) -> Self {
+        let img = image::RgbImage::from_fn(width, height, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128]));
+        let mut bytes = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).expect("PNG encodes");
+        Self::new(filename, "image/png", bytes)
+    }
+
     /// A text file.
     pub fn text(filename: &str, contents: &str) -> Self {
         Self::new(filename, "text/plain", contents.as_bytes())
@@ -531,6 +539,7 @@ impl TestClient {
             status,
             headers,
             text: String::from_utf8_lossy(&bytes).into_owned(),
+            bytes: bytes.to_vec(),
             flash,
             key: self.key.clone(),
         }
@@ -553,6 +562,8 @@ pub struct TestResponse {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub text: String,
+    /// The body as sent (images, downloads).
+    pub bytes: Vec<u8>,
     /// Flash set by this response (for the next page), e.g. `notice`.
     pub flash: BTreeMap<String, String>,
     key: SecretKey,

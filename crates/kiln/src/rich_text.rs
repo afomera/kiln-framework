@@ -16,7 +16,11 @@
 //! skin in `assets/rich-text.{js,css}`. Whatever arrives in a form, from the editor or
 //! straight from a client, is sanitized against an allowlist of exactly what the editor
 //! produces before it becomes a `RichText`: a value of this type is always safe to render.
-//! Attachments are off until Kiln has file storage.
+//!
+//! Attachments (images and files dropped into the editor) upload to `/kiln/uploads` and are
+//! stored as `<kiln-attachment url=.. filename=.. ..>` elements pointing at signed
+//! `/kiln/files/..` links; `| rich_text` turns them into figures, dropping any whose link
+//! isn't one Kiln signed.
 
 use std::{fmt, ops::Deref, sync::OnceLock};
 
@@ -147,6 +151,7 @@ impl FromColumn for RichText {
 
 impl SqlType for RichText {
     const SQL: &'static str = String::SQL;
+    const RICH_TEXT: bool = true;
 }
 
 fn plain_text(html: &str) -> String {
@@ -209,6 +214,8 @@ fn sanitizer() -> &'static ammonia::Builder<'static> {
             "tr",
             "th",
             "td",
+            "div",
+            "kiln-attachment",
         ]
         .into();
         let mut attributes: HashMap<&str, HashSet<&str>> = HashMap::new();
@@ -219,9 +226,42 @@ fn sanitizer() -> &'static ammonia::Builder<'static> {
         attributes.insert("mark", ["style"].into());
         attributes.insert("th", ["colspan", "rowspan"].into());
         attributes.insert("td", ["colspan", "rowspan"].into());
+        attributes.insert(
+            "kiln-attachment",
+            [
+                "sgid",
+                "url",
+                "content-type",
+                "filename",
+                "filesize",
+                "width",
+                "height",
+                "caption",
+                "alt",
+                "presentation",
+                "previewable",
+            ]
+            .into(),
+        );
         let mut classes: HashMap<&str, HashSet<&str>> = HashMap::new();
         classes.insert("figure", ["lexxy-content__table-wrapper"].into());
         classes.insert("th", ["lexxy-content__table-cell--header"].into());
+        classes.insert(
+            "div",
+            [
+                "attachment-gallery",
+                "attachment-gallery--1",
+                "attachment-gallery--2",
+                "attachment-gallery--3",
+                "attachment-gallery--4",
+                "attachment-gallery--5",
+                "attachment-gallery--6",
+                "attachment-gallery--7",
+                "attachment-gallery--8",
+                "attachment-gallery--9",
+            ]
+            .into(),
+        );
 
         let mut builder = ammonia::Builder::default();
         builder
@@ -235,10 +275,100 @@ fn sanitizer() -> &'static ammonia::Builder<'static> {
             .attribute_filter(|element, attribute, value| match (element, attribute) {
                 // The editor's highlight palette only, never arbitrary CSS.
                 ("mark", "style") => highlight_only(value).then(|| value.into()),
+                // Attachments only ever point at Kiln's own file links.
+                ("kiln-attachment", "url") => value.starts_with(crate::storage::FILES_PATH).then(|| value.into()),
+                ("kiln-attachment", "width" | "height" | "filesize") => {
+                    value.chars().all(|c| c.is_ascii_digit()).then(|| value.into())
+                }
                 _ => Some(value.into()),
             });
         builder
     })
+}
+
+/// Turns stored `<kiln-attachment>` elements into the figures Lexxy's content styles expect.
+/// `link` maps an attachment's stored `url` to the one to show, or `None` to drop it (a
+/// link Kiln didn't sign). The input is sanitized HTML, so attribute values are escaped.
+pub(crate) fn render_attachments(html: &str, link: &dyn Fn(&str) -> Option<String>) -> String {
+    const OPEN: &str = "<kiln-attachment";
+    const CLOSE: &str = "</kiln-attachment>";
+    if !html.contains(OPEN) {
+        return html.to_owned();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let tag = &rest[start..];
+        let Some(tag_end) = tag.find('>') else { break };
+        let attrs = parse_attributes(&tag[OPEN.len()..tag_end]);
+        let after = &tag[tag_end + 1..];
+        let consumed = after.find(CLOSE).map_or(0, |i| i + CLOSE.len());
+        rest = &after[consumed..];
+        let get = |name: &str| attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str()).unwrap_or("");
+        let Some(url) = link(&decode_entities(get("url"))) else { continue };
+        let url = crate::view::escape_attribute(&url);
+        let content_type = get("content-type");
+        let filename = get("filename");
+        let ext = filename.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+        let ext: String = ext.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
+        let caption = get("caption");
+        if content_type.starts_with("image/") && content_type != "image/svg+xml" {
+            let size: String = ["width", "height"]
+                .iter()
+                .filter(|a| !get(a).is_empty())
+                .map(|a| format!(" {a}=\"{}\"", get(a)))
+                .collect();
+            out.push_str(&format!(
+                "<figure class=\"attachment attachment--preview attachment--{ext}\"><a href=\"{url}\"><img src=\"{url}\" alt=\"{}\"{size} loading=\"lazy\"></a>",
+                get("alt")
+            ));
+            if !caption.is_empty() {
+                out.push_str(&format!("<figcaption class=\"attachment__caption\">{caption}</figcaption>"));
+            }
+            out.push_str("</figure>");
+        } else {
+            let size = get("filesize").parse::<u64>().map(human_size).unwrap_or_default();
+            out.push_str(&format!(
+                "<figure class=\"attachment attachment--file attachment--{ext}\"><span class=\"attachment__icon\">{ext}</span>\
+                 <figcaption class=\"attachment__caption\"><a class=\"attachment__name\" href=\"{url}\">{}</a><span class=\"attachment__size\">{size}</span></figcaption></figure>",
+                if caption.is_empty() { filename } else { caption }
+            ));
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `name="value"` pairs from a sanitized tag (values stay escaped).
+fn parse_attributes(text: &str) -> Vec<(String, String)> {
+    let mut attrs = vec![];
+    let mut rest = text.trim();
+    while !rest.is_empty() {
+        let name_end = rest.find(|c: char| c == '=' || c.is_whitespace()).unwrap_or(rest.len());
+        let name = rest[..name_end].to_ascii_lowercase();
+        rest = rest[name_end..].trim_start();
+        if let Some(value) = rest.strip_prefix("=\"") {
+            let end = value.find('"').unwrap_or(value.len());
+            attrs.push((name, value[..end].to_owned()));
+            rest = value.get(end + 1..).unwrap_or("").trim_start();
+        } else {
+            attrs.push((name, String::new()));
+        }
+    }
+    attrs
+}
+
+fn decode_entities(text: &str) -> String {
+    text.replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+}
+
+fn human_size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1024 * 1024 => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+        b if b >= 1024 => format!("{} KB", b / 1024),
+        b => format!("{b} bytes"),
+    }
 }
 
 /// `color: var(--highlight-3); background-color: var(--highlight-bg-1)`.
@@ -267,12 +397,26 @@ mod tests {
     fn hostile_input_is_cleaned() {
         let dirty = r#"<p onclick="x()">hi<script>alert(1)</script><img src=x onerror=alert(1)><a href="javascript:alert(1)">j</a><mark style="background:url(x)">m</mark></p><iframe src="https://evil"></iframe><kiln-attachment url="javascript:alert(1)"></kiln-attachment><p style="position:fixed">s</p>"#;
         let clean = RichText::new(dirty);
-        for bad in
-            ["onclick", "script", "onerror", "javascript:", "iframe", "url(x)", "position", "kiln-attachment", "<img"]
-        {
+        for bad in ["onclick", "script", "onerror", "javascript:", "iframe", "url(x)", "position", "<img"] {
             assert!(!clean.contains(bad), "{bad} survived: {}", clean.as_html());
         }
         assert!(clean.contains("hi"));
+    }
+
+    #[test]
+    fn attachments_keep_only_kiln_links_and_render_as_figures() {
+        let stored = RichText::new(
+            r#"<p>Look:</p><kiln-attachment sgid="t" url="/kiln/files/abc/sun.png" content-type="image/png" filename="sun.png" filesize="12" width="40" height="30" caption="The sun" presentation="gallery" onload="x()"></kiln-attachment><kiln-attachment url="https://evil.test/x.png" content-type="image/png"></kiln-attachment><kiln-attachment url="/kiln/files/def/notes.pdf" content-type="application/pdf" filename="notes.pdf" filesize="2048"></kiln-attachment>"#,
+        );
+        assert!(!stored.contains("onload") && !stored.contains("evil.test"), "{}", stored.as_html());
+        let shown = render_attachments(stored.as_html(), &|url| {
+            url.contains("/abc/").then(|| url.to_owned()).or_else(|| url.contains("/def/").then(|| url.to_owned()))
+        });
+        assert!(shown.contains(r#"<figure class="attachment attachment--preview attachment--png"><a href="/kiln/files/abc/sun.png"><img src="/kiln/files/abc/sun.png" alt="" width="40" height="30" loading="lazy"></a><figcaption class="attachment__caption">The sun</figcaption></figure>"#), "{shown}");
+        assert!(shown.contains(r#"<a class="attachment__name" href="/kiln/files/def/notes.pdf">notes.pdf</a><span class="attachment__size">2 KB</span>"#), "{shown}");
+        assert!(!shown.contains("kiln-attachment"), "the unsigned one is dropped: {shown}");
+        let none = render_attachments(stored.as_html(), &|_| None);
+        assert_eq!(none, "<p>Look:</p>");
     }
 
     #[test]

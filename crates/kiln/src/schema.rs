@@ -17,4 +17,6 @@ pub struct ColumnSchema {
     pub variants: &'static [&'static str],
     /// An `Attachment` column (its files are kept while a row holds them).
     pub attachment: bool,
+    /// A `RichText` column (its attachments' files are kept while it links them).
+    pub rich_text: bool,
 }

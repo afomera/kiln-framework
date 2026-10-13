@@ -10,8 +10,8 @@ configure({
     attachmentContentTypeNamespace: "kiln",
   },
   default: {
-    // Off until Kiln has file storage; the server strips attachments regardless.
-    attachments: false,
+    // Images and files dropped or pasted in upload to /kiln/uploads (see `data-direct-upload-url`).
+    attachments: true,
     // Lexxy offers h2-h4; posts often want a top-level heading too.
     headings: ["h1", "h2", "h3", "h4"],
   },

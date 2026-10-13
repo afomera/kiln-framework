@@ -42,16 +42,25 @@ async fn an_author_uploads_a_cover_and_readers_see_it(app: TestApp) -> Result {
     assert_eq!((cover.filename(), cover.content_type()), ("sunset.png", "image/png"));
     assert_eq!(app.ctx().storage()?.read(&cover).await?.len(), Upload::png("x").bytes.len());
 
-    // Anyone with the link gets the image, shown inline; links can't be forged.
+    // Pages show a resized copy; links can't be forged.
     let page = app.get_html(posts::show::path("with-a-cover")).await;
     let src = img_src(&page.text);
-    assert!(src.starts_with("/kiln/files/") && src.ends_with("/sunset.png"), "{src}");
-    let image = app.get(&src).await;
+    assert!(src.starts_with("/kiln/variants/") && src.ends_with("/sunset.png"), "{src}");
+    app.get(&src).await.assert_status(200);
+    app.get(src.replacen("/kiln/variants/", "/kiln/variants/x", 1)).await.assert_status(404);
+
+    // Anyone with the original's link gets it, shown inline (the edit form links it).
+    let edit = client.get_html(posts::edit::path("with-a-cover")).await;
+    let marker = "class=\"field-file\"><img src=\"";
+    let start = edit.text.find(marker).expect("the edit form shows the cover") + marker.len();
+    let original = edit.text[start..start + edit.text[start..].find('"').unwrap()].replace("&#x2f;", "/");
+    assert!(original.starts_with("/kiln/files/"), "{original}");
+    let image = app.get(&original).await;
     image.assert_status(200);
     assert_eq!(image.headers["content-type"], "image/png");
     assert_eq!(image.headers["x-content-type-options"], "nosniff");
     assert!(image.headers["content-disposition"].to_str().unwrap().starts_with("inline"));
-    app.get(src.replacen("/kiln/files/", "/kiln/files/x", 1)).await.assert_status(404);
+    app.get(original.replacen("/kiln/files/", "/kiln/files/x", 1)).await.assert_status(404);
     Ok(())
 }
 
@@ -171,6 +180,10 @@ fn hidden(html: &str, name: &str) -> String {
 
 #[kiln::test]
 async fn database_errors_from_pending_migrations_offer_to_run_them(app: TestApp) -> Result {
+    // The app's migrations are SQLite's; Postgres test runs build the schema from the records.
+    if app.db.dialect().name() != "sqlite" {
+        return Ok(());
+    }
     let post = app.create::<Post>().await?;
     // As if the cover migration hadn't run yet.
     app.db.execute_script("ALTER TABLE \"posts\" DROP COLUMN \"cover\"").await?;
@@ -185,5 +198,82 @@ async fn database_errors_from_pending_migrations_offer_to_run_them(app: TestApp)
     let back = posts::show::path(&post.slug);
     app.client().post_form("/kiln/resolve/migrate", &[("_kiln", &token), ("back", &back)]).await.assert_status(303);
     app.get_html(back).await.assert_status(200).assert_contains(&post.title);
+    Ok(())
+}
+
+#[kiln::test]
+async fn the_editor_uploads_attachments_that_posts_show(app: TestApp) -> Result {
+    let author = app.create::<User>().await?;
+    let client = app.sign_in_as(&author);
+    client
+        .get_html(posts::new::path())
+        .await
+        .assert_contains(r#"data-direct-upload-url="/kiln/uploads""#)
+        .assert_contains(r#""@rails/activestorage":"/kiln/direct-upload-"#);
+
+    // What Lexxy's upload does: the file, plus the page's CSRF token.
+    let upload = client.post_multipart("/kiln/uploads", &[], &[("file", Upload::png("sun.png"))]).await;
+    upload.assert_status(200);
+    let blob = upload.json();
+    assert_eq!((blob["filename"].as_str(), blob["content_type"].as_str()), (Some("sun.png"), Some("image/png")));
+    let url = blob["url"].as_str().expect("url").to_owned();
+
+    // What the editor then submits.
+    let body = format!(
+        r#"<p>Look:</p><kiln-attachment sgid="{sgid}" url="{url}" content-type="image/png" filename="sun.png" filesize="70" width="1" height="1" caption="The sun" presentation="gallery"></kiln-attachment><kiln-attachment url="/kiln/files/forged.x/evil.png" content-type="image/png"></kiln-attachment>"#,
+        sgid = blob["attachable_sgid"].as_str().unwrap()
+    );
+    client
+        .post_form(posts::create::path(), &[("title", "Sunny"), ("body", &body), ("publish", "true")])
+        .await
+        .assert_status(303);
+    let page = app.get_html(posts::show::path("sunny")).await;
+    page.assert_contains(r#"<figure class="attachment attachment--preview attachment--png">"#)
+        .assert_contains(&format!(r#"<img src="{url}""#))
+        .assert_contains("The sun")
+        .assert_not_contains("evil.png");
+    app.get(&url).await.assert_status(200);
+
+    // Files that rich text links are kept.
+    app.travel(SignedDuration::from_hours(72));
+    assert_eq!(kiln::storage::purge_unattached(app.ctx(), SignedDuration::from_hours(48)).await?, 0);
+    app.get(&url).await.assert_status(200);
+    Ok(())
+}
+
+#[kiln::test]
+async fn uploads_need_the_pages_csrf_token(app: TestApp) -> Result {
+    // A client with no page loaded has no session token to send.
+    let response = app.client().post_json("/kiln/uploads", &kiln::testing::json!({})).await;
+    response.assert_status(403);
+    Ok(())
+}
+
+/// Width and height from a PNG's header.
+fn png_size(bytes: &[u8]) -> (u32, u32) {
+    let be = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+    (be(16), be(20))
+}
+
+#[kiln::test]
+async fn covers_are_resized_once_and_never_enlarged(app: TestApp) -> Result {
+    let author = app.create::<User>().await?;
+    let client = app.sign_in_as(&author);
+    client
+        .post_multipart(
+            posts::create::path(),
+            &[("title", "Big cover"), ("body", "<p>x</p>"), ("publish", "true")],
+            &[("cover", Upload::png_sized("big.png", 2400, 1200))],
+        )
+        .await
+        .assert_status(303);
+    let src = img_src(&app.get_html(posts::show::path("big-cover")).await.text);
+    let resized = app.get(&src).await;
+    resized.assert_status(200);
+    assert_eq!(resized.headers["content-type"], "image/png");
+    let body = resized.bytes.clone();
+    assert_eq!(png_size(&body), (1200, 600), "fits the 1200px width, keeping the ratio");
+    // Served from storage the second time: same bytes.
+    assert_eq!(app.get(&src).await.bytes, body);
     Ok(())
 }

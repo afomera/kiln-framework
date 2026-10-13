@@ -21,5 +21,30 @@ debug = false
 [profile.dev.package.argon2]
 opt-level = 3
 
+# Image variants resize in-process; unoptimized, a large image takes seconds.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.fdeflate]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.zune-core]
+opt-level = 3
+
+[profile.dev.package.image-webp]
+opt-level = 3
+
+[profile.dev.package.gif]
+opt-level = 3
+
+[profile.dev.package.weezl]
+opt-level = 3
+
 # A standalone app, even when created inside another Cargo workspace.
 [workspace]

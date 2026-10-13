@@ -333,6 +333,8 @@ pub trait SqlType {
     const VARIANTS: &'static [&'static str] = &[];
     /// Holds a stored file (`Attachment`).
     const ATTACHMENT: bool = false;
+    /// Rich text, which can link stored files.
+    const RICH_TEXT: bool = false;
 }
 
 impl SqlType for String {
@@ -368,4 +370,5 @@ impl<T: SqlType> SqlType for Option<T> {
     const NULLABLE: bool = true;
     const VARIANTS: &'static [&'static str] = T::VARIANTS;
     const ATTACHMENT: bool = T::ATTACHMENT;
+    const RICH_TEXT: bool = T::RICH_TEXT;
 }

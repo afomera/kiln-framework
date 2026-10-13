@@ -2,7 +2,7 @@
 <article>
   <h1>{{ post.title }}{% if post.is_draft %} <small>(draft)</small>{% endif %}</h1>
   <p class="meta">{{ by_line }} · {{ post.reading_time }}{% if post.editor %} · edited by {{ post.editor.name }}{% endif %}</p>
-  {% if post.cover %}<img class="cover" src="{{ post.cover.url }}" alt="">{% endif %}
+  {% if post.cover %}<img class="cover" src="{{ post.cover | variant(width=1200) }}" alt="">{% endif %}
   {{ post.body | rich_text }}
   {% if can_edit %}
   <p>

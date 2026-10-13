@@ -117,6 +117,24 @@ impl Storage {
         }
     }
 
+    /// Deletes everything under `prefix` (an image's variants).
+    async fn delete_prefix(&self, prefix: &str) -> Result<()> {
+        use futures_util::StreamExt;
+        let prefix = StorePath::from(prefix);
+        let mut listing = self.store.list(Some(&prefix));
+        let mut paths = vec![];
+        while let Some(meta) = listing.next().await {
+            paths.push(meta.map_err(storage_error)?.location);
+        }
+        for path in paths {
+            match self.store.delete(&path).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(storage_error(e)),
+            }
+        }
+        Ok(())
+    }
+
     async fn signed_url(&self, key: &str) -> Option<String> {
         let signer = self.signer.as_ref()?;
         let url = signer
@@ -328,7 +346,14 @@ impl Attachment {
 
     /// `/kiln/files/<signed id>/<filename>`.
     pub fn url(&self) -> String {
-        let token = signing_key().map(|key| key.sign_str(&format!("file:{}", self.blob_id))).unwrap_or_default();
+        match signing_key() {
+            Some(key) => self.url_signed(&key),
+            None => String::new(),
+        }
+    }
+
+    fn url_signed(&self, key: &SecretKey) -> String {
+        let token = key.sign_str(&format!("file:{}", self.blob_id));
         let name = percent_encoding::utf8_percent_encode(&self.filename, FILENAME);
         format!("{FILES_PATH}{token}/{name}")
     }
@@ -353,6 +378,15 @@ impl Attachment {
             content_type: d.content_type,
             byte_size: d.byte_size,
         })
+    }
+
+    /// A resized copy of an image, made the first time it's requested and kept:
+    /// `cover.variant(Variant::fit(400, 400))` (a URL). Non-images serve the original.
+    pub fn variant(&self, variant: Variant) -> String {
+        match signing_key() {
+            Some(key) => variant_url(&key, self.blob_id, &self.filename, variant),
+            None => String::new(),
+        }
     }
 
     /// The token a form carries to keep this file across a re-render or an edit.
@@ -424,6 +458,146 @@ impl crate::form::rules::RuleTarget for Option<Attachment> {
 }
 
 // ---------------------------------------------------------------------------------------
+// Variants
+
+/// A size to show an image at. Sizes are in pixels; images are never enlarged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Variant {
+    pub width: u32,
+    pub height: u32,
+    /// Fill the box exactly, cropping the overflow (`true`), or fit inside it (`false`).
+    pub crop: bool,
+}
+
+impl Variant {
+    /// Fits inside `width` × `height`, keeping the aspect ratio. `0` leaves a side free.
+    pub fn fit(width: u32, height: u32) -> Self {
+        Self { width, height, crop: false }
+    }
+
+    /// Exactly `width` × `height`, cropped from the center.
+    pub fn fill(width: u32, height: u32) -> Self {
+        Self { width, height, crop: true }
+    }
+
+    fn spec(&self) -> String {
+        format!("{}x{}{}", self.width, self.height, if self.crop { "c" } else { "" })
+    }
+
+    fn parse(spec: &str) -> Option<Self> {
+        let (crop, spec) = match spec.strip_suffix('c') {
+            Some(rest) => (true, rest),
+            None => (false, spec),
+        };
+        let (w, h) = spec.split_once('x')?;
+        let variant = Self { width: w.parse().ok()?, height: h.parse().ok()?, crop };
+        (variant.width <= MAX_SIDE && variant.height <= MAX_SIDE && (variant.width > 0 || variant.height > 0))
+            .then_some(variant)
+    }
+}
+
+/// The largest variant side, so links can't ask for huge images.
+const MAX_SIDE: u32 = 4096;
+
+pub(crate) const VARIANTS_PATH: &str = "/kiln/variants/";
+
+fn variant_url(key: &SecretKey, blob: i64, filename: &str, variant: Variant) -> String {
+    let token = key.sign_str(&format!("variant:{blob}:{}", variant.spec()));
+    let name = percent_encoding::utf8_percent_encode(filename, FILENAME);
+    format!("{VARIANTS_PATH}{token}/{name}")
+}
+
+/// The `variant` template filter's side of [`Attachment::variant`], from the file's `url`.
+pub(crate) fn variant_for_url(url: &str, variant: Variant) -> Option<String> {
+    let key = signing_key()?;
+    let (token, name) = url.strip_prefix(FILES_PATH)?.split_once('/')?;
+    let blob: i64 = key.verify_str(token)?.strip_prefix("file:")?.parse().ok()?;
+    let token = key.sign_str(&format!("variant:{blob}:{}", variant.spec()));
+    Some(format!("{VARIANTS_PATH}{token}/{name}"))
+}
+
+/// `GET /kiln/variants/<token>/<filename>`.
+pub(crate) async fn serve_variant(ctx: &Ctx, key: &SecretKey, path: &str) -> Option<Response> {
+    let token = path.strip_prefix(VARIANTS_PATH)?.split('/').next().unwrap_or_default();
+    let parsed = key.verify_str(token).and_then(|v| {
+        let (blob, spec) = v.strip_prefix("variant:")?.split_once(':')?;
+        Some((blob.parse::<i64>().ok()?, Variant::parse(spec)?))
+    });
+    let Some((id, variant)) = parsed else { return Some(StatusCode::NOT_FOUND.into_response()) };
+    Some(match make_variant(ctx, key, id, variant).await {
+        Ok(response) => response,
+        Err(Error::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!(target: "kiln::storage", error = %e, blob = id, "making an image variant failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    })
+}
+
+async fn make_variant(ctx: &Ctx, key: &SecretKey, id: i64, variant: Variant) -> Result<Response> {
+    let original = blob(&ctx.db, id).await?.ok_or(Error::NotFound)?;
+    let storage = ctx.storage()?;
+    let format = match original.content_type.as_str() {
+        "image/png" | "image/gif" => image::ImageFormat::Png,
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        "image/webp" => image::ImageFormat::WebP,
+        // Not something Kiln resizes: the original instead.
+        _ => return Ok(redirect(&original.url_signed(key))),
+    };
+    let cached = format!("variants/{}/{}", original.key, variant.spec());
+    let bytes = match storage.get(&cached).await {
+        Ok(bytes) => bytes,
+        Err(Error::NotFound) => {
+            let source = storage.get(&original.key).await?;
+            let resized = tokio::task::spawn_blocking(move || resize(&source, variant, format))
+                .await
+                .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))??;
+            let resized = Bytes::from(resized);
+            storage.put(&cached, resized.clone()).await?;
+            resized
+        }
+        Err(e) => return Err(e),
+    };
+    let mut response = Response::new(Body::from(bytes));
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(format.to_mime_type()));
+    headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=31536000, immutable"));
+    Ok(response)
+}
+
+fn redirect(to: &str) -> Response {
+    let mut response = StatusCode::FOUND.into_response();
+    if let Ok(location) = HeaderValue::from_str(to) {
+        response.headers_mut().insert(header::LOCATION, location);
+    }
+    response
+}
+
+/// Decodes, resizes (never enlarging) and re-encodes an image.
+fn resize(source: &[u8], variant: Variant, format: image::ImageFormat) -> Result<Vec<u8>> {
+    use image::imageops::FilterType;
+    let bad = |e: image::ImageError| Error::BadRequest(format!("that image can't be resized: {e}"));
+    let img = image::load_from_memory(source).map_err(bad)?;
+    let side = |want: u32, have: u32| if want == 0 { have } else { want.min(have) };
+    let (w, h) = (side(variant.width, img.width()), side(variant.height, img.height()));
+    let out = if variant.crop && variant.width > 0 && variant.height > 0 {
+        img.resize_to_fill(w, h, FilterType::Lanczos3)
+    } else {
+        img.resize(w, h, FilterType::Lanczos3)
+    };
+    let mut bytes = Vec::new();
+    match format {
+        image::ImageFormat::Jpeg => {
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 82);
+            out.to_rgb8().write_with_encoder(encoder).map_err(bad)?;
+        }
+        format => out.write_to(&mut std::io::Cursor::new(&mut bytes), format).map_err(bad)?,
+    }
+    Ok(bytes)
+}
+
+// ---------------------------------------------------------------------------------------
 // Signing
 
 /// Signs file links outside requests (mail rendered in jobs). Set when an app is built.
@@ -437,6 +611,21 @@ fn signing_key() -> Option<SecretKey> {
     crate::session::current_scope()
         .and_then(|scope| scope.key)
         .or_else(|| FALLBACK_KEY.read().unwrap_or_else(|e| e.into_inner()).clone())
+}
+
+/// `url` if it's a `/kiln/files/` link this app signed (stored rich text names files this
+/// way), else `None`.
+pub(crate) fn verified_file_link(url: &str) -> Option<String> {
+    let token = url.strip_prefix(FILES_PATH)?.split('/').next()?;
+    let key = signing_key()?;
+    key.verify_str(token)?.strip_prefix("file:")?.parse::<i64>().ok()?;
+    Some(url.to_owned())
+}
+
+/// The blob id behind a signed `/kiln/files/` link.
+fn file_link_blob(key: &SecretKey, url: &str) -> Option<i64> {
+    let token = url.strip_prefix(FILES_PATH)?.split('/').next()?;
+    key.verify_str(token)?.strip_prefix("file:")?.parse().ok()
 }
 
 /// A form's file token back to the blob it names.
@@ -464,6 +653,66 @@ async fn blob(db: &Db, id: i64) -> Result<Option<Attachment>> {
 // Serving
 
 pub(crate) const FILES_PATH: &str = "/kiln/files/";
+
+/// Where the rich text editor uploads attachments.
+pub(crate) const UPLOADS_PATH: &str = "/kiln/uploads";
+
+/// `POST /kiln/uploads`: one multipart `file`, stored now, described as Lexxy expects
+/// (the shape of Active Storage's direct-upload response).
+pub(crate) async fn direct_upload(ctx: &Ctx, csrf_ok: bool, body: Option<(Bytes, String)>) -> Response {
+    let json = |status: StatusCode, value: serde_json::Value| {
+        let mut response = (status, value.to_string()).into_response();
+        response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        response
+    };
+    if !csrf_ok {
+        return json(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({ "error": "missing or stale CSRF token; reload the page" }),
+        );
+    }
+    let Some((bytes, boundary)) = body else {
+        return json(StatusCode::BAD_REQUEST, serde_json::json!({ "error": "send the file as multipart/form-data" }));
+    };
+    let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes) });
+    let mut multipart = multer::Multipart::new(stream, boundary);
+    let result: Result<Option<Attachment>> = async {
+        let storage = ctx.storage()?;
+        while let Some(field) = multipart.next_field().await.map_err(|e| Error::BadRequest(e.to_string()))? {
+            if field.name() != Some("file") {
+                continue;
+            }
+            let filename = field.file_name().unwrap_or("file").to_owned();
+            let declared = field.content_type().map(ToString::to_string).unwrap_or_default();
+            let data = field.bytes().await.map_err(|e| Error::BadRequest(e.to_string()))?;
+            return Ok(Some(store(&ctx.db, &storage, &filename, &declared, data).await?));
+        }
+        Ok(None)
+    }
+    .await;
+    match result {
+        Ok(Some(file)) => {
+            let token = ctx.signing_key().sign_str(&format!("file:{}", file.blob_id));
+            json(
+                StatusCode::OK,
+                serde_json::json!({
+                    "signed_id": token,
+                    "attachable_sgid": token,
+                    "filename": file.filename,
+                    "content_type": file.content_type,
+                    "byte_size": file.byte_size,
+                    "previewable": false,
+                    "url": file.url_signed(ctx.signing_key()),
+                }),
+            )
+        }
+        Ok(None) => json(StatusCode::BAD_REQUEST, serde_json::json!({ "error": "no `file` in the upload" })),
+        Err(e) => {
+            tracing::error!(target: "kiln::storage", error = %e, "storing an upload failed");
+            json(StatusCode::BAD_REQUEST, serde_json::json!({ "error": e.to_string() }))
+        }
+    }
+}
 
 /// Filenames in links and headers keep `.`, `-`, `_` and `~` readable.
 const FILENAME: &percent_encoding::AsciiSet =
@@ -540,6 +789,25 @@ pub async fn purge_unattached(ctx: &Ctx, older_than: jiff::SignedDuration) -> Re
     let mut held: HashSet<i64> = HashSet::new();
     for record in crate::migrate::records() {
         let schema = (record.schema)();
+        for column in schema.columns.iter().filter(|c| c.rich_text) {
+            let rows = ctx
+                .db
+                .fetch_all(
+                    &format!(
+                        "SELECT \"{c}\" FROM \"{t}\" WHERE \"{c}\" LIKE '%kiln-attachment%'",
+                        c = column.name,
+                        t = schema.table
+                    ),
+                    vec![],
+                )
+                .await?;
+            for text in rows.iter().filter_map(|r| sqlx::Row::try_get::<String, _>(r, 0).ok()) {
+                held.extend(text.split("url=\"").skip(1).filter_map(|rest| {
+                    let url = rest.split('"').next()?;
+                    file_link_blob(ctx.signing_key(), url)
+                }));
+            }
+        }
         for column in schema.columns.iter().filter(|c| c.attachment) {
             let rows = ctx
                 .db
@@ -573,6 +841,7 @@ pub async fn purge_unattached(ctx: &Ctx, older_than: jiff::SignedDuration) -> Re
             continue;
         }
         storage.delete(&key).await?;
+        storage.delete_prefix(&format!("variants/{key}")).await?;
         ctx.db
             .fetch_all("DELETE FROM \"kiln_blobs\" WHERE \"id\" = ? RETURNING \"id\"", vec![Value::Integer(id)])
             .await?;

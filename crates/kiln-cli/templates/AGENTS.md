@@ -222,7 +222,8 @@ generated tests passing.
   generator does all three for `file`/`image` fields). Uploads are stored as the request arrives; a form
   re-rendered with errors, and an edit form, keep the current file (a signed hidden field) unless a new
   one is chosen. Show with `{{ post.cover.url }}`, `.filename`, `.content_type`, `.byte_size`,
-  `.is_image`. In Rust: `ctx.attach("report.pdf", "application/pdf", bytes).await?` stores a file a job
+  `.is_image`; resized: `{{ post.cover | variant(width=400) }}`, `variant(width=200, height=200, crop=true)`
+  (made on first request, kept in storage; never enlarged). In Rust: `ctx.attach("report.pdf", "application/pdf", bytes).await?` stores a file a job
   made; `ctx.storage()?.read(&attachment)` reads one. Links (`/kiln/files/..`) work for anyone who has
   them and can't be guessed; HTML and SVG always download. `STORAGE_URL` picks the store (`file://storage`
   by default; `s3://bucket` with `AWS_*` for S3/R2/MinIO; `gs://bucket`), `MAX_UPLOAD_SIZE` caps uploads
@@ -231,11 +232,15 @@ generated tests passing.
 - **Pending migrations (development):** a database error caused by unapplied migrations lists them with a
   "Run migrations" button. `app.stop_on_pending_migrations()` in `src/app.rs` shows that page for every
   request until they're applied.
+- **Rich text attachments:** images and files dropped or pasted into the editor upload to `/kiln/uploads`
+  and are stored in the HTML as `<kiln-attachment>` elements with signed `/kiln/files/` links;
+  `| rich_text` shows them as figures (dropping any link Kiln didn't sign), and the files are kept while
+  a rich text column links them.
 - **Rich text:** a `RichText` field (records and forms) renders the editor with `{{ field(form.body) }}`
   and is stored as sanitized HTML in a TEXT column; show it with `{{ post.body | rich_text }}`
   (never `| safe`). `#[validate(length(min = 1))]` counts words, not markup. `post.body.to_plain_text()`
   in Rust or `{{ post.body | plain_text }}` in templates for excerpts. In mail, `| rich_text` leaves out
-  the page stylesheet and scripts; the mail layout styles it. Attachments are off until file storage exists.
+  the page stylesheet and scripts; the mail layout styles it.
 - **Mail previews:** add `preview` to `#[mail(..)]` and `impl Preview for X { async fn preview(ctx: &Ctx) -> Result<Self> { .. } }`;
   test them all with `app.render_mail_previews().await?`.
 - **Notifications:** `CommentPosted { comment_id }.notify(&tx, &author).await?`. In `deliver`,
