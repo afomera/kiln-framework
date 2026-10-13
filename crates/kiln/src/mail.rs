@@ -25,7 +25,7 @@ use std::{future::Future, sync::OnceLock};
 
 use axum::{
     http::StatusCode,
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -91,7 +91,9 @@ pub struct Message {
 impl Message {
     /// Whether the subject or either body contains `needle`.
     pub fn contains(&self, needle: &str) -> bool {
-        self.subject.contains(needle) || self.html.contains(needle) || self.text.as_deref().is_some_and(|t| t.contains(needle))
+        self.subject.contains(needle)
+            || self.html.contains(needle)
+            || self.text.as_deref().is_some_and(|t| t.contains(needle))
     }
 }
 
@@ -195,28 +197,28 @@ impl Db {
     /// Mail stored by the `outbox` transport, oldest first: `(id, message)`.
     pub async fn outbox(&self) -> Result<Vec<(i64, Message)>> {
         let rows = self.fetch_all("SELECT \"id\", \"message\" FROM \"kiln_mail\" ORDER BY \"id\"", vec![]).await?;
-        Ok(rows
-            .iter()
-            .filter_map(|r| Some((r.get(0), serde_json::from_str(&r.get::<String, _>(1)).ok()?)))
-            .collect())
+        Ok(rows.iter().filter_map(|r| Some((r.get(0), serde_json::from_str(&r.get::<String, _>(1)).ok()?))).collect())
     }
 }
 
 /// `/kiln/mail` and `/kiln/mail/<id>`: the development outbox.
-pub(crate) async fn serve_outbox(db: &Db, path: &str) -> Option<Response> {
+pub(crate) async fn serve_outbox(db: &Db, path: &str, query: &crate::devtools::Query) -> Option<Response> {
     let rest = path.strip_prefix("/kiln/mail")?;
-    if crate::config::is_production() {
-        return None;
-    }
     let outbox = match db.outbox().await {
         Ok(outbox) => outbox,
         Err(e) => return Some(e.into_response()),
     };
     let body = match rest.trim_start_matches('/') {
         "" => {
-            let rows: String = outbox
+            let shown: Vec<_> = outbox
                 .iter()
                 .rev()
+                .filter(|(_, m)| {
+                    crate::devtools::matches(query, &[&m.subject, &m.to, &m.from, m.text.as_deref().unwrap_or(&m.html)])
+                })
+                .collect();
+            let rows: String = shown
+                .iter()
                 .map(|(id, m)| {
                     format!(
                         "<a class=row href=\"/kiln/mail/{id}\"><b>{}</b><span>{}</span></a>",
@@ -225,16 +227,28 @@ pub(crate) async fn serve_outbox(db: &Db, path: &str) -> Option<Response> {
                     )
                 })
                 .collect();
-            let rows = if rows.is_empty() { "<p class=empty>No mail yet.</p>".to_owned() } else { rows };
-            format!("<h1>Outbox</h1>{rows}")
+            let rows = if outbox.is_empty() {
+                "<p class=empty>No mail yet.</p>".to_owned()
+            } else {
+                format!(
+                    "{}{}{rows}",
+                    crate::devtools::search_bar("/kiln/mail", query, "Subject, recipient or text", &[]),
+                    crate::devtools::showing(shown.len(), outbox.len())
+                )
+            };
+            format!("<p class=muted>Mail sent in development and tests is stored here instead of delivered.</p>{rows}")
         }
         id => {
             let Some((_, m)) = id.parse::<i64>().ok().and_then(|id| outbox.iter().find(|(i, _)| *i == id)) else {
                 return Some((StatusCode::NOT_FOUND, "no such mail").into_response());
             };
-            let text = m.text.as_deref().map(|t| format!("<h2>Text</h2><pre>{}</pre>", escape_attribute(t))).unwrap_or_default();
+            let text = m
+                .text
+                .as_deref()
+                .map(|t| format!("<h2>Text</h2><pre>{}</pre>", escape_attribute(t)))
+                .unwrap_or_default();
             format!(
-                "<p><a href=\"/kiln/mail\">← Outbox</a></p><h1>{}</h1><dl><dt>To</dt><dd>{}</dd><dt>From</dt><dd>{}</dd></dl>\
+                "<p><a href=\"/kiln/mail\">← All mail</a></p><h2>{}</h2><dl><dt>To</dt><dd>{}</dd><dt>From</dt><dd>{}</dd></dl>\
                  <iframe sandbox srcdoc=\"{}\"></iframe>{text}",
                 escape_attribute(&m.subject),
                 escape_attribute(&m.to),
@@ -243,16 +257,5 @@ pub(crate) async fn serve_outbox(db: &Db, path: &str) -> Option<Response> {
             )
         }
     };
-    Some(
-        Html(format!(
-            "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>Outbox</title>\
-             <style>body{{font:15px/1.5 system-ui;max-width:860px;margin:2rem auto;padding:0 16px;color:#1c1917;background:#fafaf9}}\
-             a{{color:#c2410c}}.row{{display:flex;justify-content:space-between;gap:1rem;padding:.7rem 1rem;border:1px solid #e7e5e4;\
-             border-radius:8px;margin:.5rem 0;background:#fff;text-decoration:none;color:inherit}}.row span{{color:#78716c}}\
-             iframe{{width:100%;height:480px;border:1px solid #e7e5e4;border-radius:8px;background:#fff}}\
-             pre{{white-space:pre-wrap;background:#fff;border:1px solid #e7e5e4;border-radius:8px;padding:1rem}}\
-             dl{{display:grid;grid-template-columns:auto 1fr;gap:.2rem 1rem}}dt{{color:#78716c}}dd{{margin:0}}</style>{body}"
-        ))
-        .into_response(),
-    )
+    Some(crate::devtools::page("mail", "Mail", &body))
 }

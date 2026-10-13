@@ -22,7 +22,9 @@ Run them from the app directory.
 | Verify | `kiln check` (must end `0 errors`), then `kiln test` |
 | Routes | `kiln routes` |
 | Run | `kiln dev` (port 3000; `--port 4000` for another): runs `Procfile.dev`, rebuilds and restarts on src/ changes |
-| Jobs | `kiln jobs` (counts, failures), `kiln jobs retry [id]` |
+| Jobs | `kiln jobs` (counts, queues, failures), `kiln jobs retry [id]`, `cancel <id>`, `run <id>`, `pause <queue>`, `resume <queue>`, `discard-failed` |
+| Schedules, batches | `kiln schedules [pause\|resume\|run <job>]`, `kiln batches [cancel <id>]` |
+| Inspect the running app | `/kiln` in development: routes, records, jobs, schedules, batches, mail, broadcasts, sign-ins, each searchable, with controls (retry, cancel, pause, run now) |
 | Secrets | `kiln secrets set SMTP_URL smtp://..`, `kiln secrets show` (key in `config/master.key`, never committed) |
 | Fresh database | `kiln db reset` (migrate + seed); sign in at /session/new as ada@example.com |
 
@@ -56,6 +58,7 @@ generated tests passing.
 | Config and secrets | `src/config.rs` | `#[derive(Config)] pub struct Config { .. }`, loaded in `configure` with `app.config(Config::load()?)`, read with `ctx.config::<Config>()` |
 | Background job | `src/jobs/{verb}_{noun}.rs` | `#[derive(Job, Serialize, Deserialize)]` + `impl Perform` |
 | Email | `src/mail/{name}.rs` + `templates/mail/{name}.html.jinja` (+ `.txt.jinja`) | `#[derive(Mail, Serialize)] #[mail(template = "mail/{name}", subject = "..")]` with a `to: String` field; wrapped in `layouts/mail.html.jinja` |
+| Recurring jobs | `src/schedule.rs` | `pub fn schedule(s: Schedule) -> Schedule { s.cron("0 3 * * *", Job {}) }`, registered with `app.schedule(schedule::schedule)` |
 | Dev processes | `Procfile.dev` | `name: command`; `$APP` is the app binary |
 | What templates see of a signed-in record | `src/views/current_user.rs` | `#[derive(Serialize)] struct CurrentUser` + `fn of(&User) -> Self` |
 | Page | `src/views/{resource}/{verb}.rs` + `templates/{resource}/{verb}.html.jinja` | `#[derive(View)]` |
@@ -140,6 +143,17 @@ generated tests passing.
   delays it. Store ids, not records, and reload in `perform`; jobs retry with backoff and
   may run twice, so make them safe to repeat. The web process runs jobs too; for a
   separate worker use `web: WORKERS=0 $APP serve` and `worker: $APP work` in `Procfile.dev`.
+- **Jobs act as the system.** A job that changes a policy-guarded record calls an op with
+  `kiln::policy::as_system::<Update, _>(record)` (never in actions: K0304). `#[job(unique_for = "10m")]`
+  collapses duplicate enqueues.
+- **Schedules:** `s.cron("0 3 * * *", Job {})` (UTC), `s.cron_in("0 9 * * mon", "America/New_York", ..)`,
+  `s.every(SignedDuration::from_mins(15), ..)`; one schedule per job type. Missed runs run once, not
+  once per slot. Test with `app.run_schedules_at(Timestamp::now() + SignedDuration::from_hours(25))`.
+- **Batches:** `Batch::new("Import").jobs(rows.map(..)).on_success(J).on_failure(J).on_complete(J).on_cancel(J).enqueue(&tx)`
+  returns a `BatchId`; hooks are jobs and fire once. Inside a batch's job or hook, `BatchId::current()`;
+  jobs fan out with `batch.add(&ctx.db, job)`, hooks read `batch.status(&ctx.db)`.
+- **`/kiln` in production** is off unless `app.kiln_tools_for::<User>(|user| user.admin)` in `src/app.rs`;
+  then only those users see it (others get a 404), and every control used is logged.
 - **Testing jobs:** `app.assert_enqueued::<SendDigest>(1).await?`, `app.enqueued::<J>()`, then
   `app.perform_enqueued_jobs().await?` runs them all now (an error if one fails for good).
 - **Sign-ins are database rows** (`kiln_sessions`); the cookie holds only a token.

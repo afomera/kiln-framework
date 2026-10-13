@@ -8,7 +8,10 @@ async fn commenting_emails_the_post_author(app: TestApp) -> Result {
     let author = app.create_with::<User>(|u| u.email = "ada@example.com".into()).await?;
     let post = app.create_with::<Post>(|p| (p.author_id, p.title) = (author.id, "Engines".into())).await?;
     let reader = app.create_with::<User>(|u| u.name = "Grace".into()).await?;
-    app.sign_in_as(&reader).post_form(comments::create::path(&post.slug), &[("body", "Lovely")]).await.assert_status(303);
+    app.sign_in_as(&reader)
+        .post_form(comments::create::path(&post.slug), &[("body", "Lovely")])
+        .await
+        .assert_status(303);
 
     assert!(app.outbox().await?.is_empty(), "mail goes out from a job, not the request");
     app.perform_enqueued_jobs().await?;
@@ -24,7 +27,10 @@ async fn commenting_emails_the_post_author(app: TestApp) -> Result {
 async fn authors_are_not_emailed_about_their_own_comments(app: TestApp) -> Result {
     let post = app.create::<Post>().await?;
     let author = User::find(post.author_id).one_or_404(&app.db).await?;
-    app.sign_in_as(&author).post_form(comments::create::path(&post.slug), &[("body", "Me again")]).await.assert_status(303);
+    app.sign_in_as(&author)
+        .post_form(comments::create::path(&post.slug), &[("body", "Me again")])
+        .await
+        .assert_status(303);
     app.assert_enqueued::<kiln::mail::Deliver>(0).await?;
     Ok(())
 }
@@ -32,7 +38,8 @@ async fn authors_are_not_emailed_about_their_own_comments(app: TestApp) -> Resul
 #[kiln::test]
 async fn mail_renders_without_sending(app: TestApp) -> Result {
     let post = app.create::<Post>().await?;
-    let mail = CommentNotification { to: "x@example.com".into(), post, commenter: "Lin".into(), body: "<b>hi</b>".into() };
+    let mail =
+        CommentNotification { to: "x@example.com".into(), post, commenter: "Lin".into(), body: "<b>hi</b>".into() };
     let message = mail.message()?;
     assert!(message.html.contains("&lt;b&gt;hi&lt;&#x2f;b&gt;"), "bodies are escaped: {}", message.html);
     assert_eq!(message.from, "app@localhost");

@@ -99,8 +99,11 @@ pub(crate) async fn create_sign_in(db: &Db, table: &str, record_id: i64, user_ag
     if bytes[0] == 0 {
         // Now and then, drop expired sign-ins.
         let cutoff = now - IDLE_EXPIRY.as_secs() as i64;
-        db.fetch_all("DELETE FROM \"kiln_sessions\" WHERE \"last_seen_at\" < ? RETURNING \"id\"", vec![Value::Integer(cutoff)])
-            .await?;
+        db.fetch_all(
+            "DELETE FROM \"kiln_sessions\" WHERE \"last_seen_at\" < ? RETURNING \"id\"",
+            vec![Value::Integer(cutoff)],
+        )
+        .await?;
     }
     Ok(token)
 }
@@ -250,7 +253,7 @@ impl Session {
 }
 
 /// "Firefox on macOS" from a user agent; good enough for a sessions list.
-fn device(user_agent: &str) -> String {
+pub(crate) fn device(user_agent: &str) -> String {
     let ua = user_agent;
     let browser = if ua.contains("Edg/") {
         "Edge"

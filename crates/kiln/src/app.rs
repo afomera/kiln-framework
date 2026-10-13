@@ -39,15 +39,17 @@ impl Ctx {
         self.get::<C>()
     }
 
+    /// A value registered with `App::provide`, if there is one.
+    pub fn try_get<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.provided.get(&std::any::TypeId::of::<T>()).and_then(|value| value.downcast_ref::<T>())
+    }
+
     /// A value registered with `App::provide` (or `App::config`) in `src/app.rs`, e.g. an
     /// API client. Panics, naming the type, if it was never registered.
     pub fn get<T: Send + Sync + 'static>(&self) -> &T {
-        self.provided
-            .get(&std::any::TypeId::of::<T>())
-            .and_then(|value| value.downcast_ref::<T>())
-            .unwrap_or_else(|| {
-                panic!("`{}` isn't registered; add `app.provide(..)` in src/app.rs", std::any::type_name::<T>())
-            })
+        self.provided.get(&std::any::TypeId::of::<T>()).and_then(|value| value.downcast_ref::<T>()).unwrap_or_else(
+            || panic!("`{}` isn't registered; add `app.provide(..)` in src/app.rs", std::any::type_name::<T>()),
+        )
     }
 }
 
@@ -64,7 +66,12 @@ pub struct App {
     key: SecretKey,
     sign_ins: Vec<Arc<dyn SignIn>>,
     assets: Option<Assets>,
+    tools: Option<ToolsAccess>,
 }
+
+/// Decides who may use `/kiln` in production: `(who, seed)` for an allowed viewer, where
+/// `seed` (their sign-in token) keys the control forms' token.
+type ToolsAccess = Arc<dyn Fn(Session, Db) -> BoxFuture<'static, Result<Option<(String, String)>>> + Send + Sync>;
 
 /// A record type people sign in as, registered with [`App::signs_in`].
 pub(crate) trait SignIn: Send + Sync {
@@ -124,6 +131,7 @@ struct Shared {
     db: Db,
     sign_ins: Arc<[Arc<dyn SignIn>]>,
     assets: Option<Assets>,
+    tools: Option<ToolsAccess>,
 }
 
 #[derive(Clone)]
@@ -141,7 +149,13 @@ impl App {
     /// `kiln::Cli` sets a persistent key.
     pub fn new(db: Db) -> Self {
         let key = SecretKey::generate();
-        Self { ctx: Ctx { db, key: key.clone(), provided: Arc::default() }, key, sign_ins: vec![], assets: None }
+        Self {
+            ctx: Ctx { db, key: key.clone(), provided: Arc::default() },
+            key,
+            sign_ins: vec![],
+            assets: None,
+            tools: None,
+        }
     }
 
     /// The app's directory, so `assets/` and `public/` are served. `kiln::Cli` and
@@ -154,6 +168,27 @@ impl App {
     /// Registers the app's config so actions read it with `ctx.config::<Config>()`.
     pub fn config<C: Send + Sync + 'static>(self, config: C) -> Self {
         self.provide(config)
+    }
+
+    /// Opens the `/kiln` tools (jobs, schedules, batches, mail, ...) in production to signed-in
+    /// `T`s that `allow` accepts: `app.kiln_tools_for::<User>(|user| user.admin)`. Everyone else
+    /// gets a 404. In development the tools are open regardless. Control actions taken in
+    /// production are logged with who took them.
+    pub fn kiln_tools_for<T: Record>(mut self, allow: fn(&T) -> bool) -> Self {
+        self.tools = Some(Arc::new(move |session: Session, db: Db| {
+            Box::pin(async move {
+                let Some(token) = session.sign_in_token::<T>() else { return Ok(None) };
+                let viewer = crate::auth::find_signed_in::<T>(&db, &token).await?.filter(|record| allow(record));
+                Ok(viewer.map(|record| (format!("{} #{}", T::TABLE, record.id().get()), token)))
+            })
+        }));
+        self
+    }
+
+    /// The app's recurring jobs: `app.schedule(schedule::schedule)` with the function in
+    /// `src/schedule.rs`. Job workers run them.
+    pub fn schedule(self, build: fn(crate::Schedule) -> crate::Schedule) -> Self {
+        self.provide(build(crate::Schedule::default()))
     }
 
     /// Registers a value (an API client, a service) that actions read with `ctx.get::<T>()`.
@@ -216,14 +251,23 @@ impl App {
             .fold(axum::Router::<Ctx>::new(), |router, route| (route.mount)(router))
             .route_layer(middleware::from_fn_with_state(route_state, route_checks))
             .with_state(self.ctx.clone());
-        let shared =
-            Arc::new(Shared { key: self.key.clone(), db: self.ctx.db.clone(), sign_ins, assets: self.assets.clone() });
+        let shared = Arc::new(Shared {
+            key: self.key.clone(),
+            db: self.ctx.db.clone(),
+            sign_ins,
+            assets: self.assets.clone(),
+            tools: self.tools.clone(),
+        });
         // Method override must happen before routing, so request handling wraps the whole
         // router instead of each route.
         axum::Router::new().fallback_service(routes).layer(middleware::from_fn_with_state(shared, handle_request))
     }
 
     pub async fn serve(self, addr: &str) -> Result<()> {
+        // So /kiln/schedules is right even when jobs run in another process.
+        if let Some(schedule) = self.ctx.try_get::<crate::Schedule>() {
+            self.ctx.db.sync_schedules(schedule, crate::Timestamp::now()).await?;
+        }
         let listener = tokio::net::TcpListener::bind(addr).await?;
         println!("{}\n\nkiln listening on http://{addr}", routes_table());
         axum::serve(listener, self.router().into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
@@ -332,9 +376,29 @@ async fn render_page(mut response: Response, state: &RouteState, scope: &Request
     }
 }
 
+/// Who is viewing `/kiln`, or `None` when the tools are off for this request.
+async fn tools_viewer(shared: &Shared, headers: &axum::http::HeaderMap) -> Option<crate::devtools::Viewer> {
+    if !crate::config::is_production() {
+        return Some(crate::devtools::Viewer::new(&shared.key, "development".into(), "development"));
+    }
+    let access = shared.tools.as_ref()?;
+    let session = cookie_in(headers, COOKIE).and_then(|c| shared.key.verify(c)).map(Session::from_data)?;
+    match access(session, shared.db.clone()).await {
+        Ok(Some((who, seed))) => Some(crate::devtools::Viewer::new(&shared.key, who, &seed)),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!(target: "kiln::tools", error = %e, "checking /kiln access failed");
+            None
+        }
+    }
+}
+
 fn cookie<'a>(parts: &'a Parts, name: &str) -> Option<&'a str> {
-    parts
-        .headers
+    cookie_in(&parts.headers, name)
+}
+
+fn cookie_in<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
@@ -346,6 +410,16 @@ fn cookie<'a>(parts: &'a Parts, name: &str) -> Option<&'a str> {
 /// pipeline: session, flash, CSRF, `_method` override, and error pages (HTML for
 /// browsers, Markdown otherwise).
 async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, next: Next) -> Response {
+    // `/kiln` tools: open in development; in production only for viewers `kiln_tools_for`
+    // allows (everyone else falls through to an ordinary 404).
+    let path = request.uri().path();
+    let tools_path = (path == "/kiln" || path.starts_with("/kiln/")) && !path.starts_with("/kiln/streams/");
+    let viewer = if tools_path { tools_viewer(&shared, request.headers()).await } else { None };
+    if *request.method() == Method::POST
+        && let Some(viewer) = viewer.clone()
+    {
+        return crate::devtools::act(&shared.db, viewer, request).await;
+    }
     // Static files skip sessions and logging: they never set cookies.
     if matches!(*request.method(), Method::GET | Method::HEAD) {
         let path = request.uri().path();
@@ -354,10 +428,12 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
         } else if path.starts_with("/kiln/streams/") {
             let last_event_id = request.headers().get("last-event-id").and_then(|v| v.to_str().ok());
             realtime::serve(shared.db.clone(), &shared.key, path, last_event_id).await
-        } else if path.starts_with("/kiln/mail") {
-            crate::mail::serve_outbox(&shared.db, path).await
-        } else if path.starts_with("/kiln/") {
-            assets::serve_kiln(path)
+        } else if path == "/kiln" || path.starts_with("/kiln/") {
+            let page = match viewer {
+                Some(viewer) => crate::devtools::serve(&shared.db, viewer, path, request.uri().query()).await,
+                None => None,
+            };
+            page.or_else(|| assets::serve_kiln(path))
         } else {
             None
         };

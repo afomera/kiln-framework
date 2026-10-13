@@ -107,3 +107,63 @@ async fn jobs_can_broadcast(app: TestApp) -> Result {
     app.assert_broadcast(&post::stream_name(post.id), "action=\"refresh\"").await?;
     Ok(())
 }
+
+#[kiln::test]
+async fn the_nightly_schedule_runs_once_per_slot(app: TestApp) -> Result {
+    let now = Timestamp::now();
+    assert!(app.run_schedules_at(now).await?.is_empty(), "nothing is due yet");
+    let tomorrow = now + SignedDuration::from_hours(25);
+    assert_eq!(app.run_schedules_at(tomorrow).await?, ["ArchiveOldDrafts"]);
+    assert!(app.run_schedules_at(tomorrow).await?.is_empty(), "a slot runs once");
+    // Down for a week: one run, not seven.
+    assert_eq!(app.run_schedules_at(tomorrow + SignedDuration::from_hours(24 * 7)).await?.len(), 1);
+    app.assert_enqueued::<blog::jobs::ArchiveOldDrafts>(2).await?;
+    Ok(())
+}
+
+#[kiln::test]
+async fn paused_schedules_skip_and_can_still_run_on_demand(app: TestApp) -> Result {
+    app.run_schedules_at(Timestamp::now()).await?;
+    assert!(app.db.set_schedule_paused("ArchiveOldDrafts", true).await?);
+    assert!(app.run_schedules_at(Timestamp::now() + SignedDuration::from_hours(48)).await?.is_empty());
+    assert!(app.db.schedules().await?[0].paused);
+    assert!(app.db.run_schedule_now("ArchiveOldDrafts").await?.is_some());
+    app.assert_enqueued::<blog::jobs::ArchiveOldDrafts>(1).await?;
+    assert!(app.db.set_schedule_paused("ArchiveOldDrafts", false).await?);
+    assert_eq!(app.db.schedules().await?[0].when, "0 3 * * * (UTC)");
+    Ok(())
+}
+
+#[kiln::test]
+async fn paused_queues_hold_their_jobs(app: TestApp) -> Result {
+    app.db.pause_queue("flaky").await?;
+    AlwaysFails.enqueue(&app.db).await?;
+    assert_eq!(app.perform_enqueued_jobs().await?, 0, "nothing runs from a paused queue");
+    let queues = app.db.queues().await?;
+    assert!(queues.iter().any(|(q, paused, queued, ..)| q == "flaky" && *paused && *queued == 1), "{queues:?}");
+    app.db.resume_queue("flaky").await?;
+    assert!(app.perform_enqueued_jobs().await.is_err(), "runs (and fails) once resumed");
+    Ok(())
+}
+
+#[kiln::test]
+async fn waiting_jobs_can_be_cancelled_or_run_now(app: TestApp) -> Result {
+    let post = app.create::<Post>().await?;
+    let later =
+        Retitle { post_id: post.id, title: "Later".into() }.enqueue_in(&app.db, SignedDuration::from_hours(5)).await?;
+    let other =
+        Retitle { post_id: post.id, title: "Other".into() }.enqueue_in(&app.db, SignedDuration::from_hours(5)).await?;
+    assert!(app.db.cancel_job(other).await?);
+    assert!(app.db.run_job_now(later).await?);
+    app.assert_enqueued::<Retitle>(1).await?;
+    Ok(())
+}
+
+#[kiln::test]
+async fn unique_jobs_collapse(app: TestApp) -> Result {
+    let first = blog::jobs::ArchiveOldDrafts {}.enqueue(&app.db).await?;
+    let second = blog::jobs::ArchiveOldDrafts {}.enqueue(&app.db).await?;
+    assert_eq!(first, second);
+    app.assert_enqueued::<blog::jobs::ArchiveOldDrafts>(1).await?;
+    Ok(())
+}

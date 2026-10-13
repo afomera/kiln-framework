@@ -1,3 +1,4 @@
+mod archive_post;
 mod confirm_email;
 mod create_bookmark;
 mod create_comment;
@@ -10,6 +11,7 @@ mod sign_up;
 mod update_bookmark;
 mod update_post;
 
+pub use archive_post::archive_post;
 pub use confirm_email::confirm_email;
 pub use create_bookmark::create_bookmark;
 pub use create_comment::create_comment;

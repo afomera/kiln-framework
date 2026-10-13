@@ -988,7 +988,10 @@ fn mail(app: &App, name: &str) -> Result<Plan, String> {
         format!("templates/mail/{name}.html.jinja"),
         "<p>Hi {{ name }},</p>\n<p>Write the message here. Link with absolute URLs: <a href=\"{{ url(\"/\") }}\">{{ url(\"/\") }}</a></p>\n".to_owned(),
     );
-    plan.file(format!("templates/mail/{name}.txt.jinja"), "Hi {{ name }},\n\nWrite the message here.\n\n{{ url(\"/\") }}\n".to_owned());
+    plan.file(
+        format!("templates/mail/{name}.txt.jinja"),
+        "Hi {{ name }},\n\nWrite the message here.\n\n{{ url(\"/\") }}\n".to_owned(),
+    );
     if !app.path("templates/layouts/mail.html.jinja").exists() {
         plan.file(
             "templates/layouts/mail.html.jinja",
@@ -1060,7 +1063,8 @@ const AUTH_FILES: &[(&str, &str)] = auth_files![
 /// `kiln g auth`
 fn auth(app: &App, force: bool) -> Result<Plan, String> {
     let read = |path: &str| std::fs::read_to_string(app.path(path)).ok();
-    let user = read("src/records/user.rs").ok_or("`kiln g auth` adds passwords to the `User` record, but src/records/user.rs is missing")?;
+    let user = read("src/records/user.rs")
+        .ok_or("`kiln g auth` adds passwords to the `User` record, but src/records/user.rs is missing")?;
     if !app.path("src/actions/home/index.rs").exists() {
         return Err("`kiln g auth` sends people to `home::index` after signing in; add it first (`kiln g action home index GET /`)".into());
     }
@@ -1076,8 +1080,14 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
         }
         plan.replace("src/records/user.rs", user.replacen(anchor, &format!("{anchor}{fields}"), 1));
         for (path, value) in [
-            ("src/factories.rs", "password_digest: kiln::auth::hash_password(\"password\")?, confirmed_at: Some(Timestamp::now())"),
-            ("src/seed.rs", "password_digest: kiln::auth::hash_password(\"password\")?, confirmed_at: Some(Timestamp::now())"),
+            (
+                "src/factories.rs",
+                "password_digest: kiln::auth::hash_password(\"password\")?, confirmed_at: Some(Timestamp::now())",
+            ),
+            (
+                "src/seed.rs",
+                "password_digest: kiln::auth::hash_password(\"password\")?, confirmed_at: Some(Timestamp::now())",
+            ),
         ] {
             if let Some(source) = read(path) {
                 plan.replace(path, add_to_struct_literals(&source, "NewUser {", value));
@@ -1109,9 +1119,26 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
         }
     }
     for (module, items) in [
-        ("forms", &["sign_in_form:SignInForm", "sign_up_form:SignUpForm", "password_reset_request_form:PasswordResetRequestForm", "new_password_form:NewPasswordForm"][..]),
+        (
+            "forms",
+            &[
+                "sign_in_form:SignInForm",
+                "sign_up_form:SignUpForm",
+                "password_reset_request_form:PasswordResetRequestForm",
+                "new_password_form:NewPasswordForm",
+            ][..],
+        ),
         ("mail", &["email_confirmation:EmailConfirmation", "password_reset:PasswordReset"][..]),
-        ("ops", &["sign_up:sign_up", "confirm_email:confirm_email", "request_password_reset:request_password_reset", "reset_password:reset_password", "reset_password:user_for_reset"][..]),
+        (
+            "ops",
+            &[
+                "sign_up:sign_up",
+                "confirm_email:confirm_email",
+                "request_password_reset:request_password_reset",
+                "reset_password:reset_password",
+                "reset_password:user_for_reset",
+            ][..],
+        ),
     ] {
         for item in items {
             let (file, name) = item.split_once(':').expect("file:name");
@@ -1153,7 +1180,10 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
     {
         plan.replace(
             "Cargo.toml",
-            format!("{}\n# Password hashing is slow without optimizations.\n[profile.dev.package.argon2]\nopt-level = 3\n", manifest.trim_end()),
+            format!(
+                "{}\n# Password hashing is slow without optimizations.\n[profile.dev.package.argon2]\nopt-level = 3\n",
+                manifest.trim_end()
+            ),
         );
     }
     Ok(plan)

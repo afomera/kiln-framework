@@ -48,9 +48,20 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Background jobs: `jobs` (counts and failures), `jobs retry [id]`, `jobs work`
+    /// Background jobs: `jobs` (counts, queues, failures), `jobs retry [id]`, `jobs cancel <id>`,
+    /// `jobs run <id>`, `jobs discard-failed`, `jobs pause|resume <queue>`, `jobs work`
     /// (a worker without the web server).
     Jobs {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Recurring jobs: `schedules`, `schedules pause|resume|run <job name>`.
+    Schedules {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Job batches: `batches`, `batches cancel <id>`.
+    Batches {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -99,6 +110,12 @@ fn main() -> ExitCode {
                 Some("work") => app.exec_cargo(&["run", "--quiet", "--", "work"], &[]),
                 _ => app.run_binary(&[&["jobs"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat()),
             },
+            Command::Schedules { args } => {
+                app.run_binary(&[&["schedules"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
+            }
+            Command::Batches { args } => {
+                app.run_binary(&[&["batches"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
+            }
             Command::Routes { json } => app.run_binary(if json { &["routes", "--json"] } else { &["routes"] }),
             Command::Check { format } => check::run(&app, format == "json"),
             Command::Test { args } => {

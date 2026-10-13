@@ -97,9 +97,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 } else if meta.path.is_ident("placeholder") {
                     placeholder = Some(meta.value()?.parse::<syn::LitStr>()?.value());
                 } else {
-                    return Err(
-                        meta.error("expected `textarea`, `password`, `label = \"..\"`, `hint = \"..\"` or `placeholder = \"..\"`")
-                    );
+                    return Err(meta.error(
+                        "expected `textarea`, `password`, `label = \"..\"`, `hint = \"..\"` or `placeholder = \"..\"`",
+                    ));
                 }
                 Ok(())
             })?;

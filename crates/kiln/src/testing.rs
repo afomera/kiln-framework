@@ -29,7 +29,7 @@ use axum::{
 use serde_json::{Map, Value};
 use tower::ServiceExt;
 
-use crate::{App, Db, Record, Result, SecretKey, session::COOKIE};
+use crate::{App, Db, Record, Result, SecretKey, Timestamp, session::COOKIE};
 
 /// `json!({ "email": ".." })` for API tests, without a `serde_json` dependency.
 pub use serde_json::json;
@@ -55,7 +55,11 @@ impl TestApp {
         // `db/migrations` lives in the app's root, next to `assets/` and `public/`.
         let root = migrations.parent().and_then(Path::parent).unwrap_or(Path::new("."));
         crate::config::set_root(root);
-        Ok(Self { app: configure(App::new(db.clone()).root(root))?, db, sequence: AtomicU64::new(0) })
+        let app = configure(App::new(db.clone()).root(root))?;
+        if let Some(schedule) = app.ctx().try_get::<crate::Schedule>() {
+            db.sync_schedules(schedule, Timestamp::now()).await?;
+        }
+        Ok(Self { app, db, sequence: AtomicU64::new(0) })
     }
 
     pub fn app(&self) -> &App {
@@ -92,6 +96,15 @@ impl TestApp {
         crate::jobs::perform_all(self.app.ctx()).await
     }
 
+    /// Runs the app's schedule as if the clock read `at`: enqueues every entry due by
+    /// then (once each, however many slots passed). Returns the job names enqueued.
+    pub async fn run_schedules_at(&self, at: Timestamp) -> Result<Vec<String>> {
+        if let Some(schedule) = self.app.ctx().try_get::<crate::Schedule>() {
+            self.db.sync_schedules(schedule, Timestamp::now()).await?;
+        }
+        self.db.run_due_schedules(at).await
+    }
+
     /// Queued jobs of type `J`, oldest first.
     pub async fn enqueued<J: crate::jobs::JobInfo>(&self) -> Result<Vec<J>> {
         self.db
@@ -108,7 +121,12 @@ impl TestApp {
         let caller = std::panic::Location::caller();
         async move {
             let queued = self.db.queued_payloads(J::NAME).await?;
-            assert_eq!(queued.len(), count, "{caller}: expected {count} queued `{}` job(s); queued: {queued:#?}", J::NAME);
+            assert_eq!(
+                queued.len(),
+                count,
+                "{caller}: expected {count} queued `{}` job(s); queued: {queued:#?}",
+                J::NAME
+            );
             Ok(())
         }
     }
@@ -121,7 +139,11 @@ impl TestApp {
 
     /// Asserts mail to `to` was delivered with `needle` in its subject or body. Returns it.
     #[track_caller]
-    pub fn assert_mailed<'a>(&'a self, to: &'a str, needle: &'a str) -> impl Future<Output = Result<crate::mail::Message>> + 'a {
+    pub fn assert_mailed<'a>(
+        &'a self,
+        to: &'a str,
+        needle: &'a str,
+    ) -> impl Future<Output = Result<crate::mail::Message>> + 'a {
         let caller = std::panic::Location::caller();
         async move {
             let outbox = self.outbox().await?;

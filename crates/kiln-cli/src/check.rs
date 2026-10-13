@@ -187,6 +187,14 @@ fn lint_text(file: &str, text: &str, findings: &mut Findings) {
                 Some(i + 1),
             );
         }
+        if code.contains("as_system") && file.starts_with("src/actions/") {
+            findings.error(
+                "K0304",
+                "`as_system` in an action skips the viewer's policy; authorize the signed-in record instead (`user.authorize::<Update, _>(record)?`)",
+                Some(file),
+                Some(i + 1),
+            );
+        }
         if (code.contains("std::env::var") || code.contains("env::var(")) && file != "src/main.rs" {
             findings.error(
                 "K0601",

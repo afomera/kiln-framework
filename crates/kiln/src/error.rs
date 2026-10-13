@@ -144,7 +144,9 @@ impl Error {
             }
             Error::Job(message) => {
                 report.message = message.clone();
-                report.hint("Failed jobs stay in `kiln_jobs`: `kiln jobs` lists them and `kiln jobs retry` queues them again.");
+                report.hint(
+                    "Failed jobs stay in `kiln_jobs`: `kiln jobs` lists them and `kiln jobs retry` queues them again.",
+                );
             }
             Error::Invalid(errors) => {
                 report.message = format!("The submitted input is invalid: {errors}.");

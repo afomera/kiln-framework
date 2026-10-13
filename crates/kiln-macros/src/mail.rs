@@ -45,7 +45,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     }
     // Optional parts: present only when the files exist.
     let present = |file: &str| templates.as_ref().is_some_and(|t| t.join(file).exists());
-    let text = if present(&text) { quote!(::core::option::Option::Some(#text)) } else { quote!(::core::option::Option::None) };
+    let text =
+        if present(&text) { quote!(::core::option::Option::Some(#text)) } else { quote!(::core::option::Option::None) };
     let layout = if present("layouts/mail.html.jinja") {
         quote!(::core::option::Option::Some("layouts/mail.html.jinja"))
     } else {

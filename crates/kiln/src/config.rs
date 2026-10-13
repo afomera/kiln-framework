@@ -49,9 +49,8 @@ pub(crate) fn use_test_env() {
 
 pub fn env() -> &'static str {
     ENV.get_or_init(|| {
-        std::env::var("KILN_ENV").unwrap_or_else(|_| {
-            if cfg!(debug_assertions) { "development".to_owned() } else { "production".to_owned() }
-        })
+        std::env::var("KILN_ENV")
+            .unwrap_or_else(|_| if cfg!(debug_assertions) { "development".to_owned() } else { "production".to_owned() })
     })
 }
 
@@ -268,9 +267,8 @@ impl Secrets {
         let text: String = self.values.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
         let cipher = ChaCha20Poly1305::new(&self.key.into());
         let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let ciphertext = cipher
-            .encrypt(&nonce, text.as_bytes())
-            .map_err(|_| Error::Config("encrypting secrets failed".into()))?;
+        let ciphertext =
+            cipher.encrypt(&nonce, text.as_bytes()).map_err(|_| Error::Config("encrypting secrets failed".into()))?;
         let mut bytes = nonce.to_vec();
         bytes.extend(ciphertext);
         std::fs::write(&self.path, format!("{}\n", STANDARD.encode(bytes)))?;

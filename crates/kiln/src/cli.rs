@@ -34,8 +34,14 @@ Commands:
   serve               Run the web server and a job worker (default). PORT sets the port;
                       WORKERS=0 leaves jobs to a separate `work` process.
   work                Run background jobs only (no web server). WORKERS sets concurrency.
-  jobs                Job counts and recent failures
+  jobs                Job counts, queues and recent failures
   jobs retry [id]     Queue failed jobs (one, or all) to run again
+  jobs cancel <id>    Remove a waiting or failed job
+  jobs run <id>       Make a delayed job due now
+  jobs discard-failed Delete every failed job
+  jobs pause <queue>  Stop taking jobs from a queue; jobs resume <queue> undoes it
+  schedules           Recurring jobs; schedules pause|resume|run <job name>
+  batches             Recent batches; batches cancel <id>
   db migrate          Apply pending migrations
   db diff <name>      Write a migration for changes to the record structs
   db status [--json]  Pending migrations and schema drift
@@ -137,9 +143,87 @@ impl Cli {
                 for (status, count) in counts {
                     println!("{status:>8}  {count}");
                 }
+                for (queue, paused, queued, running, failed) in db.queues().await? {
+                    let paused = if paused { "  (paused)" } else { "" };
+                    println!("queue {queue}: {queued} waiting, {running} running, {failed} failed{paused}");
+                }
                 for (id, name, attempts, error) in db.failed_jobs().await? {
                     println!("\nfailed #{id} {name} after {attempts} attempt(s):\n  {error}");
                 }
+                Ok(())
+            }
+            ["jobs", "cancel", id] => {
+                let done = self.db().await?.cancel_job(parse_id(id)?).await?;
+                println!("{}", if done { "Removed." } else { "No waiting or failed job with that id." });
+                Ok(())
+            }
+            ["jobs", "run", id] => {
+                let done = self.db().await?.run_job_now(parse_id(id)?).await?;
+                println!("{}", if done { "Due now." } else { "No waiting job with that id." });
+                Ok(())
+            }
+            ["jobs", "discard-failed"] => {
+                println!("Discarded {} failed job(s).", self.db().await?.discard_failed_jobs().await?);
+                Ok(())
+            }
+            ["jobs", "pause", queue] => {
+                self.db().await?.pause_queue(queue).await?;
+                println!("Paused `{queue}`: running jobs finish, new ones wait.");
+                Ok(())
+            }
+            ["jobs", "resume", queue] => {
+                self.db().await?.resume_queue(queue).await?;
+                println!("Resumed `{queue}`.");
+                Ok(())
+            }
+            ["schedules"] => {
+                let db = self.app().await?.ctx().db.clone();
+                let schedules = db.schedules().await?;
+                if schedules.is_empty() {
+                    println!("No schedules. Declare them in src/schedule.rs and register with `app.schedule(..)`.");
+                }
+                for s in schedules {
+                    let next = if s.paused { "paused".to_owned() } else { s.next_run_at.to_string() };
+                    println!("{:<28} {:<24} next {next}", s.name, s.when);
+                }
+                Ok(())
+            }
+            ["schedules", verb @ ("pause" | "resume" | "run"), name] => {
+                let db = self.db().await?;
+                let found = match *verb {
+                    "run" => db.run_schedule_now(name).await?.is_some(),
+                    verb => db.set_schedule_paused(name, verb == "pause").await?,
+                };
+                if !found {
+                    return Err(Error::BadRequest(format!("no schedule named `{name}` (see `kiln schedules`)")));
+                }
+                println!(
+                    "{} {name}.",
+                    match *verb {
+                        "run" => "Enqueued",
+                        "pause" => "Paused",
+                        _ => "Resumed",
+                    }
+                );
+                Ok(())
+            }
+            ["batches"] => {
+                for b in self.db().await?.batches(25).await? {
+                    println!(
+                        "#{:<5} {:<10} {}/{} done, {} failed  {}",
+                        b.id.0,
+                        b.status,
+                        b.succeeded + b.failed + b.cancelled,
+                        b.total,
+                        b.failed,
+                        b.description
+                    );
+                }
+                Ok(())
+            }
+            ["batches", "cancel", id] => {
+                let done = crate::batch::BatchId(parse_id(id)?).cancel(&self.db().await?).await?;
+                println!("{}", if done { "Cancelled." } else { "That batch had already ended." });
                 Ok(())
             }
             ["jobs", "retry", rest @ ..] => {
@@ -238,9 +322,8 @@ impl Cli {
     fn secrets(&self, args: &[&str]) -> Result {
         use crate::config::Secrets;
         let open = || {
-            Secrets::open(&self.root)?.ok_or_else(|| {
-                Error::Config("no master key: run `kiln secrets init`, or set KILN_MASTER_KEY".into())
-            })
+            Secrets::open(&self.root)?
+                .ok_or_else(|| Error::Config("no master key: run `kiln secrets init`, or set KILN_MASTER_KEY".into()))
         };
         match args {
             ["init"] => {
@@ -348,4 +431,8 @@ fn manifest() -> serde_json::Value {
 /// Job workers per process: `WORKERS`, default 2.
 fn workers() -> usize {
     std::env::var("WORKERS").ok().and_then(|w| w.parse().ok()).unwrap_or(2)
+}
+
+fn parse_id(id: &str) -> Result<i64> {
+    id.trim_start_matches('#').parse().map_err(|_| Error::BadRequest(format!("`{id}` isn't an id")))
 }

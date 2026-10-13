@@ -58,6 +58,18 @@ impl<A, R: fmt::Debug> fmt::Debug for Authorized<A, R> {
     }
 }
 
+/// The system acting on its own behalf (a job, a schedule, a seed), with no user to
+/// check: grants `A` on `record` unconditionally. Every use is a deliberate decision you
+/// can search for; `kiln check` refuses it in actions, which always have a viewer to
+/// authorize (K0304).
+///
+/// ```ignore
+/// ops::archive_post(ctx, policy::as_system::<Update, _>(draft)).await?;
+/// ```
+pub fn as_system<A, R>(record: R) -> Authorized<A, R> {
+    Authorized { record, _action: PhantomData }
+}
+
 /// Checks policies. Implemented for every record, so `user.authorize::<Update, _>(post)`
 /// works on a `User` and on a `Current<User>`.
 pub trait Authorize: Sized {

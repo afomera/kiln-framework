@@ -102,9 +102,8 @@ fn procfile(app: &App) -> Result<Vec<Proc>, String> {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .enumerate()
         .map(|(i, line)| {
-            let (name, command) = line
-                .split_once(':')
-                .ok_or_else(|| format!("Procfile.dev line `{line}` should be `name: command`"))?;
+            let (name, command) =
+                line.split_once(':').ok_or_else(|| format!("Procfile.dev line `{line}` should be `name: command`"))?;
             Ok(Proc {
                 name: name.trim().to_owned(),
                 command: command.trim().to_owned(),
