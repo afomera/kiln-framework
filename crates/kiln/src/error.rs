@@ -37,6 +37,9 @@ pub enum Error {
     /// seat already taken. Responds 409 with the message.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// Development, with `app.stop_on_pending_migrations()`: migrations wait to be applied.
+    #[error("{} migration(s) haven't been applied", .0.len())]
+    PendingMigrations(Vec<String>),
     #[error("invalid or missing CSRF token")]
     Csrf,
     /// A page rendered in place of the action's normal response, e.g. a form re-rendered
@@ -77,6 +80,7 @@ impl Error {
             Error::Rendered { .. } => "K1009",
             Error::Invalid(_) => "K1010",
             Error::Conflict(_) => "K1011",
+            Error::PendingMigrations(_) => "K1203",
             Error::Config(_) => "K1401",
             Error::Job(_) => "K1501",
             Error::Template(_) => "K1101",
@@ -115,9 +119,10 @@ impl Error {
                     report.hint("A foreign key points at a row that doesn't exist. Insert the parent first, or check the id you're passing.");
                 } else if text.contains("no such table")
                     || text.contains("no such column")
+                    || text.contains("no column found for name")
                     || (text.contains("does not exist") && (text.contains("relation") || text.contains("column")))
                 {
-                    report.hint("The database schema is behind the record structs. Run `kiln db diff <name>` and `kiln db migrate`.");
+                    report.hint("The database is behind the record structs. Run `kiln db migrate`; if there's no migration for the change yet, `kiln db diff <name>` first (`kiln db status` shows which).");
                 } else {
                     report.hint("The message above comes from the database, through sqlx.");
                 }
@@ -149,6 +154,9 @@ impl Error {
                 report.hint("The token rotates on sign-in and sign-out, so reload the form after either.");
             }
             Error::Rendered { .. } => {}
+            Error::PendingMigrations(pending) => {
+                report.message = format!("These migrations haven't been applied: {}.", pending.join(", "));
+            }
             Error::Conflict(message) => {
                 report.message = message.clone();
                 report.hint("An action returned `Error::Conflict`: the request clashes with the record's current state. For browsers, a redirect with a flash is often kinder.");
@@ -187,6 +195,7 @@ impl Error {
             Error::Rendered { .. } => "Rendered",
             Error::Invalid(_) => "Invalid input",
             Error::Conflict(_) => "Conflict",
+            Error::PendingMigrations(_) => "Pending migrations",
             Error::Config(_) => "Config error",
             Error::Job(_) => "Job failed",
         }

@@ -5,6 +5,8 @@ use kiln::{App, Result};
 use crate::{actions::sessions, records::User, views::current_user::CurrentUser};
 
 pub fn configure(app: App) -> Result<App> {
+    // In development, add `.stop_on_pending_migrations()` to show "migrations are pending"
+    // (with a button that runs them) on every page until they're applied.
     // People sign in as `User`; templates read the allowlisted `current_user`.
     Ok(app.signs_in::<User, _>(sessions::new::path(), CurrentUser::of))
 }

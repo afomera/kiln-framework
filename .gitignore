@@ -4,4 +4,6 @@
 tmp/
 .playwright-mcp/
 config/master.key
-db/.kiln/
+**/db/.kiln/
+storage/
+.claude/worktrees/

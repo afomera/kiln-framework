@@ -74,7 +74,7 @@ impl Db {
             "CREATE INDEX IF NOT EXISTS \"kiln_stream_messages_stream\" ON \"kiln_stream_messages\" (\"stream\", \"id\")",
         )
         .await?;
-        self.with_job_table().await
+        self.with_job_table().await?.with_blob_table().await
     }
 
     /// Sends `turbo` to every page subscribed to `stream`. The stream's views render now,

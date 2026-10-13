@@ -331,6 +331,8 @@ pub trait SqlType {
     const NULLABLE: bool = false;
     /// Allowed values, for enum-like types. Rendered as a CHECK constraint.
     const VARIANTS: &'static [&'static str] = &[];
+    /// Holds a stored file (`Attachment`).
+    const ATTACHMENT: bool = false;
 }
 
 impl SqlType for String {
@@ -365,4 +367,5 @@ impl<T: SqlType> SqlType for Option<T> {
     const SQL: &'static str = T::SQL;
     const NULLABLE: bool = true;
     const VARIANTS: &'static [&'static str] = T::VARIANTS;
+    const ATTACHMENT: bool = T::ATTACHMENT;
 }

@@ -10,5 +10,16 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tracing-subscriber = "0.3"
 
+# Backtraces keep file:line; full debuginfo (and any for dependencies) mostly fills target/.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# Password hashing is slow without optimizations.
+[profile.dev.package.argon2]
+opt-level = 3
+
 # A standalone app, even when created inside another Cargo workspace.
 [workspace]

@@ -32,7 +32,7 @@ Run them from the app directory.
 | Fresh database | `kiln db reset` (migrate + seed); sign in at /session/new as ada@example.com |
 | Database | SQLite (`db/development.sqlite3`) or Postgres (`kiln new app --database postgres`: `postgres://localhost/<app>_development`, tests in `<app>_test`); `DATABASE_URL` / `TEST_DATABASE_URL` override. `db/snapshot.json` records which. |
 
-Field types: `string`, `text`, `rich_text` (the editor; `?` means it may be left empty), `integer`, `float`, `bool`, `timestamp`, `ref:<Record>`. A
+Field types: `string`, `text`, `rich_text` (the editor; `?` means it may be left empty), `integer`, `float`, `bool`, `timestamp`, `file`, `image` (uploads; `image` accepts only images), `ref:<Record>`. A
 trailing `?` makes a field optional; quote it in zsh (`'notes:text?'`). A trailing `:internal`
 (`'sent_at:timestamp?:internal'`, `sends:integer:internal`) is a field the app sets, not the form:
 it's left off the form and its tests, and new records start with `None`, `false` or `0`. Fields
@@ -217,6 +217,20 @@ generated tests passing.
   `import { setConfirm } from "kiln/confirm"`.
 - **Live reload (development):** pages update as you save. CSS swaps in place, template edits
   refresh the page (scroll kept), JS edits reload, and Rust edits reload once `kiln dev` restarts.
+- **Files:** `pub cover: Option<Attachment>` on the record and the form, with
+  `#[validate(file(max_size = "5MB", accept = "image/*"))]`, and `form_start(.., multipart=true)` (the
+  generator does all three for `file`/`image` fields). Uploads are stored as the request arrives; a form
+  re-rendered with errors, and an edit form, keep the current file (a signed hidden field) unless a new
+  one is chosen. Show with `{{ post.cover.url }}`, `.filename`, `.content_type`, `.byte_size`,
+  `.is_image`. In Rust: `ctx.attach("report.pdf", "application/pdf", bytes).await?` stores a file a job
+  made; `ctx.storage()?.read(&attachment)` reads one. Links (`/kiln/files/..`) work for anyone who has
+  them and can't be guessed; HTML and SVG always download. `STORAGE_URL` picks the store (`file://storage`
+  by default; `s3://bucket` with `AWS_*` for S3/R2/MinIO; `gs://bucket`), `MAX_UPLOAD_SIZE` caps uploads
+  (25MB). Files no record holds are removed after two days. Tests: `client.post_multipart(path, &[..],
+  &[("cover", Upload::png("cover.png"))])`, `patch_multipart`; each test has its own in-memory store.
+- **Pending migrations (development):** a database error caused by unapplied migrations lists them with a
+  "Run migrations" button. `app.stop_on_pending_migrations()` in `src/app.rs` shows that page for every
+  request until they're applied.
 - **Rich text:** a `RichText` field (records and forms) renders the editor with `{{ field(form.body) }}`
   and is stored as sanitized HTML in a TEXT column; show it with `{{ post.body | rich_text }}`
   (never `| safe`). `#[validate(length(min = 1))]` counts words, not markup. `post.body.to_plain_text()`

@@ -34,6 +34,36 @@ use crate::{App, Ctx, Db, Record, Result, SecretKey, Timestamp, session::COOKIE}
 /// `json!({ "email": ".." })` for API tests, without a `serde_json` dependency.
 pub use serde_json::json;
 
+/// A file for `post_multipart` / `patch_multipart`.
+#[derive(Debug, Clone)]
+pub struct Upload {
+    pub filename: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+impl Upload {
+    pub fn new(filename: &str, content_type: &str, bytes: impl Into<Vec<u8>>) -> Self {
+        Self { filename: filename.to_owned(), content_type: content_type.to_owned(), bytes: bytes.into() }
+    }
+
+    /// A 1×1 PNG.
+    pub fn png(filename: &str) -> Self {
+        const PIXEL: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+            0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff,
+            0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        Self::new(filename, "image/png", PIXEL)
+    }
+
+    /// A text file.
+    pub fn text(filename: &str, contents: &str) -> Self {
+        Self::new(filename, "text/plain", contents.as_bytes())
+    }
+}
+
 /// A fresh app on a private in-memory database with migrations applied.
 pub struct TestApp {
     pub db: Db,
@@ -55,7 +85,8 @@ impl TestApp {
         let root = migrations.parent().and_then(Path::parent).unwrap_or(Path::new("."));
         let db = test_database(root, migrations).await?;
         crate::config::set_root(root);
-        let app = configure(App::new(db.clone()).root(root))?;
+        // Files go to a store of the test's own, gone when it ends.
+        let app = configure(App::new(db.clone()).root(root).provide(crate::Storage::memory()))?;
         crate::jobs::sync_app(app.ctx()).await?;
         Ok(Self { app, db, sequence: AtomicU64::new(0), clock: Default::default() })
     }
@@ -363,7 +394,7 @@ impl TestClient {
         accept: Option<&str>,
     ) -> TestResponse {
         let (content_type, body) = self.form_body(fields, true);
-        self.send(method, path, accept, Some((content_type, body))).await
+        self.send(method, path, accept, Some((content_type, Body::from(body)))).await
     }
 
     /// The urlencoded body for `fields`, with the session's CSRF token when `csrf`.
@@ -392,21 +423,74 @@ impl TestClient {
             pairs.push(("_csrf", token));
         }
         let body = serde_urlencoded::to_string(&pairs).expect("form fields encode");
-        self.send(method, path, None, Some(("application/x-www-form-urlencoded", body))).await
+        self.send(method, path, None, Some(("application/x-www-form-urlencoded", Body::from(body)))).await
+    }
+
+    /// Submits a form with files, as a browser does for `form_start(.., multipart=true)`:
+    /// `client.post_multipart(path, &[("title", "Hi")], &[("cover", Upload::png("cover.png"))])`.
+    pub async fn post_multipart(
+        &self,
+        path: impl AsRef<str>,
+        fields: &[(&str, &str)],
+        files: &[(&str, Upload)],
+    ) -> TestResponse {
+        self.multipart(Method::POST, path.as_ref(), fields, files).await
+    }
+
+    pub async fn patch_multipart(
+        &self,
+        path: impl AsRef<str>,
+        fields: &[(&str, &str)],
+        files: &[(&str, Upload)],
+    ) -> TestResponse {
+        // Browsers send PATCH as a POST with `_method`.
+        let mut fields = fields.to_vec();
+        fields.push(("_method", "PATCH"));
+        self.multipart(Method::POST, path.as_ref(), &fields, files).await
+    }
+
+    async fn multipart(
+        &self,
+        method: Method,
+        path: &str,
+        fields: &[(&str, &str)],
+        files: &[(&str, Upload)],
+    ) -> TestResponse {
+        let token = {
+            let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            let token = session.entry("_csrf").or_insert(Value::from(TEST_CSRF));
+            token.as_str().unwrap_or(TEST_CSRF).to_owned()
+        };
+        let boundary = "kiln-test-boundary-7MA4YWxkTrZu0gW";
+        let mut body: Vec<u8> = vec![];
+        for (name, value) in fields.iter().chain([&("_csrf", token.as_str())]) {
+            body.extend(
+                format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+                    .as_bytes(),
+            );
+        }
+        for (name, file) in files {
+            body.extend(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
+                    file.filename, file.content_type
+                )
+                .as_bytes(),
+            );
+            body.extend(&file.bytes);
+            body.extend(b"\r\n");
+        }
+        body.extend(format!("--{boundary}--\r\n").as_bytes());
+        let content_type = format!("multipart/form-data; boundary={boundary}");
+        self.send(method, path, None, Some((&content_type, Body::from(body)))).await
     }
 
     /// Sends a JSON body, as an API client does (no cookies or CSRF token needed).
     pub async fn post_json(&self, path: impl AsRef<str>, body: &serde_json::Value) -> TestResponse {
-        self.send(Method::POST, path.as_ref(), None, Some(("application/json", body.to_string()))).await
+        self.send(Method::POST, path.as_ref(), None, Some(("application/json", Body::from(body.to_string())))).await
     }
 
-    async fn send(
-        &self,
-        method: Method,
-        path: &str,
-        accept: Option<&str>,
-        body: Option<(&str, String)>,
-    ) -> TestResponse {
+    async fn send(&self, method: Method, path: &str, accept: Option<&str>, body: Option<(&str, Body)>) -> TestResponse {
         let pending = self.pending_sign_in.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some((table, id)) = pending {
             let token = crate::auth::create_sign_in(&self.db, table, id, "kiln test client", "127.0.0.1")
@@ -426,7 +510,7 @@ impl TestClient {
         let body = match body {
             Some((content_type, body)) => {
                 builder = builder.header(header::CONTENT_TYPE, content_type);
-                Body::from(body)
+                body
             }
             None => Body::empty(),
         };

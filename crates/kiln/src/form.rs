@@ -124,6 +124,8 @@ pub struct FieldSpec {
     /// Browser autofill hint, e.g. `current-password`. Password inputs default to
     /// `new-password` and email inputs to `email`.
     pub autocomplete: Option<&'static str>,
+    /// File inputs: the types the picker offers (`image/*`), from `#[validate(file(accept = ..))]`.
+    pub accept: Option<&'static str>,
 }
 
 /// A Rust type a single form field parses into.
@@ -256,6 +258,9 @@ pub mod rules {
         fn number(&self) -> Option<f64> {
             None
         }
+        fn attachment(&self) -> Option<&crate::storage::Attachment> {
+            None
+        }
     }
 
     impl RuleTarget for String {
@@ -334,6 +339,47 @@ pub mod rules {
         }
     }
 
+    /// `#[validate(file(max_size = "5MB", accept = "image/*"))]`: `accept` is a comma-separated
+    /// list of types (`image/png`), wildcards (`image/*`) or extensions (`.pdf`).
+    pub fn file(
+        value: &impl RuleTarget,
+        max_size: Option<u64>,
+        accept: Option<&str>,
+        field: &str,
+        errors: &mut Errors,
+    ) {
+        let Some(file) = value.attachment() else { return };
+        if let Some(max) = max_size
+            && file.byte_size() as u64 > max
+        {
+            errors.add(field, format!("is too big (maximum is {})", human_size(max)));
+        }
+        if let Some(accept) = accept {
+            let ext = file.filename().rsplit_once('.').map(|(_, e)| format!(".{}", e.to_ascii_lowercase()));
+            let ok = accept.split(',').map(str::trim).any(|pattern| {
+                if let Some(major) = pattern.strip_suffix("/*") {
+                    file.content_type().split('/').next() == Some(major)
+                } else if pattern.starts_with('.') {
+                    ext.as_deref() == Some(&pattern.to_ascii_lowercase())
+                } else {
+                    file.content_type() == pattern
+                }
+            });
+            if !ok {
+                errors.add(field, format!("must be {}", accept.replace(',', " or")));
+            }
+        }
+    }
+
+    fn human_size(bytes: u64) -> String {
+        match bytes {
+            b if b >= 1024 * 1024 * 1024 && b % (1024 * 1024 * 1024) == 0 => format!("{}GB", b / (1024 * 1024 * 1024)),
+            b if b >= 1024 * 1024 => format!("{:.0}MB", b as f64 / (1024.0 * 1024.0)),
+            b if b >= 1024 => format!("{:.0}KB", b as f64 / 1024.0),
+            b => format!("{b} bytes"),
+        }
+    }
+
     /// For `Option` fields that must be filled in.
     pub fn required<T>(value: &Option<T>, field: &str, errors: &mut Errors) {
         if value.is_none() {
@@ -386,39 +432,121 @@ impl<T: FormInput> Form<T> {
     }
 }
 
-impl<T: FormInput, S: Send + Sync> FromRequest<S> for Form<T> {
+impl<T: FormInput> FromRequest<Ctx> for Form<T> {
     type Rejection = Error;
 
-    async fn from_request(request: Request, state: &S) -> std::result::Result<Self, Self::Rejection> {
-        let json = request
+    async fn from_request(request: Request, ctx: &Ctx) -> std::result::Result<Self, Self::Rejection> {
+        let content_type = request
             .headers()
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.starts_with("application/json"));
-        let bytes = Bytes::from_request(request, state).await.map_err(|e| Error::BadRequest(e.to_string()))?;
-        let pairs: Vec<(String, String)> = if json {
+            .unwrap_or_default()
+            .to_owned();
+        let mut fields = Fields::default();
+        if content_type.starts_with("multipart/form-data") {
+            read_multipart::<T>(request, ctx, &content_type, &mut fields).await?;
+            return Ok(Self::from_fields(fields));
+        }
+        let bytes = Bytes::from_request(request, ctx).await.map_err(|e| Error::BadRequest(e.to_string()))?;
+        let pairs: Vec<(String, String)> = if content_type.starts_with("application/json") {
             json_pairs(&bytes)?
         } else {
             serde_urlencoded::from_bytes(&bytes).map_err(|e| Error::BadRequest(format!("unreadable form body: {e}")))?
         };
-        let mut fields = Fields::default();
         for (name, value) in pairs {
-            // `_csrf`, `_method`: Kiln's own. `lexxy-*`: controls inside the rich text editor
-            // (its code-language picker), never data. Anything else undeclared is refused.
-            if name.starts_with('_') || name.starts_with("lexxy-") {
+            if !accepts::<T>(&name)? {
                 continue;
             }
-            if !T::FIELDS.contains(&name.as_str()) {
-                return Err(Error::BadRequest(format!(
-                    "unexpected form field `{name}`; `{}` accepts: {}",
-                    short_name::<T>(),
-                    T::FIELDS.join(", ")
-                )));
-            }
+            let value = if is_file::<T>(&name) { file_token(ctx, &value).await? } else { value };
             fields.set(name, value);
         }
         Ok(Self::from_fields(fields))
     }
+}
+
+/// Whether `name` is data for `T`: `_csrf`, `_method` (Kiln's own) and `lexxy-*` (controls
+/// inside the rich text editor, like its code-language picker) are skipped; anything else
+/// undeclared is refused.
+fn accepts<T: FormInput>(name: &str) -> Result<bool> {
+    if name.starts_with('_') || name.starts_with("lexxy-") {
+        return Ok(false);
+    }
+    if !T::FIELDS.contains(&name) {
+        return Err(Error::BadRequest(format!(
+            "unexpected form field `{name}`; `{}` accepts: {}",
+            short_name::<T>(),
+            T::FIELDS.join(", ")
+        )));
+    }
+    Ok(true)
+}
+
+fn is_file<T: FormInput>(name: &str) -> bool {
+    T::SPECS.iter().any(|s| s.name == name && s.input == "file")
+}
+
+/// A file field's text value: empty, or the signed token of a file the form already had
+/// (kept across a re-render or an edit). Anything else is refused, so a form can't claim
+/// someone else's file.
+async fn file_token(ctx: &Ctx, token: &str) -> Result<String> {
+    if token.trim().is_empty() {
+        return Ok(String::new());
+    }
+    match crate::storage::from_form_token(&ctx.db, ctx.signing_key(), token.trim()).await? {
+        Some(attachment) => Ok(crate::form::FormField::to_field(&attachment)),
+        None => Err(Error::BadRequest("a file field held something other than a file this form uploaded".into())),
+    }
+}
+
+/// Reads a multipart body: text fields as usual, files stored as they arrive. A file input
+/// left empty keeps the field's current file (its hidden token), if any.
+async fn read_multipart<T: FormInput>(
+    request: Request,
+    ctx: &Ctx,
+    content_type: &str,
+    fields: &mut Fields,
+) -> Result<()> {
+    let boundary =
+        multer::parse_boundary(content_type).map_err(|e| Error::BadRequest(format!("unreadable upload: {e}")))?;
+    let limit = crate::storage::max_upload_size() + 2 * 1024 * 1024;
+    let bytes = axum::body::to_bytes(request.into_body(), limit)
+        .await
+        .map_err(|_| Error::BadRequest("the upload is larger than MAX_UPLOAD_SIZE".into()))?;
+    let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes) });
+    let mut multipart = multer::Multipart::new(stream, boundary);
+    let storage = ctx.storage()?;
+    let mut uploaded = std::collections::HashSet::new();
+    while let Some(field) =
+        multipart.next_field().await.map_err(|e| Error::BadRequest(format!("unreadable upload: {e}")))?
+    {
+        let name = field.name().unwrap_or_default().to_owned();
+        if !accepts::<T>(&name)? {
+            continue;
+        }
+        if let Some(filename) = field.file_name().map(str::to_owned) {
+            let declared = field.content_type().map(ToString::to_string).unwrap_or_default();
+            let data = field.bytes().await.map_err(|e| Error::BadRequest(format!("unreadable upload: {e}")))?;
+            if filename.is_empty() && data.is_empty() {
+                continue; // no file chosen
+            }
+            if !is_file::<T>(&name) {
+                return Err(Error::BadRequest(format!("`{name}` isn't a file field")));
+            }
+            let attachment = crate::storage::store(&ctx.db, &storage, &filename, &declared, data).await?;
+            fields.set(&name, crate::form::FormField::to_field(&attachment));
+            uploaded.insert(name);
+        } else {
+            let text = field.text().await.map_err(|e| Error::BadRequest(format!("unreadable upload: {e}")))?;
+            if is_file::<T>(&name) {
+                if !uploaded.contains(&name) {
+                    fields.set(&name, file_token(ctx, &text).await?);
+                }
+            } else {
+                fields.set(name, text);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A flat JSON object as form fields, so JSON and HTML forms share parsing and rules.
@@ -562,14 +690,27 @@ impl<T: FormInput> Serialize for FormState<T> {
         struct Field<'a> {
             value: &'a str,
             errors: &'a [String],
+            /// File inputs: the file the field holds now.
+            file: Option<crate::storage::Attachment>,
             #[serde(flatten)]
             spec: &'a FieldSpec,
         }
+        let key = crate::session::current_scope().and_then(|scope| scope.key);
         let mut map = serializer.serialize_map(Some(T::SPECS.len() + 2))?;
         for spec in T::SPECS {
+            let raw = self.fields.get(spec.name).unwrap_or("");
             // Passwords are never sent back to the browser, even when the form re-renders.
-            let value = if spec.input == "password" { "" } else { self.fields.get(spec.name).unwrap_or("") };
-            let field = Field { value, errors: self.errors.get(spec.name), spec };
+            // Files go back as a signed token, so the form keeps them without re-uploading.
+            let (value, file) = match spec.input {
+                "password" => (String::new(), None),
+                "file" => {
+                    let file = <crate::storage::Attachment as FormField>::from_field(Some(raw)).ok();
+                    let token = file.as_ref().zip(key.as_ref()).map(|(f, k)| f.form_token(k)).unwrap_or_default();
+                    (token, file)
+                }
+                _ => (raw.to_owned(), None),
+            };
+            let field = Field { value: &value, errors: self.errors.get(spec.name), file, spec };
             map.serialize_entry(spec.name, &field)?;
         }
         // Field names in order, for `{{ fields(form) }}`.

@@ -57,6 +57,7 @@ pub async fn seed(db: Db) -> Result {
             slug: slug.into(),
             title: title.into(),
             body: body.into(),
+            cover: None,
             status,
             author_id: author.id,
             editor_id,

@@ -12,13 +12,20 @@ pub struct PostForm {
     /// The rich text editor. `length` counts the words people see, not the markup.
     #[validate(length(min = 1))]
     pub body: RichText,
+    #[validate(file(max_size = "5MB", accept = "image/*"))]
+    pub cover: Option<Attachment>,
     pub publish: bool,
 }
 
 impl PostForm {
     /// Prefills the edit form.
     pub fn from_record(post: &Post) -> Self {
-        Self { title: post.title.clone(), body: post.body.clone(), publish: post.status == PostStatus::Published }
+        Self {
+            title: post.title.clone(),
+            body: post.body.clone(),
+            cover: post.cover.clone(),
+            publish: post.status == PostStatus::Published,
+        }
     }
 
     /// The insert for a new post by `author`. The slug comes from the title.
@@ -29,6 +36,7 @@ impl PostForm {
             published_at: self.publish.then(Timestamp::now),
             title: self.title,
             body: self.body,
+            cover: self.cover,
             author_id: author.id,
             editor_id: None,
         }
@@ -36,8 +44,11 @@ impl PostForm {
 
     /// The update for `post`. The slug is kept so links don't break.
     pub fn apply(self, post: &Post, update: kiln::Update<Post>) -> kiln::Update<Post> {
-        let update =
-            update.set(post::title, self.title).set(post::body, self.body).set(post::status, status(self.publish));
+        let update = update
+            .set(post::title, self.title)
+            .set(post::body, self.body)
+            .set(post::cover, self.cover)
+            .set(post::status, status(self.publish));
         match (self.publish, post.published_at) {
             (true, None) => update.set(post::published_at, Timestamp::now()),
             (false, Some(_)) => update.set(post::published_at, None::<Timestamp>),

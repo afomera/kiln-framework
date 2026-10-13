@@ -805,6 +805,16 @@ pub async fn work(ctx: Ctx, concurrency: usize) {
     if let Err(e) = sync_app(&ctx).await {
         tracing::error!(target: "kiln::jobs", error = %e, "syncing schedules and queue limits failed");
     }
+    // Files no record kept (forms never saved, files replaced) go after two days.
+    let files = ctx.clone();
+    tokio::spawn(async move {
+        while !shutting_down() {
+            if let Err(e) = crate::storage::purge_unattached(&files, jiff::SignedDuration::from_hours(48)).await {
+                tracing::error!(target: "kiln::storage", error = %e, "removing unattached files failed");
+            }
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    });
     if ctx.try_get::<crate::Schedule>().is_some() {
         let db = ctx.db.clone();
         tokio::spawn(async move {

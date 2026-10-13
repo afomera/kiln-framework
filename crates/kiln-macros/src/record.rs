@@ -212,6 +212,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 indexed: #indexed,
                 references: #references,
                 variants: <#ty as ::kiln::SqlType>::VARIANTS,
+                attachment: <#ty as ::kiln::SqlType>::ATTACHMENT,
             }
         }
     });

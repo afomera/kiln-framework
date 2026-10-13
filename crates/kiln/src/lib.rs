@@ -32,6 +32,7 @@ mod routing;
 pub mod schedule;
 mod schema;
 pub mod session;
+pub mod storage;
 pub mod testing;
 pub mod turbo;
 mod types;
@@ -53,6 +54,7 @@ pub use rich_text::RichText;
 pub use routing::{Param, PathArg, RouteDef, routes, routes_table};
 pub use schema::{ColumnSchema, TableSchema};
 pub use session::{Current, Flash, SecretKey, Session};
+pub use storage::{Attachment, Storage};
 pub use turbo::{Turbo, TurboStream};
 pub use types::{FromColumn, Id, SqlType, Timestamp, ToValue, Value};
 pub use view::{Part, PartsEnabled, View};
@@ -111,9 +113,9 @@ pub mod prelude {
     pub use kiln_macros::{Config, Form, Job, Notification};
 
     pub use crate::{
-        App, Batch, BatchId, Ctx, Current, Db, DbEnum, Enqueue, Error, Id, Json, Loaded, Mail, Notify, Param, Perform,
-        Preview, Query, Record, Redirect, Result, RichText, Schedule, Secret, Session, Timestamp, Turbo, TurboStream,
-        Via, View, ViewOrRedirect, action,
+        App, Attachment, Batch, BatchId, Ctx, Current, Db, DbEnum, Enqueue, Error, Id, Json, Loaded, Mail, Notify,
+        Param, Perform, Preview, Query, Record, Redirect, Result, RichText, Schedule, Secret, Session, Timestamp,
+        Turbo, TurboStream, Via, View, ViewOrRedirect, action,
         form::{Form, FormState, OrRender, Valid},
         part,
         policy::{Allows, Authorize, Authorized},

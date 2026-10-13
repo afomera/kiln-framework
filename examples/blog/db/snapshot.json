@@ -1,4 +1,6 @@
 {
+  "backend": "sqlite",
+  "migration": "20261013040730",
   "tables": {
     "bookmarks": {
       "columns": [
@@ -114,6 +116,11 @@
           "name": "body",
           "sql_type": "TEXT",
           "nullable": false
+        },
+        {
+          "name": "cover",
+          "sql_type": "TEXT",
+          "nullable": true
         },
         {
           "name": "status",

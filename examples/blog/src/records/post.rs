@@ -11,6 +11,8 @@ pub struct Post {
     pub title: String,
     /// Written in the rich text editor; always sanitized HTML.
     pub body: RichText,
+    /// An image shown above the post.
+    pub cover: Option<Attachment>,
     pub status: PostStatus,
     pub author_id: Id<User>,
     /// Last editor, if anyone other than the author has edited the post.

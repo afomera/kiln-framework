@@ -1,6 +1,6 @@
 {% set title = "New post" %}
 <h1>New post</h1>
-{{ form_start(path("posts::create")) }}
+{{ form_start(path("posts::create"), multipart=true) }}
   {{ fields(form) }}
   <button>Create post</button>
 {{ form_end() }}

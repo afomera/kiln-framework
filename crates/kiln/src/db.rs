@@ -216,7 +216,10 @@ impl Db {
         self.queries.fetch_add(1, Ordering::Relaxed);
         let (sql, binds) = self.dialect.prepare(sql, binds);
         tracing::debug!(target: "kiln::sql", "{sql}");
-        let mut query = sqlx::query(&sql);
+        // Prepared statements are cached per connection, with their columns. Outside
+        // production, migrations run while the server does, and a cached statement would
+        // keep reading the old columns ("no column found"), so nothing is cached there.
+        let mut query = sqlx::query(&sql).persistent(crate::config::is_production());
         for value in binds {
             query = match value {
                 Value::Null => query.bind(None::<i64>),

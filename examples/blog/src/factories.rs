@@ -26,6 +26,7 @@ impl Factory for Post {
             slug: format!("post-{n}"),
             title: format!("Post {n}"),
             body: "Some words.".into(),
+            cover: None,
             status: PostStatus::Published,
             author_id: author.id,
             editor_id: None,

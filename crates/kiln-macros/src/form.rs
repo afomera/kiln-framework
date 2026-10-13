@@ -3,10 +3,37 @@ use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Error, Fields, Lit, LitInt, meta::ParseNestedMeta};
 
 enum Rule {
-    Length { min: Option<LitInt>, max: Option<LitInt> },
-    Range { min: Option<Lit>, max: Option<Lit> },
+    Length {
+        min: Option<LitInt>,
+        max: Option<LitInt>,
+    },
+    Range {
+        min: Option<Lit>,
+        max: Option<Lit>,
+    },
     Email,
     Required,
+    /// `file(max_size = "5MB", accept = "image/*")`
+    File {
+        max_size: Option<u64>,
+        accept: Option<String>,
+    },
+}
+
+/// `5MB` → bytes, checked at compile time.
+fn parse_size(lit: &syn::LitStr) -> syn::Result<u64> {
+    let text = lit.value().trim().to_ascii_uppercase();
+    let at = text.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(text.len());
+    let (number, unit) = text.split_at(at);
+    let scale: u64 = match unit.trim() {
+        "" | "B" => 1,
+        "KB" | "K" => 1024,
+        "MB" | "M" => 1024 * 1024,
+        "GB" | "G" => 1024 * 1024 * 1024,
+        _ => return Err(Error::new_spanned(lit, "sizes look like `500KB`, `5MB` or `1GB`")),
+    };
+    let number: f64 = number.parse().map_err(|_| Error::new_spanned(lit, "sizes look like `500KB`, `5MB` or `1GB`"))?;
+    Ok((number * scale as f64) as u64)
 }
 
 fn parse_rules(meta: ParseNestedMeta<'_>, rules: &mut Vec<Rule>) -> syn::Result<()> {
@@ -40,8 +67,21 @@ fn parse_rules(meta: ParseNestedMeta<'_>, rules: &mut Vec<Rule>) -> syn::Result<
         rules.push(Rule::Email);
     } else if meta.path.is_ident("required") {
         rules.push(Rule::Required);
+    } else if meta.path.is_ident("file") {
+        let (mut max_size, mut accept) = (None, None);
+        meta.parse_nested_meta(|inner| {
+            if inner.path.is_ident("max_size") {
+                max_size = Some(parse_size(&inner.value()?.parse()?)?);
+            } else if inner.path.is_ident("accept") {
+                accept = Some(inner.value()?.parse::<syn::LitStr>()?.value());
+            } else {
+                return Err(inner.error("expected `max_size = \"5MB\"` or `accept = \"image/*\"`"));
+            }
+            Ok(())
+        })?;
+        rules.push(Rule::File { max_size, accept });
     } else {
-        return Err(meta.error("unknown rule; expected `length(..)`, `range(..)`, `email` or `required`"));
+        return Err(meta.error("unknown rule; expected `length(..)`, `range(..)`, `email`, `required` or `file(..)`"));
     }
     Ok(())
 }
@@ -139,9 +179,16 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     }
                 }
                 Rule::Required => required = quote!(true),
-                Rule::Email => {}
+                Rule::Email | Rule::File { .. } => {}
             }
         }
+        let accept = rules
+            .iter()
+            .find_map(|r| match r {
+                Rule::File { accept: Some(a), .. } => Some(a.clone()),
+                _ => None,
+            })
+            .map_or_else(|| quote!(None), |a| quote!(Some(#a)));
         let hint = hint.map_or_else(|| quote!(None), |h| quote!(Some(#h)));
         let placeholder = placeholder.map_or_else(|| quote!(None), |p| quote!(Some(#p)));
         let autocomplete = autocomplete.map_or_else(|| quote!(None), |a| quote!(Some(#a)));
@@ -159,6 +206,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 hint: #hint,
                 placeholder: #placeholder,
                 autocomplete: #autocomplete,
+                accept: #accept,
             }
         });
         let rule_calls = rules.iter().map(|rule| match rule {
@@ -174,6 +222,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
             Rule::Email => quote! { ::kiln::form::rules::email(__kiln_value, #field_name, &mut __kiln_errors); },
             Rule::Required => quote! { ::kiln::form::rules::required(__kiln_value, #field_name, &mut __kiln_errors); },
+            Rule::File { max_size, accept } => {
+                let max = max_size.map_or_else(|| quote!(None), |m| quote!(Some(#m)));
+                let accept = accept.as_ref().map_or_else(|| quote!(None), |a| quote!(Some(#a)));
+                quote! { ::kiln::form::rules::file(__kiln_value, #max, #accept, #field_name, &mut __kiln_errors); }
+            }
         });
         parses.push(quote! {
             let #local = __kiln_fields.parse::<#ty>(#field_name, &mut __kiln_errors);

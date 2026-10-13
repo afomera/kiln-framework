@@ -194,6 +194,10 @@ enum Kind {
     Bool,
     Timestamp,
     Ref,
+    /// An uploaded file (`kiln::Attachment`).
+    File,
+    /// An uploaded image: a file limited to `image/*`.
+    Image,
 }
 
 #[derive(Clone)]
@@ -257,9 +261,11 @@ impl Field {
             "bool" | "boolean" => Kind::Bool,
             "timestamp" | "datetime" => Kind::Timestamp,
             "ref" => Kind::Ref,
+            "file" | "attachment" => Kind::File,
+            "image" => Kind::Image,
             other => {
                 return Err(format!(
-                    "`{spec}`: unknown type `{other}`; use string, text, rich_text, integer, float, bool, timestamp or ref:<Record>"
+                    "`{spec}`: unknown type `{other}`; use string, text, rich_text, integer, float, bool, timestamp, file, image or ref:<Record>"
                 ));
             }
         };
@@ -297,6 +303,7 @@ impl Field {
             Kind::Bool => "bool".into(),
             Kind::Timestamp => "Timestamp".into(),
             Kind::Ref => format!("Id<{}>", self.target.as_deref().unwrap_or("?")),
+            Kind::File | Kind::Image => "Attachment".into(),
         }
     }
 
@@ -315,6 +322,18 @@ impl Field {
             _ if self.optional => "None",
             Kind::Bool => "false",
             _ => "0",
+        }
+    }
+
+    fn is_file(&self) -> bool {
+        matches!(self.kind, Kind::File | Kind::Image)
+    }
+
+    /// The upload a test submits for a file field.
+    fn sample_upload(&self) -> String {
+        match self.kind {
+            Kind::Image => format!("Upload::png(\"{}.png\")", self.name),
+            _ => format!("Upload::text(\"{}.txt\", \"{} contents\")", self.name, human(&self.name)),
         }
     }
 
@@ -338,7 +357,7 @@ impl Field {
             Kind::Float => "2.5".into(),
             Kind::Bool => "true".into(),
             Kind::Timestamp => "2026-01-01T12:00".into(),
-            Kind::Ref => String::new(),
+            Kind::Ref | Kind::File | Kind::Image => String::new(),
         }
     }
 }
@@ -529,6 +548,23 @@ impl Resource {
                 (Kind::Float, _) => "1.5".into(),
                 (Kind::Bool, _) => "false".into(),
                 (Kind::Timestamp, _) => "Timestamp::now()".into(),
+                (Kind::File | Kind::Image, _) => {
+                    let (file, kind) = if f.kind == Kind::Image {
+                        (format!("{}.png", f.name), "image/png")
+                    } else {
+                        (format!("{}.txt", f.name), "text/plain")
+                    };
+                    let bytes = if f.kind == Kind::Image {
+                        format!("kiln::testing::Upload::png(\"{file}\").bytes")
+                    } else {
+                        "b\"Contents.\".to_vec()".to_owned()
+                    };
+                    setup.push_str(&format!(
+                        "        let {} = app.ctx().attach(\"{file}\", \"{kind}\", {bytes}).await?;\n",
+                        f.name
+                    ));
+                    f.name.clone()
+                }
                 (Kind::Ref, _) => {
                     let target = f.target.as_deref().unwrap_or("?");
                     setup.push_str(&format!("        let {} = app.create::<{target}>().await?;\n", f.name));
@@ -575,6 +611,8 @@ impl Resource {
                 (Kind::String, true) => body.push_str("    #[validate(length(max = 200))]\n"),
                 (Kind::Text, false) => body.push_str("    #[validate(length(min = 1))]\n    #[form(textarea)]\n"),
                 (Kind::Text, true) => body.push_str("    #[form(textarea)]\n"),
+                (Kind::Image, _) => body.push_str("    #[validate(file(max_size = \"10MB\", accept = \"image/*\"))]\n"),
+                (Kind::File, _) => body.push_str("    #[validate(file(max_size = \"25MB\"))]\n"),
                 (Kind::RichText, _) if !f.may_be_empty => {
                     body.push_str("    /// The rich text editor; `length` counts words people see, not markup.\n    #[validate(length(min = 1))]\n")
                 }
@@ -585,7 +623,7 @@ impl Resource {
         let from_record: String = fields
             .iter()
             .map(|f| {
-                let clone = if f.is_text() || f.kind == Kind::RichText { ".clone()" } else { "" };
+                let clone = if f.is_text() || f.is_file() || f.kind == Kind::RichText { ".clone()" } else { "" };
                 format!("            {}: {}.{}{clone},\n", f.column(), self.snake, f.column())
             })
             .collect();
@@ -839,6 +877,14 @@ impl Resource {
                 let value = match (f.kind, f.optional) {
                     (Kind::Timestamp, _) => format!("{{{{ @@name@@.{} | datetime }}}}", f.column()),
                     (Kind::RichText, _) => format!("{{{{ @@name@@.{} | rich_text }}}}", f.column()),
+                    (Kind::Image, _) => format!(
+                        "{{% if @@name@@.{c} %}}<img src=\"{{{{ @@name@@.{c}.url }}}}\" alt=\"\" width=\"320\">{{% else %}}—{{% endif %}}",
+                        c = f.column()
+                    ),
+                    (Kind::File, _) => format!(
+                        "{{% if @@name@@.{c} %}}<a href=\"{{{{ @@name@@.{c}.url }}}}\">{{{{ @@name@@.{c}.filename }}}}</a>{{% else %}}—{{% endif %}}",
+                        c = f.column()
+                    ),
                     (Kind::Bool, _) => format!("{{{{ \"Yes\" if @@name@@.{} else \"No\" }}}}", f.column()),
                     (_, true) => {
                         format!("{{{{ @@name@@.{} if @@name@@.{} is not none else \"—\" }}}}", f.column(), f.column())
@@ -852,11 +898,12 @@ impl Resource {
             "{{% set title = {title_expr} %}}\n<h1>{{{{ title }}}}</h1>\n<dl>\n{rows}</dl>\n{{% if can_edit %}}\n<p>\n  <a href=\"{{{{ path(\"@@names@@::edit\", id=@@name@@.id) }}}}\">Edit</a>\n  {{{{ button_to(\"Delete\", path(\"@@names@@::destroy\", id=@@name@@.id), method=\"delete\", class=\"inline\", confirm=\"Delete this {lower_one}? This can't be undone.\", confirm_button=\"Delete\", tone=\"danger\") }}}}\n</p>\n{{% endif %}}\n<p><a href=\"{{{{ path(\"@@names@@::index\") }}}}\">All {lower_many}</a></p>\n",
             lower_many = human_many.to_lowercase(),
         );
+        let multipart = if self.form_fields().iter().any(|f| f.is_file()) { ", multipart=true" } else { "" };
         let new = format!(
-            "{{% set title = \"New {lower_one}\" %}}\n<h1>New {lower_one}</h1>\n{{{{ form_start(path(\"@@names@@::create\")) }}}}\n  {{{{ fields(form) }}}}\n  <button>Create {lower_one}</button>\n{{{{ form_end() }}}}\n<p><a href=\"{{{{ path(\"@@names@@::index\") }}}}\">Cancel</a></p>\n"
+            "{{% set title = \"New {lower_one}\" %}}\n<h1>New {lower_one}</h1>\n{{{{ form_start(path(\"@@names@@::create\"){multipart}) }}}}\n  {{{{ fields(form) }}}}\n  <button>Create {lower_one}</button>\n{{{{ form_end() }}}}\n<p><a href=\"{{{{ path(\"@@names@@::index\") }}}}\">Cancel</a></p>\n"
         );
         let edit = format!(
-            "{{% set title = \"Edit {lower_one}\" %}}\n<h1>Edit {lower_one}</h1>\n{{{{ form_start(path(\"@@names@@::update\", id=@@name@@.id), method=\"patch\") }}}}\n  {{{{ fields(form) }}}}\n  <button>Save {lower_one}</button>\n{{{{ form_end() }}}}\n<p><a href=\"{{{{ path(\"@@names@@::show\", id=@@name@@.id) }}}}\">Cancel</a></p>\n"
+            "{{% set title = \"Edit {lower_one}\" %}}\n<h1>Edit {lower_one}</h1>\n{{{{ form_start(path(\"@@names@@::update\", id=@@name@@.id), method=\"patch\"{multipart}) }}}}\n  {{{{ fields(form) }}}}\n  <button>Save {lower_one}</button>\n{{{{ form_end() }}}}\n<p><a href=\"{{{{ path(\"@@names@@::show\", id=@@name@@.id) }}}}\">Cancel</a></p>\n"
         );
         v.push(("display", &display));
         for (file, contents) in [("index", index), ("show", show), ("new", new), ("edit", edit)] {
@@ -892,8 +939,17 @@ impl Resource {
                 f.target.as_deref().unwrap_or("?")
             ));
         }
-        let create_pairs = pairs("Example", None);
-        let update_pairs = pairs("Updated", None);
+        // With file fields, forms go up as multipart with an upload per file.
+        let uploads: Vec<String> = fields
+            .iter()
+            .filter(|f| f.is_file())
+            .map(|f| format!("(\"{}\", {})", f.column(), f.sample_upload()))
+            .collect();
+        let with_files = |pairs: String| {
+            if uploads.is_empty() { pairs } else { format!("{pairs}], &[{}", uploads.join(", ")) }
+        };
+        let create_pairs = with_files(pairs("Example", None));
+        let update_pairs = with_files(pairs("Updated", None));
         let (owner_setup, owner_check) = match self.owner_field() {
             Some(owner) => (
                 format!("    let owner = @@Actor@@::find(@@name@@.{}).one_or_404(&app.db).await?;\n", owner.column()),
@@ -919,7 +975,7 @@ impl Resource {
             lower = human_one.to_lowercase(),
         );
         if let Some(required) = fields.iter().find(|f| f.is_text() && !f.optional) {
-            let invalid_pairs = pairs("Example", Some(&required.column()));
+            let invalid_pairs = with_files(pairs("Example", Some(&required.column())));
             tests.push_str(&format!(
                 "\n#[kiln::test]\nasync fn invalid_input_rerenders_the_form(app: TestApp) -> Result {{\n    let user = app.create::<@@Actor@@>().await?;\n{setup}    app.sign_in_as(&user)\n        .post_form(@@names@@::create::path(), &[{invalid_pairs}])\n        .await\n        .assert_status(422)\n        .assert_contains(\"{label} can&#x27;t be blank\");\n    assert_eq!(@@Name@@::query().count(&app.db).await?, 0);\n    Ok(())\n}}\n",
                 label = required.label(),
@@ -951,6 +1007,12 @@ impl Resource {
             tests.push_str(&format!(
                 "\n#[kiln::test]\nasync fn {name}_@@a@@_@@name@@(app: TestApp) -> Result {{\n    let @@name@@ = app.create::<@@Name@@>().await?;\n    let stranger = app.sign_in_as(&app.create::<@@Actor@@>().await?);\n{setup}{see}    stranger.get(@@names@@::edit::path(@@name@@.id)).await.assert_status(403);\n    stranger.patch_form(@@names@@::update::path(@@name@@.id), &[{update_pairs}]).await.assert_status(403);\n    stranger.delete(@@names@@::destroy::path(@@name@@.id)).await.assert_status(403);\n    assert_eq!(@@Name@@::query().count(&app.db).await?, 1);\n    Ok(())\n}}\n"
             ));
+        }
+        if !uploads.is_empty() {
+            tests = tests
+                .replace("post_form(", "post_multipart(")
+                .replace("patch_form(", "patch_multipart(")
+                .replace("testing::TestApp}", "testing::{TestApp, Upload}}");
         }
         let mut values = v.clone();
         values.push(("krate", &self.krate));

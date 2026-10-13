@@ -29,6 +29,20 @@ pub struct ErrorReport {
     pub fields: Option<crate::form::Errors>,
     /// For sign-in errors: the table of the record type that must be signed in.
     pub sign_in_for: Option<&'static str>,
+    /// Development only: fixes the page can run, shown as buttons ("Run migrations").
+    pub actions: Vec<ResolveAction>,
+}
+
+/// A fix an error page offers to run, posted to a `/kiln/resolve/..` control.
+#[derive(Debug, Clone)]
+pub struct ResolveAction {
+    pub label: String,
+    /// `/kiln/resolve/migrate`
+    pub path: String,
+    /// The `/kiln` control token.
+    pub token: String,
+    /// Where to go once it ran: the page that failed.
+    pub back: String,
 }
 
 impl ErrorReport {
@@ -43,6 +57,7 @@ impl ErrorReport {
             show_routes: false,
             fields: None,
             sign_in_for: None,
+            actions: vec![],
         }
     }
 
@@ -186,6 +201,13 @@ pub(crate) fn markdown(report: &ErrorReport, request: &RequestInfo<'_>) -> Strin
         let _ = writeln!(md, "## How to fix\n");
         for hint in &report.hints {
             let _ = writeln!(md, "- {hint}");
+        }
+        for action in &report.actions {
+            let _ = writeln!(
+                md,
+                "- Or run it from here: `POST {}` (the error page's \"{}\" button).",
+                action.path, action.label
+            );
         }
         md.push('\n');
     }
@@ -336,7 +358,19 @@ fn html_page(report: &ErrorReport, request: &RequestInfo<'_>, markdown: &str) ->
         for hint in &report.hints {
             let _ = write!(h, "<li>{}</li>", inline(hint));
         }
-        h.push_str("</ul></section>");
+        h.push_str("</ul>");
+        for action in &report.actions {
+            let _ = write!(
+                h,
+                "<form class=\"resolve\" method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"_kiln\" value=\"{}\">\
+                 <input type=\"hidden\" name=\"back\" value=\"{}\"><button>{}</button></form>",
+                esc(&action.path),
+                esc(&action.token),
+                esc(&action.back),
+                esc(&action.label)
+            );
+        }
+        h.push_str("</section>");
     }
 
     // Routes
@@ -437,6 +471,9 @@ code { font: 0.92em var(--mono); background: var(--code-bg); border: 1px solid v
 .source pre .hit i { color: var(--hit-rule); }
 .hints { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .hints li { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 12px 14px; max-width: 78ch; }
+.resolve { margin: 12px 0 0; }
+.resolve button { font: 600 14px/1 var(--sans); color: var(--panel); background: var(--sev); border: 0; border-radius: 8px; padding: 10px 16px; cursor: pointer; }
+.resolve button:hover { filter: brightness(1.08); }
 .table { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--panel); }
 table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
 th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; }

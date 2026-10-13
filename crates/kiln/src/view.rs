@@ -402,9 +402,14 @@ mod forms {
     pub fn form_start(action: String, kwargs: Kwargs) -> Result<Value, Error> {
         let method: Option<String> = kwargs.get("method")?;
         let class: Option<String> = kwargs.get("class")?;
-        let confirm = confirm_attributes(&kwargs)?;
+        // `multipart=true` for forms with file fields.
+        let multipart: Option<bool> = kwargs.get("multipart")?;
+        let mut extra = confirm_attributes(&kwargs)?;
+        if multipart == Some(true) {
+            extra.push_str(" enctype=\"multipart/form-data\"");
+        }
         kwargs.assert_all_used()?;
-        Ok(Value::from_safe_string(form_open(&action, method.as_deref(), class.as_deref(), &confirm)?))
+        Ok(Value::from_safe_string(form_open(&action, method.as_deref(), class.as_deref(), &extra)?))
     }
 
     /// `<form ..>` with the CSRF token and method override.
@@ -605,6 +610,36 @@ mod forms {
                     "  <label><input type=\"checkbox\" id=\"{id}\" name=\"{id}\" value=\"true\"{checked}> {}</label>",
                     esc(&label)
                 );
+            }
+            "file" => {
+                // The file it holds now (an edit, or a re-render after an error) rides along as a
+                // signed token; choosing a new file replaces it.
+                let current = field.get_attr("file")?;
+                let has_file = !(current.is_none() || current.is_undefined());
+                let attrs = if has_file { attrs.replacen(" required", "", 1) } else { attrs.clone() };
+                let accept = spec_text("accept")?.map(|a| format!(" accept=\"{}\"", esc(&a))).unwrap_or_default();
+                let _ = writeln!(html, "  <label for=\"{id}\">{}</label>", esc(&label));
+                if has_file {
+                    let url = text(&current, "url")?;
+                    let filename = text(&current, "filename")?;
+                    let _ = writeln!(html, "  <input type=\"hidden\" name=\"{id}\" value=\"{}\">", esc(&value));
+                    if current.get_attr("is_image")?.is_true() {
+                        let _ = writeln!(
+                            html,
+                            "  <p class=\"field-file\"><img src=\"{}\" alt=\"\" width=\"96\"> {}</p>",
+                            esc(&url),
+                            esc(&filename)
+                        );
+                    } else {
+                        let _ = writeln!(
+                            html,
+                            "  <p class=\"field-file\"><a href=\"{}\">{}</a></p>",
+                            esc(&url),
+                            esc(&filename)
+                        );
+                    }
+                }
+                let _ = writeln!(html, "  <input type=\"file\" {attrs}{accept}>");
             }
             "textarea" => {
                 lengths(&mut attrs)?;

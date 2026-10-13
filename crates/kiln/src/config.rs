@@ -101,6 +101,16 @@ pub(crate) fn set_root(root: &Path) {
     let _ = ROOT.set(root.to_owned());
 }
 
+/// The app directory, once `kiln::Cli` or a test set it.
+pub(crate) fn root() -> Option<PathBuf> {
+    ROOT.get().cloned()
+}
+
+/// One raw value: the environment variable, else the encrypted secrets.
+pub(crate) fn value(name: &str) -> Option<String> {
+    std::env::var(name).ok().or_else(|| secret_values().get(name).cloned())
+}
+
 /// Raw values for config loading: secrets file entries (when it can be decrypted).
 fn secret_values() -> &'static BTreeMap<String, String> {
     static VALUES: OnceLock<BTreeMap<String, String>> = OnceLock::new();

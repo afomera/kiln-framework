@@ -418,6 +418,11 @@ pub(crate) struct Viewer {
 }
 
 impl Viewer {
+    /// The token its control forms post.
+    pub(crate) fn token(&self) -> &str {
+        &self.token
+    }
+
     /// `seed` is the viewer's sign-in token (or a fixed string in development), so the
     /// token is per session and the same in every process.
     pub(crate) fn new(key: &crate::SecretKey, who: String, seed: &str) -> Self {
@@ -849,8 +854,13 @@ async fn act_on(db: &Db, request: Request) -> Response {
     if form.get("_kiln").map(String::as_str) != Some(token().as_str()) || token().is_empty() {
         return (StatusCode::FORBIDDEN, "missing or stale /kiln token; reload the page").into_response();
     }
-    let back = form.get("back").filter(|b| b.starts_with("/kiln")).cloned().unwrap_or_else(|| "/kiln/dashboard".into());
     let parts: Vec<&str> = path.trim_start_matches("/kiln/").split('/').collect();
+    // Error pages' fixes go back to the page that failed; other controls stay in /kiln.
+    let local = |b: &&String| b.starts_with('/') && !b.starts_with("//") && !b.contains('\\');
+    let back = match parts[..] {
+        ["resolve", ..] => form.get("back").filter(local).cloned().unwrap_or_else(|| "/".into()),
+        _ => form.get("back").filter(|b| b.starts_with("/kiln")).cloned().unwrap_or_else(|| "/kiln/dashboard".into()),
+    };
     let result: crate::Result<String> = async {
         Ok(match parts[..] {
             ["jobs", "retry_failed"] => format!("Queued {} failed job(s) again.", db.retry_jobs(None).await?),
@@ -897,6 +907,19 @@ async fn act_on(db: &Db, request: Request) -> Response {
                 } else {
                     format!("Batch #{id} had already ended.")
                 }
+            }
+            // Offered by development error pages (pending migrations).
+            ["resolve", "migrate"] if !crate::config::is_production() => {
+                let root = crate::config::root()
+                    .ok_or_else(|| crate::Error::Config("the app directory isn't known".into()))?;
+                // `migrate` holds a connection across statements in a way that isn't `Send`,
+                // so it runs on a thread of its own.
+                let (db, dir) = (db.clone(), root.join("db/migrations"));
+                let applied =
+                    tokio::task::spawn_blocking(move || tokio::runtime::Handle::current().block_on(db.migrate(&dir)))
+                        .await
+                        .map_err(|e| crate::Error::Config(format!("migrating failed: {e}")))??;
+                format!("Applied {} migration(s).", applied.len())
             }
             _ => return Err(crate::Error::NotFound),
         })

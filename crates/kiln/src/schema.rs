@@ -15,4 +15,6 @@ pub struct ColumnSchema {
     pub indexed: bool,
     pub references: Option<&'static str>,
     pub variants: &'static [&'static str],
+    /// An `Attachment` column (its files are kept while a row holds them).
+    pub attachment: bool,
 }

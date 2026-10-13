@@ -20,6 +20,7 @@ impl Preview for CommentNotification {
             slug: "hello-kiln".into(),
             title: "Hello, Kiln".into(),
             body: "The compiler is the reviewer.".into(),
+            cover: None,
             status: PostStatus::Published,
             author_id: Id::new(1),
             editor_id: None,

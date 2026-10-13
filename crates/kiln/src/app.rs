@@ -29,6 +29,10 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    pub(crate) fn signing_key(&self) -> &SecretKey {
+        &self.key
+    }
+
     /// Signed, expiring tokens for links in email (password resets, confirmations).
     pub fn tokens(&self) -> crate::auth::Tokens {
         crate::auth::Tokens::new(self.key.clone())
@@ -67,6 +71,7 @@ pub struct App {
     sign_ins: Vec<Arc<dyn SignIn>>,
     assets: Option<Assets>,
     tools: Option<ToolsAccess>,
+    stop_on_pending_migrations: bool,
 }
 
 /// Decides who may use `/kiln` in production: `(who, seed)` for an allowed viewer, where
@@ -134,6 +139,7 @@ struct Shared {
     tools: Option<ToolsAccess>,
     /// The app's context, for `/kiln` pages that run app code (mail previews).
     ctx: Ctx,
+    stop_on_pending_migrations: bool,
 }
 
 #[derive(Clone)]
@@ -157,6 +163,7 @@ impl App {
             sign_ins: vec![],
             assets: None,
             tools: None,
+            stop_on_pending_migrations: false,
         }
     }
 
@@ -184,6 +191,14 @@ impl App {
                 Ok(viewer.map(|record| (format!("{} #{}", T::TABLE, record.id().get()), token)))
             })
         }));
+        self
+    }
+
+    /// In development, every page shows "migrations are pending" (with a button that runs
+    /// them) until they're applied. Off by default: pages load as usual, and only an error from
+    /// the database offers to migrate.
+    pub fn stop_on_pending_migrations(mut self) -> Self {
+        self.stop_on_pending_migrations = true;
         self
     }
 
@@ -255,6 +270,7 @@ impl App {
     /// request handling: sessions, flash, CSRF, method override, rendering, logging and
     /// error pages.
     pub fn router(&self) -> axum::Router {
+        crate::storage::set_signing_key(&self.key);
         let sign_ins: Arc<[Arc<dyn SignIn>]> = self.sign_ins.clone().into();
         let route_state = RouteState { ctx: self.ctx.clone(), key: self.key.clone(), sign_ins: sign_ins.clone() };
         let routes = routes()
@@ -269,6 +285,7 @@ impl App {
             assets: self.assets.clone(),
             tools: self.tools.clone(),
             ctx: self.ctx.clone(),
+            stop_on_pending_migrations: self.stop_on_pending_migrations,
         });
         // Method override must happen before routing, so request handling wraps the whole
         // router instead of each route.
@@ -430,6 +447,60 @@ fn cookie_in<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a s
         .find_map(|pair| pair.trim().strip_prefix(name)?.strip_prefix('='))
 }
 
+/// In development, the migrations not yet applied (`version_name`); none in production.
+async fn pending_migration_names(db: &Db) -> Vec<String> {
+    if crate::config::is_production() {
+        return vec![];
+    }
+    let Some(root) = crate::config::root() else { return vec![] };
+    match db.pending_migrations(&root.join("db/migrations")).await {
+        Ok(pending) => pending.iter().map(|m| format!("{}_{}", m.version, m.name)).collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// Says which migrations are waiting and offers to run them.
+fn offer_migrations(report: &mut ErrorReport, key: &SecretKey, pending: &[String], back: &str) {
+    report.hints.insert(
+        0,
+        format!("{} migration(s) haven't been applied: {}. Run `kiln db migrate`.", pending.len(), pending.join(", ")),
+    );
+    let viewer = crate::devtools::Viewer::new(key, "development".into(), "development");
+    report.actions.push(crate::error_page::ResolveAction {
+        label: "Run migrations".into(),
+        path: "/kiln/resolve/migrate".into(),
+        token: viewer.token().to_owned(),
+        back: back.to_owned(),
+    });
+}
+
+/// The text fields of a multipart body (`_method`, `_csrf`, ..); files are skipped.
+async fn multipart_text_fields(bytes: axum::body::Bytes, boundary: &str) -> Vec<(String, String)> {
+    let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes) });
+    let mut multipart = multer::Multipart::new(stream, boundary);
+    let mut fields = vec![];
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or_default().to_owned();
+        if field.file_name().is_some() || !name.starts_with('_') {
+            continue;
+        }
+        if let Ok(text) = field.text().await {
+            fields.push((name, text));
+        }
+    }
+    fields
+}
+
+fn too_large() -> Response {
+    let mut response = Error::BadRequest(format!(
+        "the upload is larger than MAX_UPLOAD_SIZE ({} bytes)",
+        crate::storage::max_upload_size()
+    ))
+    .into_response();
+    *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+    response
+}
+
 /// Logs one line per request under the `kiln::request` target and runs the browser
 /// pipeline: session, flash, CSRF, `_method` override, and error pages (HTML for
 /// browsers, Markdown otherwise).
@@ -437,7 +508,9 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
     // `/kiln` tools: open in development; in production only for viewers `kiln_tools_for`
     // allows (everyone else falls through to an ordinary 404).
     let path = request.uri().path();
-    let tools_path = (path == "/kiln" || path.starts_with("/kiln/")) && !path.starts_with("/kiln/streams/");
+    let tools_path = (path == "/kiln" || path.starts_with("/kiln/"))
+        && !path.starts_with("/kiln/streams/")
+        && !path.starts_with(crate::storage::FILES_PATH);
     let viewer = if tools_path { tools_viewer(&shared, request.headers()).await } else { None };
     if *request.method() == Method::POST
         && let Some(viewer) = viewer.clone()
@@ -451,6 +524,8 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
             shared.assets.as_ref().and_then(|a| a.serve_asset(name))
         } else if path == crate::dev_reload::PATH && crate::dev_reload::enabled() {
             shared.assets.as_ref().map(crate::dev_reload::serve)
+        } else if path.starts_with(crate::storage::FILES_PATH) {
+            crate::storage::serve(&shared.ctx, &shared.key, path).await
         } else if path.starts_with("/kiln/streams/") {
             let last_event_id = request.headers().get("last-event-id").and_then(|v| v.to_str().ok());
             realtime::serve(shared.db.clone(), &shared.key, path, last_event_id).await
@@ -482,11 +557,10 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
 
     // Form bodies are buffered so `_method` and `_csrf` can be read before routing.
     let mutating = !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS);
-    let is_form = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.starts_with("application/x-www-form-urlencoded"));
+    let content_type = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let is_form = content_type.starts_with("application/x-www-form-urlencoded");
+    let boundary =
+        multer::parse_boundary(content_type).ok().filter(|_| content_type.starts_with("multipart/form-data"));
     let mut fields: Vec<(String, String)> = vec![];
     let body = if mutating && is_form {
         match axum::body::to_bytes(body, FORM_LIMIT).await {
@@ -495,6 +569,15 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
                 Body::from(bytes)
             }
             Err(_) => Body::empty(),
+        }
+    } else if let (true, Some(boundary)) = (mutating, boundary) {
+        // Uploads: buffered up to MAX_UPLOAD_SIZE (the form extractor reads them again).
+        match axum::body::to_bytes(body, crate::storage::max_upload_size() + FORM_LIMIT).await {
+            Ok(bytes) => {
+                fields = multipart_text_fields(bytes.clone(), &boundary).await;
+                Body::from(bytes)
+            }
+            Err(_) => return too_large(),
         }
     } else {
         body
@@ -512,7 +595,12 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
     let sent = parts.headers.get("x-csrf-token").and_then(|v| v.to_str().ok()).or_else(|| field("_csrf"));
     parts.extensions.insert(SubmittedCsrf(sent.map(str::to_owned)));
     parts.extensions.insert(session.clone());
-    let mut response = next.run(Request::from_parts(parts, body)).await;
+    let blocked = if shared.stop_on_pending_migrations { pending_migration_names(&shared.db).await } else { vec![] };
+    let mut response = if blocked.is_empty() {
+        next.run(Request::from_parts(parts, body)).await
+    } else {
+        Error::PendingMigrations(blocked).into_response()
+    };
 
     let api = response.extensions().get::<PipelineName>().is_some_and(|p| p.0 == "api");
     if let Some(flash) = response.extensions_mut().remove::<Flash>()
@@ -531,10 +619,19 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
     }
     let status = response.status().as_u16();
     let elapsed = started.elapsed();
-    let report = response
+    // In development, a database error with migrations waiting is almost always that.
+    let database_error =
+        response.extensions().get::<ErrorReport>().is_some_and(|r| matches!(r.code, "K1201" | "K1203"));
+    let pending = if database_error { pending_migration_names(&shared.db).await } else { vec![] };
+    let mut report = response
         .extensions_mut()
         .remove::<ErrorReport>()
         .or_else(|| ErrorReport::for_routing(response.status(), method.as_str(), &path));
+    if let Some(report) = report.as_mut()
+        && !pending.is_empty()
+    {
+        offer_migrations(report, &shared.key, &pending, if method == Method::GET { &full_path } else { "/" });
+    }
 
     response = match report {
         None => {
