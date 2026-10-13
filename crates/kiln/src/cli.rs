@@ -92,14 +92,26 @@ impl Cli {
         self.root.join("db/snapshot.json")
     }
 
+    /// The backend the app's migrations are written for (`db/snapshot.json`).
+    fn backend(&self) -> &'static dyn crate::dialect::Dialect {
+        Snapshot::load(&self.snapshot_path()).map(|s| s.dialect()).unwrap_or(&crate::dialect::Sqlite)
+    }
+
+    /// `DATABASE_URL`, else the backend's development database: `db/development.sqlite3`,
+    /// or `postgres://localhost/<app>_development`.
     fn database_url(&self) -> String {
-        std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| format!("sqlite://{}", self.root.join("db/development.sqlite3").display()))
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        match self.backend().name() {
+            "postgres" => format!("postgres://localhost/{}_development", app_name(&self.root)),
+            _ => format!("sqlite://{}", self.root.join("db/development.sqlite3").display()),
+        }
     }
 
     async fn db(&self) -> Result<Db> {
         std::fs::create_dir_all(self.root.join("db"))?;
-        Db::connect(&self.database_url()).await
+        Db::connect_or_create(&self.database_url()).await
     }
 
     async fn dispatch(self, args: &[&str]) -> Result {
@@ -306,8 +318,22 @@ impl Cli {
             return Err(Error::BadRequest(format!("migration names are snake_case, e.g. create_posts (got `{name}`)")));
         }
         let old = Snapshot::load(&self.snapshot_path())?;
-        let new = Snapshot::from_records();
-        let changes = diff(&old, &new);
+        // The backend is fixed by the first migration: the snapshot's, else DATABASE_URL's.
+        let dialect = match (&old.backend, std::env::var("DATABASE_URL")) {
+            (Some(_), Ok(url)) if crate::dialect::for_url(&url)?.name() != old.dialect().name() => {
+                return Err(Error::Config(format!(
+                    "this app's migrations are written for {}, but DATABASE_URL is {}; one app, one backend",
+                    old.dialect().name(),
+                    crate::dialect::for_url(&url)?.name()
+                )));
+            }
+            (Some(_), _) => old.dialect(),
+            (None, Ok(url)) if old.tables.is_empty() => crate::dialect::for_url(&url)?,
+            (None, _) => &crate::dialect::Sqlite,
+        };
+        let mut new = Snapshot::from_records();
+        new.backend = Some(dialect.name().to_owned());
+        let changes = crate::migrate::diff_for(&old, &new, dialect);
         if changes.is_empty() {
             println!("No schema changes: the record structs match db/snapshot.json.");
             return Ok(());
@@ -405,8 +431,12 @@ impl Cli {
         if std::env::var("DATABASE_URL").is_ok() {
             return Err(Error::BadRequest("`db reset` only resets the default development database".into()));
         }
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(self.root.join(format!("db/development.sqlite3{suffix}")));
+        if self.backend().name() == "postgres" {
+            self.db().await?.execute_script("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").await?;
+        } else {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(self.root.join(format!("db/development.sqlite3{suffix}")));
+            }
         }
         let applied = self.db().await?.migrate(&self.migrations_dir()).await?;
         println!("Recreated the development database ({} migrations).", applied.len());
@@ -438,4 +468,21 @@ fn workers() -> usize {
 
 fn parse_id(id: &str) -> Result<i64> {
     id.trim_start_matches('#').parse().map_err(|_| Error::BadRequest(format!("`{id}` isn't an id")))
+}
+
+/// The app's package name from Cargo.toml (`-` as `_`), for default database names.
+pub(crate) fn app_name(root: &Path) -> String {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
+    let mut in_package = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+        } else if in_package
+            && let Some(value) = line.strip_prefix("name")
+            && let Some(name) = value.trim_start().strip_prefix('=')
+        {
+            return name.trim().trim_matches('"').replace('-', "_");
+        }
+    }
+    root.file_name().map(|n| n.to_string_lossy().replace('-', "_")).unwrap_or_else(|| "app".into())
 }

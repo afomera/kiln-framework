@@ -50,10 +50,9 @@ impl TestApp {
     /// `app::configure` when `src/app.rs` exists).
     pub async fn configured(migrations: &Path, configure: impl FnOnce(App) -> Result<App>) -> Result<Self> {
         crate::config::use_test_env();
-        let db = Db::memory().await?;
-        db.migrate(migrations).await?;
         // `db/migrations` lives in the app's root, next to `assets/` and `public/`.
         let root = migrations.parent().and_then(Path::parent).unwrap_or(Path::new("."));
+        let db = test_database(root, migrations).await?;
         crate::config::set_root(root);
         let app = configure(App::new(db.clone()).root(root))?;
         crate::jobs::sync_app(app.ctx()).await?;
@@ -483,4 +482,71 @@ pub async fn job_attempts(db: &Db, name: &str) -> Result<Vec<i64>> {
         )
         .await?;
     Ok(rows.iter().map(|r| sqlx::Row::get(r, 0)).collect())
+}
+
+/// The database for one test.
+///
+/// - SQLite apps: a private in-memory database with the app's migrations applied.
+/// - Postgres apps (`db/snapshot.json` says so): `TEST_DATABASE_URL`, else
+///   `postgres://localhost/<app>_test`, with each test in its own fresh schema.
+/// - `KILN_TEST_DATABASE_URL=postgres://..` runs any app's tests on Postgres. When the app's
+///   migrations are for another backend, the schema comes from the record structs.
+async fn test_database(root: &Path, migrations: &Path) -> Result<Db> {
+    let snapshot = crate::Snapshot::load(&root.join("db/snapshot.json"))?;
+    let url = std::env::var("KILN_TEST_DATABASE_URL").ok().or_else(|| match snapshot.dialect().name() {
+        "postgres" => Some(
+            std::env::var("TEST_DATABASE_URL")
+                .unwrap_or_else(|_| format!("postgres://localhost/{}_test", crate::cli::app_name(root))),
+        ),
+        _ => None,
+    });
+    let Some(url) = url else {
+        let db = Db::memory().await?;
+        db.migrate(migrations).await?;
+        return Ok(db);
+    };
+    if crate::dialect::for_url(&url)?.name() != "postgres" {
+        let db = Db::connect(&url).await?;
+        db.migrate(migrations).await?;
+        return Ok(db);
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let schema = format!("kiln_t_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    drop_stale_schemas(&url).await;
+    let db = Db::postgres_schema(&url, &schema).await?;
+    if snapshot.dialect().name() == "postgres" {
+        db.migrate(migrations).await?;
+    } else {
+        let schema = crate::migrate::diff_for(
+            &crate::Snapshot::default(),
+            &crate::Snapshot::from_records(),
+            &crate::dialect::Postgres,
+        );
+        for statement in &schema.statements {
+            db.execute_script(statement).await?;
+        }
+    }
+    Ok(db)
+}
+
+/// Schemas left by earlier test runs (other processes), dropped once per process.
+async fn drop_stale_schemas(url: &str) {
+    static DONE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    DONE.get_or_init(|| async {
+        let Ok(db) = Db::connect_or_create(url).await else { return };
+        let mine = format!("kiln_t_{}_", std::process::id());
+        let Ok(rows) = db
+            .fetch_all("SELECT CAST(\"schema_name\" AS TEXT) FROM information_schema.schemata WHERE \"schema_name\" LIKE 'kiln_t_%'", vec![])
+            .await
+        else {
+            return;
+        };
+        for row in rows {
+            let name: String = sqlx::Row::get(&row, 0);
+            if !name.starts_with(&mine) {
+                let _ = db.execute_script(&format!("DROP SCHEMA IF EXISTS \"{name}\" CASCADE")).await;
+            }
+        }
+    })
+    .await;
 }

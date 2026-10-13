@@ -300,12 +300,8 @@ impl Db {
 
     /// Adds `columns` to a Kiln table made before they existed.
     pub(crate) async fn ensure_columns(&self, table: &str, columns: &[(&str, &str)]) -> Result<()> {
-        let existing: Vec<String> = self
-            .fetch_all(&format!("SELECT \"name\" FROM pragma_table_info('{table}')"), vec![])
-            .await?
-            .iter()
-            .map(|r| r.get(0))
-            .collect();
+        let existing: Vec<String> =
+            self.fetch_all(&self.dialect().columns_query(table), vec![]).await?.iter().map(|r| r.get(0)).collect();
         for (name, definition) in columns {
             if !existing.iter().any(|e| e == name) {
                 self.execute(&format!("ALTER TABLE \"{table}\" ADD COLUMN \"{name}\" {definition}")).await?;
@@ -322,9 +318,8 @@ impl Db {
         let due = if all { i64::MAX } else { now };
         let stale = now - STALE.as_micros() as i64;
         self.reap_cancelled(stale).await?;
-        let rows = self
-            .fetch_all(
-                "UPDATE \"kiln_jobs\" SET \"status\" = 'running', \"locked_at\" = ?, \"attempts\" = \"attempts\" + 1 \
+        let sql = format!(
+            "UPDATE \"kiln_jobs\" SET \"status\" = 'running', \"locked_at\" = ?, \"attempts\" = \"attempts\" + 1 \
                  WHERE \"id\" = (SELECT j.\"id\" FROM \"kiln_jobs\" j \
                    WHERE ((j.\"status\" = 'queued' AND j.\"run_at\" <= ?) OR (j.\"status\" = 'running' AND j.\"locked_at\" < ?)) \
                    AND j.\"cancel_requested\" = 0 \
@@ -332,11 +327,23 @@ impl Db {
                    AND NOT EXISTS (SELECT 1 FROM \"kiln_queue_limits\" l WHERE l.\"queue\" = j.\"queue\" \
                      AND (SELECT COUNT(*) FROM \"kiln_jobs\" r WHERE r.\"queue\" = l.\"queue\" AND r.\"status\" = 'running' \
                           AND r.\"locked_at\" >= ?) >= l.\"max_running\") \
-                   ORDER BY j.\"priority\" DESC, j.\"run_at\", j.\"id\" LIMIT 1) \
+                   ORDER BY j.\"priority\" DESC, j.\"run_at\", j.\"id\" LIMIT 1{lock}) \
                  RETURNING \"id\", \"name\", \"payload\", \"attempts\", \"max_attempts\", \"batch_id\", \"batch_hook\"",
-                vec![Value::Integer(now), Value::Integer(due), Value::Integer(stale), Value::Integer(stale)],
-            )
-            .await?;
+            lock = self.dialect().claim_lock(),
+        );
+        let binds = vec![Value::Integer(now), Value::Integer(due), Value::Integer(stale), Value::Integer(stale)];
+        // Where writes can run concurrently (Postgres), claims queue behind one lock, so the
+        // per-queue running counts they check can't race.
+        let rows = match self.dialect().serialize_claims() {
+            Some(lock) => {
+                self.transaction(|tx| async move {
+                    tx.fetch_all(lock, vec![]).await?;
+                    tx.fetch_all(&sql, binds).await
+                })
+                .await?
+            }
+            None => self.fetch_all(&sql, binds).await?,
+        };
         Ok(rows.first().map(|r| Claimed {
             id: r.get(0),
             name: r.get(1),
@@ -353,7 +360,7 @@ impl Db {
         let outcome = match outcome {
             Outcome::Released => {
                 self.fetch_all(
-                    "UPDATE \"kiln_jobs\" SET \"status\" = 'queued', \"locked_at\" = NULL, \"attempts\" = MAX(\"attempts\" - 1, 0) \
+                    "UPDATE \"kiln_jobs\" SET \"status\" = 'queued', \"locked_at\" = NULL, \"attempts\" = CASE WHEN \"attempts\" > 0 THEN \"attempts\" - 1 ELSE 0 END \
                      WHERE \"id\" = ? RETURNING \"id\"",
                     vec![Value::Integer(id)],
                 )
@@ -570,7 +577,7 @@ impl Db {
     pub async fn queues(&self) -> Result<Vec<(String, bool, i64, i64, i64)>> {
         let rows = self
             .fetch_all(
-                "SELECT q.\"queue\", EXISTS (SELECT 1 FROM \"kiln_queue_pauses\" p WHERE p.\"queue\" = q.\"queue\"), \
+                "SELECT q.\"queue\", CASE WHEN EXISTS (SELECT 1 FROM \"kiln_queue_pauses\" p WHERE p.\"queue\" = q.\"queue\") THEN 1 ELSE 0 END,\
                  (SELECT COUNT(*) FROM \"kiln_jobs\" j WHERE j.\"queue\" = q.\"queue\" AND j.\"status\" = 'queued'), \
                  (SELECT COUNT(*) FROM \"kiln_jobs\" j WHERE j.\"queue\" = q.\"queue\" AND j.\"status\" = 'running'), \
                  (SELECT COUNT(*) FROM \"kiln_jobs\" j WHERE j.\"queue\" = q.\"queue\" AND j.\"status\" = 'failed') \
@@ -678,13 +685,13 @@ async fn watch_attempt(
                 let sql = if heartbeat {
                     "UPDATE \"kiln_jobs\" SET \"locked_at\" = ? WHERE \"id\" = ? RETURNING \"cancel_requested\""
                 } else {
-                    "SELECT \"cancel_requested\" FROM \"kiln_jobs\" WHERE \"id\" = ? AND ? IS NOT NULL"
+                    "SELECT \"cancel_requested\" FROM \"kiln_jobs\" WHERE \"id\" = ?"
                 };
                 let binds = if heartbeat {
                     last_heartbeat = std::time::Instant::now();
                     vec![Value::Integer(micros(Timestamp::now())), Value::Integer(job.id)]
                 } else {
-                    vec![Value::Integer(job.id), Value::Integer(1)]
+                    vec![Value::Integer(job.id)]
                 };
                 let cancel = ctx.db.fetch_all(sql, binds).await.ok().and_then(|rows| rows.first().map(|r| r.get::<i64, _>(0) != 0));
                 if cancel == Some(true) {

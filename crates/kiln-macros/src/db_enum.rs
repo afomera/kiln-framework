@@ -55,7 +55,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
 
         impl ::kiln::FromColumn for #name {
-            fn from_column(__kiln_row: &::kiln::__private::SqliteRow, __kiln_name: &str) -> ::core::result::Result<Self, ::kiln::__private::sqlx::Error> {
+            fn from_column(__kiln_row: &::kiln::__private::Row, __kiln_name: &str) -> ::core::result::Result<Self, ::kiln::__private::sqlx::Error> {
                 let __kiln_raw = <::std::string::String as ::kiln::FromColumn>::from_column(__kiln_row, __kiln_name)?;
                 __kiln_raw.parse().map_err(|__kiln_e: ::kiln::Error| ::kiln::__private::sqlx::Error::ColumnDecode {
                     index: ::std::string::ToString::to_string(__kiln_name),

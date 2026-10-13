@@ -7,7 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sqlx::{Row, ValueRef, sqlite::SqliteRow};
+use sqlx::{Row, ValueRef};
 
 /// A typed primary key. `Id<Post>` and `Id<User>` are different types, so a foreign key
 /// can't be passed where another table's key is expected.
@@ -263,35 +263,49 @@ impl ToValue for Timestamp {
 
 /// Reads a column out of a row.
 pub trait FromColumn: Sized {
-    fn from_column(row: &SqliteRow, name: &str) -> Result<Self, sqlx::Error>;
+    fn from_column(row: &crate::Row, name: &str) -> Result<Self, sqlx::Error>;
 }
 
 macro_rules! native_from_column {
     ($($t:ty),*) => {$(
         impl FromColumn for $t {
-            fn from_column(row: &SqliteRow, name: &str) -> Result<Self, sqlx::Error> {
+            fn from_column(row: &crate::Row, name: &str) -> Result<Self, sqlx::Error> {
                 row.try_get(name)
             }
         }
     )*};
 }
 
-native_from_column!(String, i64, i32, bool, f64);
+native_from_column!(String, i64, f64);
+
+impl FromColumn for i32 {
+    fn from_column(row: &crate::Row, name: &str) -> Result<Self, sqlx::Error> {
+        let n: i64 = row.try_get(name)?;
+        i32::try_from(n).map_err(|e| sqlx::Error::ColumnDecode { index: name.to_owned(), source: Box::new(e) })
+    }
+}
+
+/// Booleans are stored as 0/1 integers on every backend, so they read back the same way.
+impl FromColumn for bool {
+    fn from_column(row: &crate::Row, name: &str) -> Result<Self, sqlx::Error> {
+        row.try_get::<bool, _>(name).or_else(|_| row.try_get::<i64, _>(name).map(|n| n != 0))
+    }
+}
 
 impl<T: FromColumn> FromColumn for Option<T> {
-    fn from_column(row: &SqliteRow, name: &str) -> Result<Self, sqlx::Error> {
+    fn from_column(row: &crate::Row, name: &str) -> Result<Self, sqlx::Error> {
         if row.try_get_raw(name)?.is_null() { Ok(None) } else { T::from_column(row, name).map(Some) }
     }
 }
 
 impl<T> FromColumn for Id<T> {
-    fn from_column(row: &SqliteRow, name: &str) -> Result<Self, sqlx::Error> {
+    fn from_column(row: &crate::Row, name: &str) -> Result<Self, sqlx::Error> {
         row.try_get::<i64, _>(name).map(Id::new)
     }
 }
 
 impl FromColumn for Timestamp {
-    fn from_column(row: &SqliteRow, name: &str) -> Result<Self, sqlx::Error> {
+    fn from_column(row: &crate::Row, name: &str) -> Result<Self, sqlx::Error> {
         let micros: i64 = row.try_get(name)?;
         jiff::Timestamp::from_microsecond(micros)
             .map(Timestamp)

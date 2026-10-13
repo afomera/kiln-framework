@@ -104,6 +104,17 @@ pub fn render<S: Serialize + ?Sized>(
     render_value(root, template, layout, Value::from_serialize(context))
 }
 
+/// An email's HTML body. Filters that link page assets (`rich_text`) leave them out, since
+/// mail clients don't load them.
+pub(crate) fn render_mail<S: Serialize + ?Sized>(
+    root: &'static str,
+    template: &str,
+    layout: Option<&str>,
+    context: &S,
+) -> Result<String> {
+    render_value(root, template, layout, context! { __kiln_mail => true, ..Value::from_serialize(context) })
+}
+
 /// Renders a template string (a mail subject) with `context`.
 pub(crate) fn render_str<S: Serialize + ?Sized>(root: &'static str, source: &str, context: &S) -> Result<String> {
     Ok(environment(root).render_str(source, context)?)
@@ -228,10 +239,14 @@ fn build_environment(root: &'static str) -> Environment<'static> {
     env.add_function("javascript_importmap", move || javascript_importmap(&assets));
     env.add_filter("datetime", datetime);
     // `{{ post.body | rich_text }}`: rich text as HTML, sanitized again on the way out.
-    env.add_filter("rich_text", |html: String| -> Value {
+    env.add_filter("rich_text", |state: &minijinja::State, html: String| -> Value {
         let clean = crate::RichText::new(&html);
         if clean.is_empty() {
             return Value::from_safe_string(String::new());
+        }
+        if state.lookup("__kiln_mail").is_some_and(|v| v.is_true()) {
+            // Email: no stylesheet or script to load; the mail layout styles the content.
+            return Value::from_safe_string(format!("<div class=\"kiln-rich-text-content\">{}</div>", clean.as_html()));
         }
         // Code blocks are highlighted in the browser, so only pages with one load the script.
         let highlight = if clean.contains("<pre") {
@@ -658,5 +673,27 @@ mod forms {
         }
         html.push_str("</div>");
         Ok(html)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rich_text_links_its_assets_on_pages_but_not_in_mail() {
+        let dir = std::env::temp_dir().join(format!("kiln-view-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("body.html.jinja"), "{{ body | rich_text }}").unwrap();
+        let root: &'static str = Box::leak(dir.display().to_string().into_boxed_str());
+        let context = BTreeMap::from([("body", "<p>Hi</p><pre>code</pre>")]);
+
+        let page = render(root, "body.html.jinja", None, &context).unwrap();
+        assert!(page.contains("<link rel=\"stylesheet\""), "{page}");
+        assert!(page.contains("kiln/rich-text-display"), "{page}");
+
+        let mail = render_mail(root, "body.html.jinja", None, &context).unwrap();
+        assert_eq!(mail, "<div class=\"kiln-rich-text-content\"><p>Hi</p><pre>code</pre></div>");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

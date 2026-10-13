@@ -19,7 +19,7 @@
 //! Where mail goes is `MAIL_URL`: `smtp://user:pass@host:587` (STARTTLS), `smtps://..`
 //! (TLS), or `outbox` (the development and test default), which stores messages in
 //! `kiln_mail` for `/kiln/mail` and `app.outbox()`. `MAIL_FROM` is the sender and
-//! `APP_URL` the base for `url(..)` in templates.
+//! `APP_URL` the base for `url(..)` in templates (default `http://localhost:$PORT`).
 
 use std::{future::Future, sync::OnceLock};
 
@@ -50,7 +50,7 @@ pub trait Mail: Serialize + Send + Sync {
 
     /// The finished message.
     fn message(&self) -> Result<Message> {
-        let html = crate::view::render(Self::ROOT, Self::TEMPLATE, Self::LAYOUT, self)?;
+        let html = crate::view::render_mail(Self::ROOT, Self::TEMPLATE, Self::LAYOUT, self)?;
         let text = Self::TEXT_TEMPLATE.map(|t| crate::view::render(Self::ROOT, t, None, self)).transpose()?;
         let subject = crate::view::render_str(Self::ROOT, Self::SUBJECT, self)?;
         Ok(Message {
@@ -134,8 +134,8 @@ struct MailSettings {
     mail_url: Secret<String>,
     #[config(default = "app@localhost")]
     mail_from: String,
-    #[config(default = "http://localhost:3000")]
-    app_url: String,
+    /// Unset: `http://localhost:<PORT>`, the address `kiln dev` serves on.
+    app_url: Option<String>,
 }
 
 fn settings() -> Result<&'static MailSettings> {
@@ -149,8 +149,10 @@ fn settings() -> Result<&'static MailSettings> {
 
 /// `APP_URL` + `path`, for links in emails (`{{ url(path("posts::show", post.slug)) }}`).
 pub(crate) fn absolute_url(path: &str) -> String {
-    let base = settings().map(|s| s.app_url.as_str()).unwrap_or("http://localhost:3000");
-    format!("{}{path}", base.trim_end_matches('/'))
+    match settings().ok().and_then(|s| s.app_url.as_deref()) {
+        Some(base) => format!("{}{path}", base.trim_end_matches('/')),
+        None => format!("http://localhost:{}{path}", std::env::var("PORT").unwrap_or_else(|_| "3000".into())),
+    }
 }
 
 /// The job behind `deliver_later`.

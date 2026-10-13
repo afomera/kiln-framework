@@ -296,7 +296,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 self.id
             }
 
-            fn from_row(__kiln_row: &::kiln::__private::SqliteRow) -> ::core::result::Result<Self, ::kiln::__private::sqlx::Error> {
+            fn from_row(__kiln_row: &::kiln::__private::Row) -> ::core::result::Result<Self, ::kiln::__private::sqlx::Error> {
                 ::core::result::Result::Ok(Self { #( #from_row_fields, )* })
             }
 

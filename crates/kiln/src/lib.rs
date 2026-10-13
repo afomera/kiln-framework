@@ -14,6 +14,7 @@ pub mod config;
 mod db;
 mod dev_reload;
 mod devtools;
+pub mod dialect;
 mod error;
 mod error_page;
 pub mod form;
@@ -39,10 +40,10 @@ pub mod view;
 pub use app::{App, Ctx};
 pub use axum::Json;
 pub use cli::Cli;
-pub use db::Db;
+pub use db::{Db, Row};
 pub use error::{Error, Result};
 pub use migrate::{
-    ColumnSnapshot, Diff, Migration, RecordDef, Snapshot, TableSnapshot, diff, load_migrations, records,
+    ColumnSnapshot, Diff, Migration, RecordDef, Snapshot, TableSnapshot, diff, diff_for, load_migrations, records,
     write_migration,
 };
 pub use query::{Column, Delete, Expr, Insert, Order, Query, Update};
@@ -67,8 +68,6 @@ pub use mail::{Mail, Preview};
 pub use notify::{Notify, Via};
 pub use schedule::Schedule;
 
-use sqlx::sqlite::SqliteRow;
-
 /// A database-backed entity. Derive it with `#[derive(Record)]`; the struct is the schema.
 pub trait Record: Sized + Clone + Send + Sync + serde::Serialize + 'static {
     const TABLE: &'static str;
@@ -79,7 +78,7 @@ pub trait Record: Sized + Clone + Send + Sync + serde::Serialize + 'static {
     type New: Send;
 
     fn id(&self) -> Id<Self>;
-    fn from_row(row: &SqliteRow) -> std::result::Result<Self, sqlx::Error>;
+    fn from_row(row: &Row) -> std::result::Result<Self, sqlx::Error>;
     fn new_values(new: Self::New) -> Vec<(&'static str, Value)>;
     fn schema() -> TableSchema;
 
@@ -128,9 +127,9 @@ pub mod __private {
     pub use inventory;
     pub use serde;
     pub use sqlx;
-    pub use sqlx::sqlite::SqliteRow;
     pub use tokio;
 
+    pub use crate::db::Row;
     pub use crate::routing::RawParams;
     pub use crate::view::assert_no_overlap;
 

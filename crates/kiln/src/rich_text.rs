@@ -140,7 +140,7 @@ impl ToValue for RichText {
 
 impl FromColumn for RichText {
     /// Stored values were sanitized on the way in; they're read back as they are.
-    fn from_column(row: &sqlx::sqlite::SqliteRow, name: &str) -> Result<Self, sqlx::Error> {
+    fn from_column(row: &crate::Row, name: &str) -> Result<Self, sqlx::Error> {
         Ok(Self::trusted(String::from_column(row, name)?))
     }
 }

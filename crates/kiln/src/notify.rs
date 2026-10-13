@@ -476,7 +476,7 @@ impl Db {
     }
 }
 
-fn row_to_notification(r: &sqlx::sqlite::SqliteRow) -> InboxItem {
+fn row_to_notification(r: &crate::Row) -> InboxItem {
     let at = |us: i64| Timestamp::from_jiff(jiff::Timestamp::from_microsecond(us).unwrap_or_default());
     InboxItem {
         id: r.get(0),

@@ -34,6 +34,9 @@ enum Command {
         /// Path to the kiln crate (defaults to the one this CLI was built from).
         #[arg(long)]
         kiln: Option<std::path::PathBuf>,
+        /// The database backend: `sqlite` (default) or `postgres`.
+        #[arg(long, default_value = "sqlite")]
+        database: String,
     },
     /// Generate code in the app's conventional shape.
     #[command(visible_alias = "g", subcommand)]
@@ -93,8 +96,8 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = (|| -> Result<bool, String> {
-        if let Command::New { name, kiln } = &cli.command {
-            return new::run(name, kiln.as_deref()).map(|()| true);
+        if let Command::New { name, kiln, database } = &cli.command {
+            return new::run(name, kiln.as_deref(), database).map(|()| true);
         }
         let app = app::App::find(cli.app.as_deref())?;
         match cli.command {

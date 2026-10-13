@@ -13,8 +13,8 @@ use crate::{
 pub enum Generate {
     /// A CRUD resource: record, migration, form, policy, ops, actions, views, templates,
     /// factory and tests. Fields: `title:string body:text published_at:timestamp?
-    /// owner:ref:User`. Types: string, text, integer, float, bool, timestamp, ref:<Record>;
-    /// a trailing `?` makes a field optional. The first required ref to a record people sign
+    /// owner:ref:User`. Types: string, text, rich_text, integer, float, bool, timestamp,
+    /// ref:<Record>; a trailing `?` makes a field optional. The first required ref to a record people sign
     /// in as (registered with `signs_in::<..>` in src/app.rs, e.g. `owner:ref:User` or
     /// `seller:ref:Merchant`) is the owner: set from the signed-in record. Owned resources
     /// are private: only the owner can list, see, edit or delete them. Pass `--public` to

@@ -529,7 +529,7 @@ async fn jobs_page(db: &Db, query: &HashMap<String, String>, notice: Option<&str
         binds.push(crate::Value::Text(queue.to_owned()));
     }
     for word in search.split_whitespace() {
-        conditions.push("(\"name\" LIKE ? OR \"payload\" LIKE ? OR COALESCE(\"last_error\", '') LIKE ? OR CAST(\"id\" AS TEXT) = ?)");
+        conditions.push("(LOWER(\"name\") LIKE LOWER(?) OR LOWER(\"payload\") LIKE LOWER(?) OR LOWER(COALESCE(\"last_error\", '')) LIKE LOWER(?) OR CAST(\"id\" AS TEXT) = ?)");
         let like = format!("%{word}%");
         binds.extend([
             crate::Value::Text(like.clone()),
@@ -1006,7 +1006,7 @@ async fn notifications_page(db: &Db, query: &Query) -> crate::Result<Response> {
     let rows = db
         .fetch_all(
             "SELECT \"id\", \"recipient_table\", \"recipient_id\", \"kind\", \"title\", COALESCE(\"body\", ''), COALESCE(\"url\", ''), \
-             \"read_at\" IS NOT NULL, \"created_at\" FROM \"kiln_notifications\" ORDER BY \"id\" DESC LIMIT 1000",
+             CASE WHEN \"read_at\" IS NOT NULL THEN 1 ELSE 0 END, \"created_at\" FROM \"kiln_notifications\" ORDER BY \"id\" DESC LIMIT 1000",
             vec![],
         )
         .await?;
@@ -1072,16 +1072,15 @@ async fn notifications_page(db: &Db, query: &Query) -> crate::Result<Response> {
 /// What a page shows, cheaply: when it changes, the page refreshes.
 fn signature_sql(page: &str) -> &'static str {
     const JOBS: &str = "(SELECT COUNT(*) || ':' || COALESCE(MAX(\"id\"), 0) || ':' || COALESCE(SUM(\"attempts\"), 0) || ':' || \
-        COALESCE(SUM(\"status\" = 'running'), 0) || ':' || COALESCE(SUM(\"cancel_requested\"), 0) || ':' || COALESCE(SUM(\"status\" = 'failed'), 0) || ':' || \
+        COALESCE(SUM(CASE WHEN \"status\" = 'running' THEN 1 ELSE 0 END), 0) || ':' || COALESCE(SUM(\"cancel_requested\"), 0) || ':' || COALESCE(SUM(CASE WHEN \"status\" = 'failed' THEN 1 ELSE 0 END), 0) || ':' || \
         COALESCE(SUM(\"run_at\"), 0) FROM \"kiln_jobs\") || '|' || (SELECT COUNT(*) FROM \"kiln_queue_pauses\")";
     const BATCHES: &str = "(SELECT COUNT(*) || ':' || COALESCE(SUM(\"pending\"), 0) || ':' || COALESCE(SUM(\"succeeded\"), 0) || ':' || \
-        COALESCE(SUM(\"fired_success\" + \"fired_failure\" + \"fired_complete\" + \"fired_cancel\"), 0) || ':' || COALESCE(SUM(\"status\" = 'cancelled'), 0) FROM \"kiln_batches\")";
+        COALESCE(SUM(\"fired_success\" + \"fired_failure\" + \"fired_complete\" + \"fired_cancel\"), 0) || ':' || COALESCE(SUM(CASE WHEN \"status\" = 'cancelled' THEN 1 ELSE 0 END), 0) FROM \"kiln_batches\")";
     const SCHEDULES: &str = "(SELECT COUNT(*) || ':' || COALESCE(SUM(\"last_run_at\"), 0) || ':' || COALESCE(SUM(\"paused\"), 0) || ':' || COALESCE(SUM(\"next_run_at\"), 0) FROM \"kiln_schedules\")";
     const MAIL: &str = "(SELECT COALESCE(MAX(\"id\"), 0) FROM \"kiln_mail\")";
     const BROADCASTS: &str = "(SELECT COALESCE(MAX(\"id\"), 0) FROM \"kiln_stream_messages\")";
     const SIGN_INS: &str = "(SELECT COUNT(*) || ':' || COALESCE(MAX(\"id\"), 0) FROM \"kiln_sessions\")";
-    const NOTIFICATIONS: &str =
-        "(SELECT COUNT(*) || ':' || COALESCE(SUM(\"read_at\" IS NULL), 0) FROM \"kiln_notifications\")";
+    const NOTIFICATIONS: &str = "(SELECT COUNT(*) || ':' || COALESCE(SUM(CASE WHEN \"read_at\" IS NULL THEN 1 ELSE 0 END), 0) FROM \"kiln_notifications\")";
     match page {
         "jobs" => concat_sql(&[JOBS]),
         "batches" => concat_sql(&[BATCHES, JOBS]),

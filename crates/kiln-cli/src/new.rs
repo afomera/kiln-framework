@@ -62,7 +62,15 @@ fn default_kiln_path() -> PathBuf {
     path.canonicalize().unwrap_or(path)
 }
 
-pub fn run(name: &str, kiln: Option<&Path>) -> Result<(), String> {
+pub fn run(name: &str, kiln: Option<&Path>, database: &str) -> Result<(), String> {
+    let database = match database {
+        "sqlite" | "sqlite3" => "sqlite",
+        "postgres" | "postgresql" | "pg" => "postgres",
+        "mysql" | "mariadb" => {
+            return Err("MySQL isn't supported yet (it's planned); use --database sqlite or postgres".into());
+        }
+        other => return Err(format!("unknown database `{other}`; use --database sqlite or postgres")),
+    };
     let dir = PathBuf::from(name);
     let app = dir.file_name().and_then(|n| n.to_str()).ok_or("give the app a name, e.g. `kiln new journal`")?;
     let crate_name = app.replace('-', "_");
@@ -93,6 +101,11 @@ pub fn run(name: &str, kiln: Option<&Path>) -> Result<(), String> {
     }
     write(&dir.join("AGENTS.md"), AGENTS_MD)?;
     println!("create  {}", dir.join("AGENTS.md").display());
+    if database != "sqlite" {
+        // The snapshot records the backend; migrations, `kiln dev` and tests follow it.
+        write(&dir.join("db/snapshot.json"), &format!("{{\n  \"backend\": \"{database}\",\n  \"tables\": {{}}\n}}\n"))?;
+        println!("create  {}", dir.join("db/snapshot.json").display());
+    }
     let rust_files: Vec<PathBuf> = FILES.iter().filter(|(p, _)| p.ends_with(".rs")).map(|(p, _)| dir.join(p)).collect();
     let _ = Command::new("rustfmt").args(["--edition", "2024"]).args(&rust_files).status();
 
@@ -108,14 +121,23 @@ pub fn run(name: &str, kiln: Option<&Path>) -> Result<(), String> {
     if !status.success() {
         return Err("the new app didn't build; see the errors above".into());
     }
-    let status = Command::new("cargo")
-        .args(["run", "--quiet", "--manifest-path"])
-        .arg(&manifest)
-        .args(["--", "db", "reset"])
-        .status()
-        .map_err(|e| format!("couldn't run cargo: {e}"))?;
-    if !status.success() {
-        return Err("the first migration didn't apply; see the errors above".into());
+    // Migrate and seed (not `db reset`, which refuses a DATABASE_URL it didn't pick).
+    for step in ["migrate", "seed"] {
+        let status = Command::new("cargo")
+            .args(["run", "--quiet", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--", "db", step])
+            .status()
+            .map_err(|e| format!("couldn't run cargo: {e}"))?;
+        if !status.success() {
+            return Err(format!("`db {step}` failed for the new app; see the errors above"));
+        }
+    }
+    if database == "postgres" {
+        println!(
+            "\n{app} uses Postgres: postgres://localhost/{crate_name}_development (tests: {crate_name}_test).\n\
+             Set DATABASE_URL / TEST_DATABASE_URL to use another server."
+        );
     }
     println!(
         "\ncreated {app}. Next:\n  cd {}\n  kiln dev        # http://127.0.0.1:3000\n  kiln check\n  kiln test",

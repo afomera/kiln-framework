@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, Error, Ident, LitStr};
+use syn::{DeriveInput, Error, Ident, LitStr, parse::Parse};
 
 pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let name = &input.ident;
@@ -14,20 +14,17 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             if meta.path.is_ident("description") {
                 description = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("optional") {
-                let mut channels = vec![];
-                meta.parse_nested_meta(|channel| {
-                    let ident = channel
-                        .path
-                        .get_ident()
-                        .cloned()
-                        .ok_or_else(|| channel.error("expected inbox, mail or broadcast"))?;
+                // Parsed by hand: `parse_nested_meta` refuses `optional()`, which is how a
+                // notice nobody may mute is written.
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let channels = content.parse_terminated(Ident::parse, syn::Token![,])?;
+                for ident in &channels {
                     if !["inbox", "mail", "broadcast"].contains(&ident.to_string().as_str()) {
-                        return Err(Error::new_spanned(&ident, "expected inbox, mail or broadcast"));
+                        return Err(Error::new_spanned(ident, "expected inbox, mail or broadcast"));
                     }
-                    channels.push(ident);
-                    Ok(())
-                })?;
-                optional = Some(channels);
+                }
+                optional = Some(channels.into_iter().collect());
             } else {
                 return Err(meta.error("expected `description = \"..\"` or `optional(mail, inbox)`"));
             }

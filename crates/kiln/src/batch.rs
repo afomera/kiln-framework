@@ -27,7 +27,8 @@ use crate::{
     jobs::{JobInfo, insert_job_in_batch},
 };
 
-/// A batch's id.
+/// A batch's id. Store it on a record (`pub import_batch: Option<BatchId>`) to show progress
+/// later with `ctx.db.batch(id)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct BatchId(pub i64);
 
@@ -35,6 +36,22 @@ impl std::fmt::Display for BatchId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+impl crate::types::ToValue for BatchId {
+    fn to_value(&self) -> Value {
+        Value::Integer(self.0)
+    }
+}
+
+impl crate::types::FromColumn for BatchId {
+    fn from_column(row: &crate::Row, name: &str) -> std::result::Result<Self, sqlx::Error> {
+        row.try_get::<i64, _>(name).map(BatchId)
+    }
+}
+
+impl crate::types::SqlType for BatchId {
+    const SQL: &'static str = "INTEGER";
 }
 
 tokio::task_local! {

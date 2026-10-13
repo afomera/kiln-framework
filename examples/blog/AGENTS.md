@@ -28,6 +28,7 @@ Run them from the app directory.
 | Inspect the running app | `/kiln` in development: routes, records, jobs, schedules, batches, mail, broadcasts, sign-ins, each searchable, with controls (retry, cancel, pause, run now) |
 | Secrets | `kiln secrets set SMTP_URL smtp://..`, `kiln secrets show` (key in `config/master.key`, never committed) |
 | Fresh database | `kiln db reset` (migrate + seed); sign in at /session/new as ada@example.com |
+| Database | SQLite (`db/development.sqlite3`) or Postgres (`kiln new app --database postgres`: `postgres://localhost/<app>_development`, tests in `<app>_test`); `DATABASE_URL` / `TEST_DATABASE_URL` override. `db/snapshot.json` records which. |
 
 Field types: `string`, `text`, `rich_text` (the editor; `?` means it may be left empty), `integer`, `float`, `bool`, `timestamp`, `ref:<Record>`. A
 trailing `?` makes a field optional; quote it in zsh (`'notes:text?'`).
@@ -75,6 +76,13 @@ generated tests passing.
 
 ## Rules that bite
 
+- **SQL is written once, for every backend:** queries built with `Record::query()` and filters
+  work on SQLite and Postgres alike. Migrations are generated for the app's backend (the file's
+  `-- kiln: backend` line) and won't run on another; regenerate rather than hand-port them. In raw
+  SQL use `?` placeholders and double-quoted identifiers, and avoid backend-only functions
+  (`MAX(a, b)`, `IFNULL`, `ILIKE`): `CASE WHEN`, `COALESCE`, `LOWER(..) LIKE LOWER(?)` work everywhere.
+  Booleans are stored as 0/1 integers.
+
 - **Relations exist only when preloaded:** `.preload(post::author)` before `post.author()`,
   and the view's field type lists them: `Loaded<Post, (post::author,)>`. Templates read
   `post.author.name`.
@@ -118,7 +126,7 @@ generated tests passing.
   - `Timestamp` values are UTC.
   - Build them with `Timestamp::now()`, `Timestamp::days_from_now(7)`, `hours_ago(2)`, or `ts + kiln::time::SignedDuration::from_mins(30)`.
   - Compare in queries with `event::starts_at.gt(Timestamp::now())`.
-  - Display with `{{ event.starts_at | datetime }}` or `{{ event.starts_at | datetime("%b %-d") }}`.
+  - Display with `{{ event.starts_at | datetime }}` (`Oct 12, 2026 09:30 UTC`; the default format ends in `UTC`) or `{{ event.starts_at | datetime("%b %-d") }}`.
   - Form time inputs are read as UTC.
 - **API routes** (`pipeline = Api`) take JSON or form bodies through the same `Form<T>`, return
   JSON problem reports on errors, and never use the session cookie. API auth (tokens) isn't
@@ -133,7 +141,8 @@ generated tests passing.
   (`<turbo-frame id="new_comment">`) render pages without the layout.
 - **Realtime:** in an op, `tx.broadcast(&post::stream_name(post.id), TurboStream::new().append(..))`
   inside the same `ctx.db.transaction` as the write (a rolled-back write never
-  broadcasts); in the page, `{{ turbo_stream_from("post:" ~ post.id) }}`. Keep the stream
+  broadcasts); in the page, `{{ turbo_stream_from("post:" ~ post.id) }}` (it renders a signed
+  `<turbo-stream-source>` tag; assert on `turbo-stream-source` in page tests). Keep the stream
   name in one helper (`post::stream_name`) so Rust and templates agree. Broadcasts go to
   everyone, so their views can't use `current_user`. Reconnecting pages get what they
   missed; older gaps refresh the page.
@@ -159,7 +168,10 @@ generated tests passing.
   once per slot. Test with `app.run_schedules_at(Timestamp::now() + SignedDuration::from_hours(25))`.
 - **Batches:** `Batch::new("Import").jobs(rows.map(..)).on_success(J).on_failure(J).on_complete(J).on_cancel(J).enqueue(&tx)`
   returns a `BatchId`; hooks are jobs and fire once. Inside a batch's job or hook, `BatchId::current()`;
-  jobs fan out with `batch.add(&ctx.db, job)`, hooks read `batch.status(&ctx.db)`.
+  jobs fan out with `batch.add(&ctx.db, job)`, hooks read `batch.status(&ctx.db)`. A `BatchId` can be a
+  record field (`pub import_batch: Option<BatchId>`); show progress with `ctx.db.batch(id).await?`, a
+  `BatchStatus { status, total, pending, succeeded, failed, cancelled, .. }`. An empty batch finishes
+  (and succeeds) at once.
 - **`/kiln` in production** is off unless `app.kiln_tools_for::<User>(|user| user.admin)` in `src/app.rs`;
   then only those users see it (others get a 404), and every control used is logged.
 - **Testing jobs:** `app.assert_enqueued::<SendDigest>(1).await?`, `app.enqueued::<J>()`, then
@@ -176,7 +188,8 @@ generated tests passing.
   `tokens.matches(token, bound_to)`; binding to the password digest makes a token single-use.
   Factories and seeds give users the password `password`.
 - **Mail:** `Welcome { to, .. }.deliver_later(&tx).await?` inside the write's transaction;
-  it renders now and a job delivers it. Links in mail must be absolute:
+  it renders now and a job delivers it. `mail.deliver_now(&ctx).await?` sends immediately (no job; for
+  jobs that are themselves the delivery). Links in mail must be absolute:
   `{{ url(path("posts::show", slug=post.slug)) }}` (base: `APP_URL`). `MAIL_URL` picks the
   transport (`smtp://user:pass@host:587`, `smtps://..`); in development and tests mail
   goes to the outbox: browse it at `/kiln/mail`. `MAIL_FROM` sets the sender.
