@@ -77,6 +77,8 @@ pub enum Kind {
     Build,
     /// A one-off `kiln` command, e.g. `check`.
     Task { args: Vec<String> },
+    /// The app's routes, listed from the last good build (nothing runs).
+    Routes,
 }
 
 /// What a process is doing, for display.
@@ -106,6 +108,8 @@ pub enum Status {
     Crashed,
     /// Crashed too often (or right after starting) to keep restarting.
     Failed,
+    /// The routes are listed.
+    Listed,
 }
 
 impl Status {
@@ -125,6 +129,7 @@ impl Status {
             Status::Exited => "exited",
             Status::Crashed => "crashed",
             Status::Failed => "failed",
+            Status::Listed => "listed",
         }
     }
 }
@@ -286,6 +291,13 @@ impl Proc {
     /// What it's doing.
     pub fn status(&self) -> Status {
         match (&self.state, &self.kind) {
+            (_, Kind::Routes) => {
+                if self.lines.len() == 0 {
+                    Status::Waiting
+                } else {
+                    Status::Listed
+                }
+            }
             (State::Idle, _) => Status::Waiting,
             (State::Running { .. }, Kind::Build) => Status::Building,
             (State::Running { .. }, _) => match self.activity {
@@ -344,6 +356,7 @@ impl Proc {
             Kind::Service { command, .. } => command.clone(),
             Kind::Build => "cargo build".into(),
             Kind::Task { args } => format!("kiln {}", args.join(" ")),
+            Kind::Routes => "routes (r refreshes)".into(),
         }
     }
 
@@ -389,6 +402,8 @@ pub struct Supervisor {
     pub notices: Vec<Notice>,
     /// The build's index in `procs`.
     pub build: usize,
+    /// The routes list's index in `procs`.
+    pub routes: usize,
     events: Sender<Event>,
     policy: RestartPolicy,
     binary: Option<PathBuf>,
@@ -412,6 +427,8 @@ impl Supervisor {
             .collect();
         let build = procs.len();
         procs.push(Proc::new("build", Kind::Build));
+        let routes = procs.len();
+        procs.push(Proc::new("routes", Kind::Routes));
         Self {
             seen: build::snapshot(&config.root),
             config,
@@ -419,6 +436,7 @@ impl Supervisor {
             combined: Ring::new(COMBINED_LINES),
             notices: vec![],
             build,
+            routes,
             events,
             policy: RestartPolicy::default(),
             binary: None,
@@ -571,6 +589,7 @@ impl Supervisor {
                 proc.state = State::Done(Outcome::Exited(exit.clone()));
                 self.system(id, &format!("exited ({exit})"));
             }
+            Kind::Routes => {}
             Kind::Service { .. } => {
                 let name = proc.name.clone();
                 self.system(id, &format!("exited ({exit})"));
@@ -602,6 +621,9 @@ impl Supervisor {
 
     /// Starts process `id` (which isn't running).
     fn start(&mut self, id: usize) {
+        if id == self.routes {
+            return self.list_routes();
+        }
         let proc = &mut self.procs[id];
         proc.activity = None;
         proc.assemblers.clear();
@@ -644,6 +666,7 @@ impl Supervisor {
                 full.extend(args.iter().map(Into::into));
                 Spec { program: exe.into(), args: full, env: vec![], cwd: self.config.cwd.clone() }
             }
+            Kind::Routes => unreachable!("routes are listed, not run"),
         };
         let mut spec = spec;
         spec.env.push(("PORT".into(), self.config.port.clone().into()));
@@ -710,6 +733,7 @@ impl Supervisor {
                 let first = self.binary.is_none();
                 self.binary = Some(binary);
                 self.system(self.build, "build succeeded");
+                self.list_routes();
                 self.notices.push(Notice::BuildSucceeded { first });
                 if first {
                     self.say(format!("{}  (watching src/ and Cargo.toml)", self.url()));
@@ -794,13 +818,39 @@ impl Supervisor {
         if id == self.build {
             return self.rebuild();
         }
+        if id == self.routes {
+            return self.list_routes();
+        }
         self.procs[id].attempts = 0;
         self.stop(id, Then::Start);
     }
 
+    /// Fills the routes list from the last good build (`<app> routes --json`).
+    pub fn list_routes(&mut self) {
+        let Some(binary) = self.binary.clone() else { return };
+        let output = std::process::Command::new(&binary)
+            .args(["routes", "--json"])
+            .current_dir(&self.config.cwd)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let manifest: Option<serde_json::Value> =
+            output.ok().filter(|o| o.status.success()).and_then(|o| serde_json::from_slice(&o.stdout).ok());
+        let routes = manifest.as_ref().and_then(|m| m["routes"].as_array()).cloned().unwrap_or_default();
+        let proc = &mut self.procs[self.routes];
+        proc.lines.clear();
+        if manifest.is_none() {
+            proc.lines.push(Rc::new(Line::system("couldn't list the routes (`kiln routes` shows why)")));
+            return;
+        }
+        for line in route_lines(&routes) {
+            proc.lines.push(Rc::new(line));
+        }
+    }
+
     /// Stops process `id` if it runs, or starts it.
     pub fn toggle(&mut self, id: usize) {
-        if self.quitting || id >= self.procs.len() {
+        if self.quitting || id >= self.procs.len() || id == self.routes {
             return;
         }
         match &self.procs[id].state {
@@ -1042,5 +1092,60 @@ mod tests {
         run_until(&mut sup, &rx, |s| s.procs[0].status() == Status::Compiling);
         sup.quit();
         run_until(&mut sup, &rx, Supervisor::done);
+    }
+}
+
+/// `examples/blog/src/actions/posts/index.rs` → `src/actions/posts/index.rs`: paths from
+/// the app's directory, however the workspace nests it.
+fn in_app(file: &str) -> &str {
+    match file.find("src/") {
+        Some(at) if at == 0 || file[..at].ends_with('/') => &file[at..],
+        _ => file,
+    }
+}
+
+/// The routes as aligned, colored rows: method, path, action, then where it's defined.
+fn route_lines(routes: &[serde_json::Value]) -> Vec<Line> {
+    let field = |r: &serde_json::Value, k: &str| r[k].as_str().unwrap_or("").to_owned();
+    let path_width = routes.iter().map(|r| field(r, "path").chars().count()).max().unwrap_or(4).min(56);
+    let action_width = routes.iter().map(|r| field(r, "action").chars().count()).max().unwrap_or(6).min(40);
+    let mut lines = vec![Line::system(&format!("{} routes · r refreshes · / searches", routes.len()))];
+    for r in routes {
+        let method = field(r, "method");
+        let color = match method.as_str() {
+            "GET" | "HEAD" => "32",
+            "POST" => "33",
+            "PATCH" | "PUT" => "34",
+            "DELETE" => "31",
+            _ => "37",
+        };
+        let at = match (r["file"].as_str(), r["line"].as_u64()) {
+            (Some(file), Some(line)) => format!("{}:{line}", in_app(file)),
+            (Some(file), None) => in_app(file).to_owned(),
+            _ => String::new(),
+        };
+        lines.push(Line::new(format!(
+            "\x1b[{color}m{method:<6}\x1b[0m {:<path_width$}  {:<action_width$}  \x1b[2m{at}\x1b[0m",
+            field(r, "path"),
+            field(r, "action"),
+        )));
+    }
+    lines
+}
+
+#[cfg(test)]
+mod route_list_tests {
+    use super::*;
+
+    #[test]
+    fn routes_line_up() {
+        let routes = vec![
+            serde_json::json!({ "method": "GET", "path": "/posts", "action": "posts::index", "file": "src/actions/posts/index.rs", "line": 5 }),
+            serde_json::json!({ "method": "DELETE", "path": "/posts/{slug}", "action": "posts::destroy", "file": "src/actions/posts/destroy.rs", "line": 5 }),
+        ];
+        let lines = route_lines(&routes);
+        assert_eq!(lines[0].plain, "2 routes · r refreshes · / searches");
+        assert_eq!(lines[1].plain, "GET    /posts         posts::index    src/actions/posts/index.rs:5");
+        assert_eq!(lines[2].plain, "DELETE /posts/{slug}  posts::destroy  src/actions/posts/destroy.rs:5");
     }
 }

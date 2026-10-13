@@ -307,7 +307,12 @@ impl App {
                 e.into()
             }
         })?;
-        println!("{}\n\nkiln listening on http://{addr}", routes_table());
+        // Under `kiln dev` the routes have their own pane (and `kiln routes` lists them).
+        if std::env::var("KILN_DEV_STDIN_WATCH").as_deref() == Ok("1") {
+            println!("kiln listening on http://{addr} ({} routes)", routes().len());
+        } else {
+            println!("{}\n\nkiln listening on http://{addr}", routes_table());
+        }
         // SIGTERM stops new connections and lets requests finish (open streams end).
         axum::serve(listener, self.router().into_make_service_with_connect_info::<std::net::SocketAddr>())
             .with_graceful_shutdown(crate::jobs::shutdown_requested())

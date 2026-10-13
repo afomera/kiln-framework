@@ -75,6 +75,8 @@ struct Scroll {
     bottom: usize,
     /// The current search match.
     cursor: Option<usize>,
+    /// Shown at least once (tables like the routes list open at the top).
+    opened: bool,
 }
 
 /// What the TUI shows and where.

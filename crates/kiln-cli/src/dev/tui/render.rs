@@ -68,6 +68,7 @@ fn dot(status: Status) -> (&'static str, Style) {
         Status::Stopping => ("◌", style.fg(Color::Yellow)),
         Status::Exited => ("✓", style.fg(Color::DarkGray)),
         Status::Crashed => ("●", style.fg(Color::Red)),
+        Status::Listed => ("≡", style.fg(Color::Cyan)),
     }
 }
 
@@ -214,11 +215,17 @@ fn draw_output(frame: &mut Frame, area: Rect, ui: &mut Ui, sup: &Supervisor) {
         View::Tabs if ui.filter.is_none() => sup.procs[ui.selected].partial(),
         _ => None,
     };
+    let ui_routes = ui.view == View::Tabs && sup.procs[ui.selected].kind == Kind::Routes;
     let scroll = match ui.view {
         View::Stream => &mut ui.stream,
         View::Tabs => &mut ui.scrolls[ui.selected],
     };
     let len = lines.len();
+    // The routes list is a table: it opens at its first row, not following the end.
+    if ui_routes && !scroll.opened && len > 0 {
+        scroll.offset = len;
+    }
+    scroll.opened |= len > 0;
     scroll.offset = scroll.offset.min(len.saturating_sub(1));
     if scroll.offset == 0 {
         scroll.unseen = false;
@@ -227,7 +234,9 @@ fn draw_output(frame: &mut Frame, area: Rect, ui: &mut Ui, sup: &Supervisor) {
     let make = |index: usize| -> Vec<TextLine<'static>> {
         let (id, line) = lines[index];
         if !stream {
-            return rows(line, width, search.as_deref()).into_iter().map(TextLine::from).collect();
+            let rows = rows(line, width, search.as_deref()).into_iter().map(TextLine::from);
+            // A table: rows too wide for the pane are cut, not wrapped.
+            return if sup.procs[id].kind == Kind::Routes { rows.take(1).collect() } else { rows.collect() };
         }
         let label = Span::styled(
             format!("{:>label_width$} │ ", sup.procs[id].name),
