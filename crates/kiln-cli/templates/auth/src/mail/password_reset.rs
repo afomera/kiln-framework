@@ -5,7 +5,7 @@ use crate::records::User;
 
 /// A password reset link, good for one hour and one use.
 #[derive(Mail, Serialize)]
-#[mail(template = "mail/password_reset", subject = "Reset your password")]
+#[mail(template = "mail/password_reset", subject = "Reset your password", preview)]
 pub struct PasswordReset {
     pub to: String,
     pub name: String,
@@ -17,5 +17,13 @@ impl PasswordReset {
         // Bound to the current password: once it changes, the link stops working.
         let token = ctx.tokens().make("password_reset", user.id, &user.password_digest, SignedDuration::from_hours(1));
         Self { to: user.email.clone(), name: user.name.clone(), token }
+    }
+}
+
+/// Previewed with the first user (`kiln db seed` creates some).
+impl Preview for PasswordReset {
+    async fn preview(ctx: &Ctx) -> Result<Self> {
+        let user = User::query().one(&ctx.db).await?.ok_or_else(|| Error::BadRequest("create a user to preview this mail".into()))?;
+        Ok(Self::for_user(ctx, &user))
     }
 }

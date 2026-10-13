@@ -44,6 +44,7 @@ pub(crate) struct Entry {
     pub queue: &'static str,
     pub payload: String,
     pub max_attempts: i64,
+    pub priority: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,7 +83,14 @@ impl Schedule {
             panic!("`{name}` is scheduled twice; a job type gets one schedule");
         }
         let payload = serde_json::to_string(&job).unwrap_or_else(|e| panic!("job `{name}` doesn't serialize: {e}"));
-        self.entries.push(Entry { name, when, queue: J::QUEUE, payload, max_attempts: J::ATTEMPTS });
+        self.entries.push(Entry {
+            name,
+            when,
+            queue: J::QUEUE,
+            payload,
+            max_attempts: J::ATTEMPTS,
+            priority: J::PRIORITY,
+        });
         self
     }
 }
@@ -175,6 +183,7 @@ impl Db {
              \"paused\" INTEGER NOT NULL DEFAULT 0)",
         )
         .await?;
+        self.ensure_columns("kiln_schedules", &[("priority", "INTEGER NOT NULL DEFAULT 0")]).await?;
         Ok(self)
     }
 
@@ -185,12 +194,12 @@ impl Db {
             let next =
                 entry.when.next_after(now).ok_or_else(|| Error::Config(format!("`{}` never runs", entry.name)))?;
             self.fetch_all(
-                "INSERT INTO \"kiln_schedules\" (\"name\", \"kind\", \"expr\", \"tz\", \"queue\", \"payload\", \"max_attempts\", \"next_run_at\") \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (\"name\") DO UPDATE SET \
+                "INSERT INTO \"kiln_schedules\" (\"name\", \"kind\", \"expr\", \"tz\", \"queue\", \"payload\", \"max_attempts\", \"next_run_at\", \"priority\") \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (\"name\") DO UPDATE SET \
                  \"next_run_at\" = CASE WHEN \"kiln_schedules\".\"kind\" = excluded.\"kind\" AND \"kiln_schedules\".\"expr\" = excluded.\"expr\" \
                    AND \"kiln_schedules\".\"tz\" = excluded.\"tz\" THEN \"kiln_schedules\".\"next_run_at\" ELSE excluded.\"next_run_at\" END, \
                  \"kind\" = excluded.\"kind\", \"expr\" = excluded.\"expr\", \"tz\" = excluded.\"tz\", \"queue\" = excluded.\"queue\", \
-                 \"payload\" = excluded.\"payload\", \"max_attempts\" = excluded.\"max_attempts\" RETURNING \"name\"",
+                 \"payload\" = excluded.\"payload\", \"max_attempts\" = excluded.\"max_attempts\", \"priority\" = excluded.\"priority\" RETURNING \"name\"",
                 vec![
                     Value::Text(entry.name.to_owned()),
                     Value::Text(entry.when.kind().to_owned()),
@@ -200,6 +209,7 @@ impl Db {
                     Value::Text(entry.payload.clone()),
                     Value::Integer(entry.max_attempts),
                     Value::Integer(micros(next)),
+                    Value::Integer(entry.priority),
                 ],
             )
             .await?;
@@ -240,7 +250,7 @@ impl Db {
                             .fetch_all(
                                 "UPDATE \"kiln_schedules\" SET \"next_run_at\" = ?, \"last_run_at\" = ? \
                                  WHERE \"name\" = ? AND \"next_run_at\" = ? AND \"paused\" = 0 \
-                                 RETURNING \"queue\", \"payload\", \"max_attempts\"",
+                                 RETURNING \"queue\", \"payload\", \"max_attempts\", \"priority\"",
                                 vec![
                                     Value::Integer(micros(next)),
                                     Value::Integer(micros(now)),
@@ -250,7 +260,16 @@ impl Db {
                             )
                             .await?;
                         let Some(row) = won.first() else { return Ok(false) };
-                        insert_job(&tx, &name, &row.get::<String, _>(0), row.get(1), micros(now), row.get(2)).await?;
+                        insert_job(
+                            &tx,
+                            &name,
+                            &row.get::<String, _>(0),
+                            row.get(1),
+                            micros(now),
+                            row.get(2),
+                            row.get(3),
+                        )
+                        .await?;
                         Ok(true)
                     }
                 })
@@ -315,13 +334,21 @@ impl Db {
     pub async fn run_schedule_now(&self, name: &str) -> Result<Option<i64>> {
         let rows = self
             .fetch_all(
-                "SELECT \"queue\", \"payload\", \"max_attempts\" FROM \"kiln_schedules\" WHERE \"name\" = ?",
+                "SELECT \"queue\", \"payload\", \"max_attempts\", \"priority\" FROM \"kiln_schedules\" WHERE \"name\" = ?",
                 vec![Value::Text(name.to_owned())],
             )
             .await?;
         let Some(row) = rows.first() else { return Ok(None) };
-        let id =
-            insert_job(self, name, &row.get::<String, _>(0), row.get(1), micros(Timestamp::now()), row.get(2)).await?;
+        let id = insert_job(
+            self,
+            name,
+            &row.get::<String, _>(0),
+            row.get(1),
+            micros(Timestamp::now()),
+            row.get(2),
+            row.get(3),
+        )
+        .await?;
         Ok(Some(id))
     }
 }

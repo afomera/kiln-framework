@@ -4,7 +4,7 @@ use kiln::prelude::*;
 pub struct SignInForm {
     #[validate(email)]
     pub email: String,
-    #[form(password)]
+    #[form(password, autocomplete = "current-password")]
     #[validate(length(min = 1))]
     pub password: String,
 }

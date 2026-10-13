@@ -484,6 +484,15 @@ mod forms {
         if let Some(placeholder) = &o.placeholder {
             let _ = write!(attrs, " placeholder=\"{}\"", esc(placeholder));
         }
+        // Password managers rely on these to fill and save the right thing.
+        let default_autocomplete = match input.as_str() {
+            "password" => Some("new-password".to_owned()),
+            "email" => Some("email".to_owned()),
+            _ => None,
+        };
+        if let Some(autocomplete) = spec_text("autocomplete")?.or(default_autocomplete) {
+            let _ = write!(attrs, " autocomplete=\"{}\"", esc(&autocomplete));
+        }
         let lengths = |attrs: &mut String| -> Result<(), Error> {
             if let Some(min) = number(&field.get_attr("min_length")?).filter(|m| m != "1" && m != "0") {
                 let _ = write!(attrs, " minlength=\"{min}\"");

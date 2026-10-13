@@ -1,0 +1,22 @@
+{% set title = "Notifications" %}
+<h1>Notification settings</h1>
+<table>
+  <thead><tr><th>Notification</th><th>Channel</th><th></th></tr></thead>
+  <tbody>
+    {% for pref in prefs %}
+    <tr id="pref_{{ pref.kind }}_{{ pref.channel }}">
+      <td>{% if pref.kind == "*" %}<strong>{{ pref.description }}</strong>{% else %}{{ pref.description }}{% endif %}</td>
+      <td>{{ pref.channel }}</td>
+      <td>
+        {% if pref.enabled %}
+        {{ form_start(path("notification_settings::update", kind=pref.kind, channel=pref.channel, state="off"), method="patch", class="inline") }}<button>Turn off</button>{{ form_end() }}
+        {% else %}
+        <em>Off</em> {{ form_start(path("notification_settings::update", kind=pref.kind, channel=pref.channel, state="on"), method="patch", class="inline") }}<button>Turn on</button>{{ form_end() }}
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3">No notifications can be turned off yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>

@@ -84,6 +84,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         let mut label = humanize(&field_name);
         let mut hint: Option<String> = None;
         let mut placeholder: Option<String> = None;
+        let mut autocomplete: Option<String> = None;
         for attr in field.attrs.iter().filter(|a| a.path().is_ident("form")) {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("textarea") {
@@ -96,9 +97,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     hint = Some(meta.value()?.parse::<syn::LitStr>()?.value());
                 } else if meta.path.is_ident("placeholder") {
                     placeholder = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                } else if meta.path.is_ident("autocomplete") {
+                    autocomplete = Some(meta.value()?.parse::<syn::LitStr>()?.value());
                 } else {
                     return Err(meta.error(
-                        "expected `textarea`, `password`, `label = \"..\"`, `hint = \"..\"` or `placeholder = \"..\"`",
+                        "expected `textarea`, `password`, `label = \"..\"`, `hint = \"..\"`, `placeholder = \"..\"` or `autocomplete = \"..\"`",
                     ));
                 }
                 Ok(())
@@ -141,6 +144,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
         let hint = hint.map_or_else(|| quote!(None), |h| quote!(Some(#h)));
         let placeholder = placeholder.map_or_else(|| quote!(None), |p| quote!(Some(#p)));
+        let autocomplete = autocomplete.map_or_else(|| quote!(None), |a| quote!(Some(#a)));
         specs.push(quote! {
             ::kiln::form::FieldSpec {
                 name: #field_name,
@@ -154,6 +158,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 options: <#ty as ::kiln::form::FormField>::OPTIONS,
                 hint: #hint,
                 placeholder: #placeholder,
+                autocomplete: #autocomplete,
             }
         });
         let rule_calls = rules.iter().map(|rule| match rule {

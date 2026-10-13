@@ -121,6 +121,9 @@ pub struct FieldSpec {
     pub options: &'static [&'static str],
     pub hint: Option<&'static str>,
     pub placeholder: Option<&'static str>,
+    /// Browser autofill hint, e.g. `current-password`. Password inputs default to
+    /// `new-password` and email inputs to `email`.
+    pub autocomplete: Option<&'static str>,
 }
 
 /// A Rust type a single form field parses into.

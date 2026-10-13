@@ -1,0 +1,8 @@
+{% set title = "Change your password" %}
+<h1>Change your password</h1>
+<p>You'll stay signed in here; your other devices will be signed out.</p>
+{{ form_start(path("password_settings::update"), method="patch") }}
+  {{ fields(form) }}
+  <button>Change password</button>
+{{ form_end() }}
+<p><a href="{{ path("passwords::new") }}">Forgot your current password?</a></p>

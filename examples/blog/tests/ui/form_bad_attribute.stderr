@@ -1,4 +1,4 @@
-error: expected `textarea`, `password`, `label = ".."`, `hint = ".."` or `placeholder = ".."`
+error: expected `textarea`, `password`, `label = ".."`, `hint = ".."`, `placeholder = ".."` or `autocomplete = ".."`
  --> tests/ui/form_bad_attribute.rs:6:12
   |
 6 |     #[form(tooltip = "When it starts")]

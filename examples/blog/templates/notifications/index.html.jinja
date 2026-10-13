@@ -1,0 +1,16 @@
+{% set title = "Notifications" %}
+<h1>Notifications{% if unread %} <small>({{ unread }} unread)</small>{% endif %}</h1>
+{% if unread %}
+{{ form_start(path("notifications::read_all"), method="patch") }}<button>Mark all read</button>{{ form_end() }}
+{% endif %}
+<ul class="notifications">
+  {% for n in notifications %}
+  <li id="notification_{{ n.id }}"{% if not n.read %} class="unread"{% endif %}>
+    {{ form_start(path("notifications::read", id=n.id), method="patch", class="inline") }}<button class="link">{{ n.title }}</button>{{ form_end() }}
+    {% if n.body %}<br><small>{{ n.body }}</small>{% endif %}
+    <br><small>{{ n.created_at | datetime }}</small>
+  </li>
+  {% else %}
+  <li>Nothing yet.</li>
+  {% endfor %}
+</ul>

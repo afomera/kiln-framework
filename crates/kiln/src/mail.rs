@@ -78,6 +78,37 @@ pub trait Mail: Serialize + Send + Sync {
     }
 }
 
+/// Sample data for a mail, shown at `/kiln/mail/previews` without sending. Opt in with
+/// `#[mail(.., preview)]`; previews may read the database (`Post::query().one(&ctx.db)`).
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` asks for a preview (`#[mail(.., preview)]`) but has none",
+    label = "missing `impl Preview for {Self}`",
+    note = "add `impl Preview for {Self} {{ async fn preview(ctx: &Ctx) -> Result<Self> {{ .. }} }}`, or remove `preview`"
+)]
+pub trait Preview: Mail + Sized + 'static {
+    fn preview(ctx: &Ctx) -> impl Future<Output = Result<Self>> + Send;
+}
+
+/// A previewable mail, registered by `#[mail(.., preview)]`.
+pub struct PreviewDef {
+    pub name: &'static str,
+    pub render: fn(Ctx) -> crate::BoxFuture<'static, Result<Message>>,
+}
+
+inventory::collect!(PreviewDef);
+
+#[doc(hidden)]
+pub fn render_preview<M: Preview>(ctx: Ctx) -> crate::BoxFuture<'static, Result<Message>> {
+    Box::pin(async move { M::preview(&ctx).await?.message() })
+}
+
+/// Every previewable mail, by name.
+pub fn previews() -> Vec<&'static PreviewDef> {
+    let mut all: Vec<_> = inventory::iter::<PreviewDef>.into_iter().collect();
+    all.sort_by_key(|p| p.name);
+    all
+}
+
 /// A rendered email.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Message {
@@ -202,8 +233,15 @@ impl Db {
 }
 
 /// `/kiln/mail` and `/kiln/mail/<id>`: the development outbox.
-pub(crate) async fn serve_outbox(db: &Db, path: &str, query: &crate::devtools::Query) -> Option<Response> {
+pub(crate) async fn serve_outbox(ctx: &Ctx, path: &str, query: &crate::devtools::Query) -> Option<Response> {
+    let db = &ctx.db;
     let rest = path.strip_prefix("/kiln/mail")?;
+    let tabs = "<div class=tabs><a href=\"/kiln/mail\"{outbox}>Outbox</a><a href=\"/kiln/mail/previews\"{previews}>Previews</a></div>";
+    if let Some(name) = rest.strip_prefix("/previews") {
+        let tabs = tabs.replace("{outbox}", "").replace("{previews}", " aria-current=page");
+        return Some(preview_page(ctx, name.trim_start_matches('/'), &tabs, query).await);
+    }
+    let tabs = tabs.replace("{outbox}", " aria-current=page").replace("{previews}", "");
     let outbox = match db.outbox().await {
         Ok(outbox) => outbox,
         Err(e) => return Some(e.into_response()),
@@ -236,7 +274,9 @@ pub(crate) async fn serve_outbox(db: &Db, path: &str, query: &crate::devtools::Q
                     crate::devtools::showing(shown.len(), outbox.len())
                 )
             };
-            format!("<p class=muted>Mail sent in development and tests is stored here instead of delivered.</p>{rows}")
+            format!(
+                "{tabs}<p class=muted>Mail sent in development and tests is stored here instead of delivered.</p>{rows}"
+            )
         }
         id => {
             let Some((_, m)) = id.parse::<i64>().ok().and_then(|id| outbox.iter().find(|(i, _)| *i == id)) else {
@@ -258,4 +298,48 @@ pub(crate) async fn serve_outbox(db: &Db, path: &str, query: &crate::devtools::Q
         }
     };
     Some(crate::devtools::page("mail", "Mail", &body))
+}
+
+/// One message's headers, HTML (sandboxed) and text.
+fn message_html(m: &Message) -> String {
+    let text =
+        m.text.as_deref().map(|t| format!("<h2>Text</h2><pre>{}</pre>", escape_attribute(t))).unwrap_or_default();
+    format!(
+        "<h2>{}</h2><dl><dt>To</dt><dd>{}</dd><dt>From</dt><dd>{}</dd></dl><iframe sandbox srcdoc=\"{}\"></iframe>{text}",
+        escape_attribute(&m.subject),
+        escape_attribute(&m.to),
+        escape_attribute(&m.from),
+        escape_attribute(&m.html),
+    )
+}
+
+/// `/kiln/mail/previews` and `/kiln/mail/previews/<Name>`: mail rendered from sample data.
+async fn preview_page(ctx: &Ctx, name: &str, tabs: &str, query: &crate::devtools::Query) -> Response {
+    let all = previews();
+    if name.is_empty() {
+        let shown: Vec<_> = all.iter().filter(|p| crate::devtools::matches(query, &[p.name])).collect();
+        let rows: String = shown
+            .iter()
+            .map(|p| {
+                format!("<a class=row href=\"/kiln/mail/previews/{0}\"><b>{0}</b><span>preview</span></a>", p.name)
+            })
+            .collect();
+        let body = if all.is_empty() {
+            format!(
+                "{tabs}<p class=empty>No previews. Add <code>preview</code> to a mail's <code>#[mail(..)]</code> and <code>impl Preview</code> for it.</p>"
+            )
+        } else {
+            format!("{tabs}{}{rows}", crate::devtools::search_bar("/kiln/mail/previews", query, "Mail name", &[]))
+        };
+        return crate::devtools::page("mail", "Mail", &body);
+    }
+    let Some(def) = all.iter().find(|p| p.name == name) else {
+        return (StatusCode::NOT_FOUND, "no such preview").into_response();
+    };
+    let body = match (def.render)(ctx.clone()).await {
+        Ok(message) => message_html(&message),
+        Err(e) => format!("<p class=notice>The preview failed: {}</p>", escape_attribute(&e.to_string())),
+    };
+    let body = format!("{tabs}<p><a href=\"/kiln/mail/previews\">← All previews</a> · not sent</p>{body}");
+    crate::devtools::page("mail", &format!("Preview: {name}"), &body)
 }

@@ -10,6 +10,7 @@ mod db_enum;
 mod form;
 mod job;
 mod mail;
+mod notification;
 mod part;
 mod record;
 mod test;
@@ -75,6 +76,15 @@ pub fn derive_job(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Mail, attributes(mail))]
 pub fn derive_mail(input: TokenStream) -> TokenStream {
     mail::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Derives `kiln::notify::NotificationInfo` and registers the notification for delivery:
+/// `#[derive(Notification, Serialize, Deserialize)]`, optionally with
+/// `#[notification(description = "Someone comments on your post", optional(mail, inbox))]`.
+/// Pair it with `impl Notify for ..`.
+#[proc_macro_derive(Notification, attributes(notification))]
+pub fn derive_notification(input: TokenStream) -> TokenStream {
+    notification::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// Derives `kiln::form::FormInput`: parsing and validation of submitted forms.

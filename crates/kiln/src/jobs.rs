@@ -41,6 +41,11 @@ pub trait JobInfo: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// `#[job(unique_for = "10m")]`: enqueueing a job equal to one queued or running that
     /// was enqueued within this many seconds returns that job instead of adding another.
     const UNIQUE_FOR: Option<i64> = None;
+    /// `#[job(priority = 10)]`: due jobs with a higher priority run first. Default 0.
+    const PRIORITY: i64 = 0;
+    /// `#[job(timeout = "30s")]`: an attempt still running after this many seconds is
+    /// stopped and counts as a failure (so it retries like any other).
+    const TIMEOUT: Option<i64> = None;
 }
 
 /// What a job does. Write it for every `#[derive(Job)]` struct.
@@ -57,6 +62,44 @@ pub trait Perform: JobInfo {
 pub struct JobDef {
     pub name: &'static str,
     pub run: fn(Ctx, serde_json::Value) -> BoxFuture<'static, Result>,
+    /// Seconds an attempt may run (`JobInfo::TIMEOUT`).
+    pub timeout: Option<i64>,
+}
+
+/// Per-queue caps on running jobs, across every process: `app.queue_limit("imports", 2)`.
+#[derive(Clone, Default)]
+pub struct QueueLimits(pub(crate) Vec<(&'static str, i64)>);
+
+/// Writes the app's schedules and queue limits to the database. Every process does this at
+/// boot, so the dashboard and workers agree even when jobs run elsewhere.
+pub(crate) async fn sync_app(ctx: &Ctx) -> Result<()> {
+    if let Some(schedule) = ctx.try_get::<crate::Schedule>() {
+        ctx.db.sync_schedules(schedule, Timestamp::now()).await?;
+    }
+    let limits = ctx.try_get::<QueueLimits>().cloned().unwrap_or_default();
+    ctx.db
+        .transaction(|tx| async move {
+            tx.fetch_all("DELETE FROM \"kiln_queue_limits\" RETURNING \"queue\"", vec![]).await?;
+            for (queue, max) in limits.0 {
+                tx.fetch_all(
+                    "INSERT INTO \"kiln_queue_limits\" (\"queue\", \"max_running\") VALUES (?, ?) RETURNING \"queue\"",
+                    vec![Value::Text(queue.to_owned()), Value::Integer(max.max(1))],
+                )
+                .await?;
+            }
+            Ok(())
+        })
+        .await
+}
+
+/// How an attempt ended.
+enum Outcome {
+    Done,
+    Failed(String),
+    /// Cancelled while running.
+    Cancelled,
+    /// Stopped by a shutdown: back to the queue, the attempt not counted.
+    Released,
 }
 
 inventory::collect!(JobDef);
@@ -104,7 +147,8 @@ pub trait Enqueue: JobInfo {
                     return Ok(row.get(0));
                 }
             }
-            insert_job(db, Self::NAME, Self::QUEUE, payload, micros(at), Self::ATTEMPTS).await
+            insert_row(db, Self::NAME, Self::QUEUE, payload, micros(at), Self::ATTEMPTS, Self::PRIORITY, None, false)
+                .await
         }
     }
 }
@@ -117,8 +161,9 @@ pub(crate) async fn insert_job(
     payload: String,
     run_at: i64,
     max_attempts: i64,
+    priority: i64,
 ) -> Result<i64> {
-    insert_row(db, name, queue, payload, run_at, max_attempts, None, false).await
+    insert_row(db, name, queue, payload, run_at, max_attempts, priority, None, false).await
 }
 
 /// Stores a job that belongs to `batch` (as one of its jobs, or as a `hook`), due now.
@@ -135,6 +180,7 @@ pub(crate) async fn insert_job_in_batch(
         spec.payload.clone(),
         micros(Timestamp::now()),
         spec.max_attempts,
+        spec.priority,
         batch,
         hook,
     )
@@ -149,13 +195,14 @@ async fn insert_row(
     payload: String,
     run_at: i64,
     max_attempts: i64,
+    priority: i64,
     batch: Option<BatchId>,
     hook: bool,
 ) -> Result<i64> {
     let rows = db
         .fetch_all(
-            "INSERT INTO \"kiln_jobs\" (\"name\", \"queue\", \"payload\", \"run_at\", \"attempts\", \"max_attempts\", \"status\", \"created_at\", \"batch_id\", \"batch_hook\") \
-             VALUES (?, ?, ?, ?, 0, ?, 'queued', ?, ?, ?) RETURNING \"id\"",
+            "INSERT INTO \"kiln_jobs\" (\"name\", \"queue\", \"payload\", \"run_at\", \"attempts\", \"max_attempts\", \"status\", \"created_at\", \"batch_id\", \"batch_hook\", \"priority\") \
+             VALUES (?, ?, ?, ?, 0, ?, 'queued', ?, ?, ?, ?) RETURNING \"id\"",
             vec![
                 Value::Text(name.to_owned()),
                 Value::Text(queue.to_owned()),
@@ -165,6 +212,7 @@ async fn insert_row(
                 Value::Integer(micros(Timestamp::now())),
                 batch.map_or(Value::Null, |b| Value::Integer(b.0)),
                 Value::Integer(hook as i64),
+                Value::Integer(priority),
             ],
         )
         .await?;
@@ -217,37 +265,76 @@ impl Db {
             "CREATE TABLE IF NOT EXISTS \"kiln_jobs\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \"name\" TEXT NOT NULL, \
              \"queue\" TEXT NOT NULL, \"payload\" TEXT NOT NULL, \"run_at\" INTEGER NOT NULL, \"attempts\" INTEGER NOT NULL, \
              \"max_attempts\" INTEGER NOT NULL, \"status\" TEXT NOT NULL, \"locked_at\" INTEGER, \"last_error\" TEXT, \
-             \"created_at\" INTEGER NOT NULL, \"batch_id\" INTEGER, \"batch_hook\" INTEGER NOT NULL DEFAULT 0)",
+             \"created_at\" INTEGER NOT NULL)",
         )
         .await?;
-        // Tables made before batches existed.
-        let columns = self.fetch_all("SELECT \"name\" FROM pragma_table_info('kiln_jobs')", vec![]).await?;
-        if !columns.iter().any(|r| r.get::<String, _>(0) == "batch_id") {
-            self.execute("ALTER TABLE \"kiln_jobs\" ADD COLUMN \"batch_id\" INTEGER").await?;
-            self.execute("ALTER TABLE \"kiln_jobs\" ADD COLUMN \"batch_hook\" INTEGER NOT NULL DEFAULT 0").await?;
-        }
+        // Columns added since the first version; tables made earlier gain them here.
+        self.ensure_columns(
+            "kiln_jobs",
+            &[
+                ("batch_id", "INTEGER"),
+                ("batch_hook", "INTEGER NOT NULL DEFAULT 0"),
+                ("priority", "INTEGER NOT NULL DEFAULT 0"),
+                ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
+            ],
+        )
+        .await?;
         self.execute("CREATE INDEX IF NOT EXISTS \"kiln_jobs_due\" ON \"kiln_jobs\" (\"status\", \"run_at\")").await?;
         self.execute(
             "CREATE TABLE IF NOT EXISTS \"kiln_queue_pauses\" (\"queue\" TEXT PRIMARY KEY, \"paused_at\" INTEGER NOT NULL)",
         )
         .await?;
-        self.with_schedule_tables().await?.with_batch_table().await?.with_mail_table().await
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS \"kiln_queue_limits\" (\"queue\" TEXT PRIMARY KEY, \"max_running\" INTEGER NOT NULL)",
+        )
+        .await?;
+        self.with_schedule_tables()
+            .await?
+            .with_batch_table()
+            .await?
+            .with_notification_table()
+            .await?
+            .with_mail_table()
+            .await
     }
 
-    /// Claims the next due job (any due job when `all` is set, ignoring `run_at`).
+    /// Adds `columns` to a Kiln table made before they existed.
+    pub(crate) async fn ensure_columns(&self, table: &str, columns: &[(&str, &str)]) -> Result<()> {
+        let existing: Vec<String> = self
+            .fetch_all(&format!("SELECT \"name\" FROM pragma_table_info('{table}')"), vec![])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        for (name, definition) in columns {
+            if !existing.iter().any(|e| e == name) {
+                self.execute(&format!("ALTER TABLE \"{table}\" ADD COLUMN \"{name}\" {definition}")).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Claims the next due job (any due job when `all` is set, ignoring `run_at`): the
+    /// highest priority first, then the longest due. Skips paused queues and queues at
+    /// their concurrency limit, counted across every process.
     async fn claim_job(&self, all: bool) -> Result<Option<Claimed>> {
         let now = micros(Timestamp::now());
         let due = if all { i64::MAX } else { now };
         let stale = now - STALE.as_micros() as i64;
+        self.reap_cancelled(stale).await?;
         let rows = self
             .fetch_all(
                 "UPDATE \"kiln_jobs\" SET \"status\" = 'running', \"locked_at\" = ?, \"attempts\" = \"attempts\" + 1 \
-                 WHERE \"id\" = (SELECT \"id\" FROM \"kiln_jobs\" \
-                   WHERE ((\"status\" = 'queued' AND \"run_at\" <= ?) OR (\"status\" = 'running' AND \"locked_at\" < ?)) \
-                   AND \"queue\" NOT IN (SELECT \"queue\" FROM \"kiln_queue_pauses\") \
-                   ORDER BY \"run_at\", \"id\" LIMIT 1) \
+                 WHERE \"id\" = (SELECT j.\"id\" FROM \"kiln_jobs\" j \
+                   WHERE ((j.\"status\" = 'queued' AND j.\"run_at\" <= ?) OR (j.\"status\" = 'running' AND j.\"locked_at\" < ?)) \
+                   AND j.\"cancel_requested\" = 0 \
+                   AND j.\"queue\" NOT IN (SELECT \"queue\" FROM \"kiln_queue_pauses\") \
+                   AND NOT EXISTS (SELECT 1 FROM \"kiln_queue_limits\" l WHERE l.\"queue\" = j.\"queue\" \
+                     AND (SELECT COUNT(*) FROM \"kiln_jobs\" r WHERE r.\"queue\" = l.\"queue\" AND r.\"status\" = 'running' \
+                          AND r.\"locked_at\" >= ?) >= l.\"max_running\") \
+                   ORDER BY j.\"priority\" DESC, j.\"run_at\", j.\"id\" LIMIT 1) \
                  RETURNING \"id\", \"name\", \"payload\", \"attempts\", \"max_attempts\", \"batch_id\", \"batch_hook\"",
-                vec![Value::Integer(now), Value::Integer(due), Value::Integer(stale)],
+                vec![Value::Integer(now), Value::Integer(due), Value::Integer(stale), Value::Integer(stale)],
             )
             .await?;
         Ok(rows.first().map(|r| Claimed {
@@ -261,8 +348,36 @@ impl Db {
         }))
     }
 
-    async fn finish_job(&self, job: &Claimed, outcome: std::result::Result<(), String>) -> Result<()> {
+    async fn finish_job(&self, job: &Claimed, outcome: Outcome) -> Result<()> {
         let (id, batch) = (job.id, job.counted_batch());
+        let outcome = match outcome {
+            Outcome::Released => {
+                self.fetch_all(
+                    "UPDATE \"kiln_jobs\" SET \"status\" = 'queued', \"locked_at\" = NULL, \"attempts\" = MAX(\"attempts\" - 1, 0) \
+                     WHERE \"id\" = ? RETURNING \"id\"",
+                    vec![Value::Integer(id)],
+                )
+                .await?;
+                return Ok(());
+            }
+            Outcome::Cancelled => {
+                self.transaction(|tx| async move {
+                    tx.fetch_all(
+                        "DELETE FROM \"kiln_jobs\" WHERE \"id\" = ? RETURNING \"id\"",
+                        vec![Value::Integer(id)],
+                    )
+                    .await?;
+                    if let Some(batch) = batch {
+                        batch::job_ended(&tx, batch, "cancelled").await?;
+                    }
+                    Ok(())
+                })
+                .await?;
+                return Ok(());
+            }
+            Outcome::Done => Ok(()),
+            Outcome::Failed(e) => Err(e),
+        };
         match outcome {
             Ok(()) => {
                 self.transaction(|tx| async move {
@@ -354,9 +469,41 @@ impl Db {
         Ok(count)
     }
 
-    /// Removes a job that hasn't started: queued (including delayed) or failed. Running
-    /// jobs can't be cancelled; they finish or fail.
+    /// Running jobs whose cancel was requested but whose worker is gone: removed, and
+    /// counted as cancelled in their batch.
+    async fn reap_cancelled(&self, stale: i64) -> Result<()> {
+        self.transaction(|tx| async move {
+            let rows = tx
+                .fetch_all(
+                    "DELETE FROM \"kiln_jobs\" WHERE \"status\" = 'running' AND \"cancel_requested\" = 1 AND \"locked_at\" < ? \
+                     RETURNING \"batch_id\", \"batch_hook\"",
+                    vec![Value::Integer(stale)],
+                )
+                .await?;
+            for row in rows {
+                if let (Some(batch), 0) = (row.get::<Option<i64>, _>(0), row.get::<i64, _>(1)) {
+                    batch::job_ended(&tx, BatchId(batch), "cancelled").await?;
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Cancels a job. A waiting (or delayed) or failed job is removed at once; a running one
+    /// is stopped by its worker within about a second, at its next `.await` (open
+    /// transactions roll back), and then removed. Returns false if there's no such job.
     pub async fn cancel_job(&self, id: i64) -> Result<bool> {
+        let requested = self
+            .fetch_all(
+                "UPDATE \"kiln_jobs\" SET \"cancel_requested\" = 1 WHERE \"id\" = ? AND \"status\" = 'running' RETURNING \"id\"",
+                vec![Value::Integer(id)],
+            )
+            .await?;
+        if !requested.is_empty() {
+            tracing::info!(target: "kiln::jobs", id, "cancel requested for a running job");
+            return Ok(true);
+        }
         self.transaction(|tx| async move {
             let rows = tx
                 .fetch_all(
@@ -457,41 +604,199 @@ enum Worked {
 
 /// Claims and runs one job.
 async fn work_one(ctx: &Ctx, all: bool) -> Result<Worked> {
+    if shutting_down() {
+        return Ok(Worked::Idle);
+    }
     let Some(job) = ctx.db.claim_job(all).await? else { return Ok(Worked::Idle) };
     let outcome = match job_def(&job.name) {
-        None => Err(format!("no job named `{}` is linked into this binary", job.name)),
+        None => Outcome::Failed(format!("no job named `{}` is linked into this binary", job.name)),
         Some(def) => match serde_json::from_str(&job.payload) {
-            Err(e) => Err(format!("unreadable payload: {e}")),
-            // Spawned so a panic fails the job instead of the worker.
-            Ok(payload) => match tokio::spawn(CURRENT_BATCH.scope(job.batch, (def.run)(ctx.clone(), payload))).await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(e.to_string()),
-                Err(join) => Err(format!("the job panicked: {join}")),
-            },
+            Err(e) => Outcome::Failed(format!("unreadable payload: {e}")),
+            Ok(payload) => {
+                // Spawned so a panic fails the job instead of the worker, and so the watcher
+                // can stop it: dropping a future ends it at its next `.await`.
+                let handle = tokio::spawn(CURRENT_BATCH.scope(job.batch, (def.run)(ctx.clone(), payload)));
+                watch_attempt(ctx, &job, def.timeout, handle).await
+            }
         },
     };
     let worked = match &outcome {
-        Ok(()) => {
+        Outcome::Done => {
             tracing::info!(target: "kiln::jobs", id = job.id, name = %job.name, attempts = job.attempts, "job done");
             Worked::Ran
         }
-        Err(e) if job.attempts >= job.max_attempts => Worked::FailedForGood(format!("{}: {e}", job.name)),
-        Err(_) => Worked::Ran,
+        Outcome::Failed(e) if job.attempts >= job.max_attempts => Worked::FailedForGood(format!("{}: {e}", job.name)),
+        Outcome::Cancelled => {
+            tracing::info!(target: "kiln::jobs", id = job.id, name = %job.name, "job cancelled while running");
+            Worked::Ran
+        }
+        Outcome::Released => {
+            tracing::info!(target: "kiln::jobs", id = job.id, name = %job.name, "job released by shutdown; it will run again");
+            Worked::Ran
+        }
+        Outcome::Failed(_) => Worked::Ran,
     };
     ctx.db.finish_job(&job, outcome).await?;
     Ok(worked)
 }
 
+/// Waits for a running attempt, stopping it when it's cancelled, runs past its time limit,
+/// or outlives a shutdown's grace period. Refreshes the job's lock meanwhile, so long jobs
+/// aren't mistaken for abandoned ones.
+async fn watch_attempt(
+    ctx: &Ctx,
+    job: &Claimed,
+    timeout: Option<i64>,
+    mut handle: tokio::task::JoinHandle<Result>,
+) -> Outcome {
+    let started = std::time::Instant::now();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.tick().await;
+    let mut last_heartbeat = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            joined = &mut handle => {
+                return match joined {
+                    Ok(Ok(())) => Outcome::Done,
+                    Ok(Err(e)) => Outcome::Failed(e.to_string()),
+                    Err(join) if join.is_cancelled() => Outcome::Cancelled,
+                    Err(join) => Outcome::Failed(format!("the job panicked: {join}")),
+                };
+            }
+            _ = tick.tick() => {
+                if let Some(limit) = timeout
+                    && started.elapsed() >= Duration::from_secs(limit as u64)
+                {
+                    handle.abort();
+                    return Outcome::Failed(format!("timed out after {limit}s"));
+                }
+                if shutdown_deadline_passed() {
+                    handle.abort();
+                    return Outcome::Released;
+                }
+                let heartbeat = last_heartbeat.elapsed() >= Duration::from_secs(60);
+                let sql = if heartbeat {
+                    "UPDATE \"kiln_jobs\" SET \"locked_at\" = ? WHERE \"id\" = ? RETURNING \"cancel_requested\""
+                } else {
+                    "SELECT \"cancel_requested\" FROM \"kiln_jobs\" WHERE \"id\" = ? AND ? IS NOT NULL"
+                };
+                let binds = if heartbeat {
+                    last_heartbeat = std::time::Instant::now();
+                    vec![Value::Integer(micros(Timestamp::now())), Value::Integer(job.id)]
+                } else {
+                    vec![Value::Integer(job.id), Value::Integer(1)]
+                };
+                let cancel = ctx.db.fetch_all(sql, binds).await.ok().and_then(|rows| rows.first().map(|r| r.get::<i64, _>(0) != 0));
+                if cancel == Some(true) {
+                    handle.abort();
+                    return Outcome::Cancelled;
+                }
+            }
+        }
+    }
+}
+
+/// Shutdown: `None` while running; once a signal arrives, when running jobs must stop.
+static SHUTDOWN: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+fn shutdown_hub() -> &'static watch::Sender<bool> {
+    static HUB: OnceLock<watch::Sender<bool>> = OnceLock::new();
+    HUB.get_or_init(|| watch::channel(false).0)
+}
+
+fn shutting_down() -> bool {
+    SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+fn shutdown_deadline_passed() -> bool {
+    SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|deadline| std::time::Instant::now() >= deadline)
+}
+
+/// How long running jobs get to finish after SIGTERM: `JOB_SHUTDOWN_GRACE` seconds, by
+/// default 25 in production (under the usual 30 s kill) and 2 in development.
+fn shutdown_grace() -> Duration {
+    let default = if crate::config::is_production() { 25 } else { 2 };
+    Duration::from_secs(std::env::var("JOB_SHUTDOWN_GRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(default))
+}
+
+/// Starts a shutdown: workers stop claiming, running jobs get the grace period, then are
+/// stopped and put back in the queue.
+pub fn begin_shutdown() {
+    let mut deadline = SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner());
+    if deadline.is_none() {
+        *deadline = Some(std::time::Instant::now() + shutdown_grace());
+        shutdown_hub().send_replace(true);
+    }
+}
+
+/// Resolves once a shutdown starts (for the web server's graceful shutdown).
+pub async fn shutdown_requested() {
+    let mut rx = shutdown_hub().subscribe();
+    let _ = rx.wait_for(|down| *down).await;
+}
+
+/// Under `kiln dev`, stdin is a pipe from it: when that closes (kiln dev is gone, even if
+/// killed outright), shut down rather than keep holding the port.
+pub(crate) fn exit_with_kiln_dev() {
+    if std::env::var("KILN_DEV_STDIN_WATCH").as_deref() != Ok("1") {
+        return;
+    }
+    static WATCHING: OnceLock<()> = OnceLock::new();
+    if WATCHING.set(()).is_err() {
+        return;
+    }
+    std::thread::spawn(|| {
+        use std::io::Read;
+        let mut buf = [0u8; 64];
+        while matches!(std::io::stdin().read(&mut buf), Ok(n) if n > 0) {}
+        // No logging from here on: kiln dev was reading our stdout and stderr, so writing
+        // to them now fails, and a failed `eprintln!` (which log subscribers use to report
+        // write errors) panics. Shut down quietly instead.
+        begin_shutdown();
+        std::thread::sleep(shutdown_grace());
+        std::process::exit(0);
+    });
+}
+
+/// Turns SIGTERM and Ctrl-C into [`begin_shutdown`], once per process. If the process
+/// is still alive well after the grace period, it exits.
+pub(crate) fn listen_for_shutdown() {
+    static LISTENING: OnceLock<()> = OnceLock::new();
+    if LISTENING.set(()).is_err() {
+        return;
+    }
+    tokio::spawn(async {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => {}
+                _ = term.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = ctrl_c.await;
+        tracing::info!(target: "kiln::jobs", grace = ?shutdown_grace(), "shutting down: finishing running jobs");
+        begin_shutdown();
+        tokio::time::sleep(shutdown_grace() + Duration::from_secs(5)).await;
+        tracing::warn!(target: "kiln::jobs", "still running after the grace period; exiting");
+        std::process::exit(0);
+    });
+}
+
 /// Runs jobs forever with `concurrency` workers, plus the app's schedule.
 pub async fn work(ctx: Ctx, concurrency: usize) {
-    if let Some(schedule) = ctx.try_get::<crate::Schedule>().cloned() {
+    listen_for_shutdown();
+    exit_with_kiln_dev();
+    if let Err(e) = sync_app(&ctx).await {
+        tracing::error!(target: "kiln::jobs", error = %e, "syncing schedules and queue limits failed");
+    }
+    if ctx.try_get::<crate::Schedule>().is_some() {
         let db = ctx.db.clone();
         tokio::spawn(async move {
-            if let Err(e) = db.sync_schedules(&schedule, Timestamp::now()).await {
-                tracing::error!(target: "kiln::schedule", error = %e, "syncing schedules failed");
-                return;
-            }
-            loop {
+            while !shutting_down() {
                 if let Err(e) = db.run_due_schedules(Timestamp::now()).await {
                     tracing::error!(target: "kiln::schedule", error = %e, "running schedules failed");
                 }
@@ -503,7 +808,8 @@ pub async fn work(ctx: Ctx, concurrency: usize) {
         let ctx = ctx.clone();
         tokio::spawn(async move {
             let mut wake = hub().subscribe();
-            loop {
+            let mut down = shutdown_hub().subscribe();
+            while !shutting_down() {
                 match work_one(&ctx, false).await {
                     Ok(Worked::Ran | Worked::FailedForGood(_)) => continue,
                     Ok(Worked::Idle) => {}
@@ -512,6 +818,7 @@ pub async fn work(ctx: Ctx, concurrency: usize) {
                 // Jobs from this process wake us; other processes' jobs are found by polling.
                 tokio::select! {
                     _ = wake.changed() => {}
+                    _ = down.changed() => {}
                     () = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
             }

@@ -34,6 +34,7 @@ mod icon {
     pub const CALENDAR: &str =
         r#"<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>"#;
     pub const LAYERS: &str = r#"<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>"#;
+    pub const BELL: &str = r#"<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>"#;
     pub const ARROW: &str = r#"<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>"#;
 }
 
@@ -53,6 +54,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     ("batches", "Batches", icon::LAYERS),
     ("mail", "Mail", icon::MAIL),
     ("broadcasts", "Broadcasts", icon::RADIO),
+    ("notifications", "Notifications", icon::BELL),
     ("sign_ins", "Sign-ins", icon::KEY),
 ];
 
@@ -72,13 +74,17 @@ fn page_with_notice(active: &str, title: &str, body: &str, notice: Option<&str>)
         .collect();
     Html(format!(
         r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} · Kiln</title><style>{STYLE}</style></head><body>
+<title>{title} · Kiln</title><style>{STYLE}</style>
+<meta name="turbo-refresh-method" content="morph"><meta name="turbo-refresh-scroll" content="preserve">
+<script type="module" src="{turbo}"></script></head><body>
+<turbo-stream-source src="/kiln/live?page={active}"></turbo-stream-source>
 <header><a class="brand" href="/kiln/dashboard"><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M10 7h12v50H10Z" fill="var(--accent)"/><path d="M42 7h14L39 32l17 25H42L27 32Z" fill="#e8772e"/></svg>Kiln <span>{env}</span></a>
-<nav>{nav}</nav>{viewer}<a class="app" href="/">Open the app{arrow}</a></header>
+<nav>{nav}</nav>{viewer}<button class=live type=button title="Pages refresh as jobs, mail and the rest change" onclick="const s=document.querySelector('turbo-stream-source');if(s){{s.remove();this.textContent='○ Paused'}}else{{location.reload()}}">● Live</button><a class="app" href="/">Open the app{arrow}</a></header>
 <main><h1>{title}</h1>{notice}{body}</main></body></html>"##,
         title = esc(title),
         arrow = svg(icon::ARROW),
         env = crate::config::env(),
+        turbo = crate::assets::turbo_url(),
         viewer = if crate::config::is_production() {
             VIEWER.try_with(|v| format!("<span class=muted>{}</span>", esc(&v.who))).unwrap_or_default()
         } else {
@@ -108,6 +114,7 @@ th,td{text-align:left;vertical-align:top;padding:8px 12px;border-bottom:1px soli
 .row{display:flex;justify-content:space-between;gap:1rem;padding:.7rem 1rem;border:1px solid var(--rule);border-radius:8px;margin:.5rem 0;background:var(--surface);text-decoration:none;color:inherit}.row span{color:var(--muted)}
 iframe{width:100%;height:480px;border:1px solid var(--rule);border-radius:8px;background:#fff}dl{display:grid;grid-template-columns:auto 1fr;gap:.2rem 1rem}dt{color:var(--muted)}dd{margin:0}
 .filter{display:flex;gap:8px;align-items:center;margin:0 0 12px;flex-wrap:wrap}.filter input{font:inherit;padding:5px 10px;border:1px solid var(--rule);border-radius:6px;background:var(--surface);color:var(--ink);min-width:min(320px,100%)}
+button.live{border:0;background:none;color:var(--ok);font-size:13px}
 .notice{background:var(--soft);border-radius:8px;padding:8px 12px}
 form.inline{display:inline;margin:0}button{font:inherit;font-size:13px;padding:3px 10px;border-radius:6px;border:1px solid var(--rule);background:var(--surface);color:var(--ink);cursor:pointer}
 button:hover{border-color:var(--accent)}button.danger{color:var(--bad)}.actions{display:flex;gap:6px;flex-wrap:wrap}
@@ -118,11 +125,12 @@ button:hover{border-color:var(--accent)}button.danger{color:var(--bad)}.actions{
 "#;
 
 /// Serves `/kiln` pages, or `None` for other paths (assets, streams).
-pub(crate) async fn serve(db: &Db, viewer: Viewer, path: &str, query: Option<&str>) -> Option<Response> {
-    VIEWER.scope(viewer, serve_page(db, path, query)).await
+pub(crate) async fn serve(ctx: &crate::Ctx, viewer: Viewer, path: &str, query: Option<&str>) -> Option<Response> {
+    VIEWER.scope(viewer, serve_page(ctx, path, query)).await
 }
 
-async fn serve_page(db: &Db, path: &str, query: Option<&str>) -> Option<Response> {
+async fn serve_page(ctx: &crate::Ctx, path: &str, query: Option<&str>) -> Option<Response> {
+    let db = &ctx.db;
     let query: Query = query.and_then(|q| serde_urlencoded::from_str(q).ok()).unwrap_or_default();
     let notice = query.get("done").map(String::as_str);
     let trimmed = path.trim_end_matches('/');
@@ -139,8 +147,10 @@ async fn serve_page(db: &Db, path: &str, query: Option<&str>) -> Option<Response
         "/kiln/batches" => batches_page(db, &query, notice).await,
         "/kiln/broadcasts" => broadcasts_page(db, &query).await,
         "/kiln/sign_ins" => sign_ins_page(db, &query).await,
+        "/kiln/notifications" => notifications_page(db, &query).await,
+        "/kiln/live" => return Some(live(db.clone(), param(&query, "page").to_owned())),
         p if p == "/kiln/mail" || p.starts_with("/kiln/mail/") => {
-            return crate::mail::serve_outbox(db, path, &query).await;
+            return crate::mail::serve_outbox(ctx, path, &query).await;
         }
         _ => return None,
     };
@@ -211,7 +221,7 @@ pub(crate) fn search_bar(path: &str, query: &Query, placeholder: &str, keep: &[&
         format!("<a href=\"{}\">Clear</a>", esc(&link(path, &params)))
     };
     format!(
-        "<form class=filter method=get action=\"{path}\"><input type=search name=q value=\"{}\" placeholder=\"{}\" autofocus>{hidden}<button>Search</button>{clear}</form>",
+        "<form class=filter method=get action=\"{path}\"><input type=search id=kiln-search data-turbo-permanent name=q value=\"{}\" placeholder=\"{}\">{hidden}<button>Search</button>{clear}</form>",
         esc(param(query, "q")),
         esc(placeholder)
     )
@@ -231,6 +241,7 @@ async fn dashboard(db: &Db) -> crate::Result<Response> {
     let broadcasts = count(db, "SELECT COUNT(*) FROM \"kiln_stream_messages\"").await?;
     let streams = count(db, "SELECT COUNT(DISTINCT \"stream\") FROM \"kiln_stream_messages\"").await?;
     let sign_ins = count(db, "SELECT COUNT(*) FROM \"kiln_sessions\"").await?;
+    let unread = count(db, "SELECT COUNT(*) FROM \"kiln_notifications\" WHERE \"read_at\" IS NULL").await?;
     let schedules = db.schedules().await?;
     let running_batches = count(db, "SELECT COUNT(*) FROM \"kiln_batches\" WHERE \"status\" = 'running'").await?;
     let card = |slug: &str, icon: &str, title: &str, n: String, detail: String| {
@@ -266,6 +277,7 @@ async fn dashboard(db: &Db) -> crate::Result<Response> {
         ),
         card("batches", icon::LAYERS, "Batches", running_batches.to_string(), "running, with completion hooks".into()),
         card("mail", icon::MAIL, "Mail", mail.to_string(), "In the development outbox".into()),
+        card("notifications", icon::BELL, "Notifications", unread.to_string(), "unread, across every inbox".into()),
         card(
             "broadcasts",
             icon::RADIO,
@@ -444,18 +456,25 @@ async fn jobs_page(db: &Db, query: &HashMap<String, String>, notice: Option<&str
     let now = jiff::Timestamp::now().as_microsecond();
 
     // Queues, with pause controls.
+    let limits: HashMap<String, i64> = db
+        .fetch_all("SELECT \"queue\", \"max_running\" FROM \"kiln_queue_limits\"", vec![])
+        .await?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
     let queues: String = db
         .queues()
         .await?
         .iter()
         .map(|(q, paused, queued, running, failed)| {
+            let limit = limits.get(q).map_or_else(|| "<span class=muted>workers</span>".to_owned(), |n| format!("{n} at a time"));
             let control = if *paused {
                 button(&format!("/kiln/queues/{q}/resume"), "Resume", &back, false)
             } else {
                 button(&format!("/kiln/queues/{q}/pause"), "Pause", &back, false)
             };
             format!(
-                "<tr><td><a href=\"/kiln/jobs?queue={q}\"><code>{q}</code></a>{}</td><td>{queued}</td><td>{running}</td><td>{failed}</td><td>{control}</td></tr>",
+                "<tr><td><a href=\"/kiln/jobs?queue={q}\"><code>{q}</code></a>{}</td><td>{queued}</td><td>{running}</td><td>{failed}</td><td>{limit}</td><td>{control}</td></tr>",
                 if *paused { " <span class=\"pill failed\">paused</span>" } else { "" },
                 q = esc(q),
             )
@@ -465,7 +484,7 @@ async fn jobs_page(db: &Db, query: &HashMap<String, String>, notice: Option<&str
         String::new()
     } else {
         format!(
-            "<h2>Queues</h2><div class=tbl><table><thead><tr><th>Queue</th><th>Waiting</th><th>Running</th><th>Failed</th><th></th></tr></thead><tbody>{queues}</tbody></table></div>"
+            "<h2>Queues</h2><div class=tbl><table><thead><tr><th>Queue</th><th>Waiting</th><th>Running</th><th>Failed</th><th>Concurrency</th><th></th></tr></thead><tbody>{queues}</tbody></table></div>"
         )
     };
 
@@ -523,8 +542,8 @@ async fn jobs_page(db: &Db, query: &HashMap<String, String>, notice: Option<&str
     let rows = db
         .fetch_all(
             &format!(
-                "SELECT \"id\", \"name\", \"queue\", \"status\", \"attempts\", \"max_attempts\", \"run_at\", COALESCE(\"last_error\", ''), \"payload\", \"batch_id\" \
-                 FROM \"kiln_jobs\" {filter} ORDER BY CASE \"status\" WHEN 'failed' THEN 0 WHEN 'running' THEN 1 ELSE 2 END, \"run_at\" LIMIT 200"
+                "SELECT \"id\", \"name\", \"queue\", \"status\", \"attempts\", \"max_attempts\", \"run_at\", COALESCE(\"last_error\", ''), \"payload\", \"batch_id\", \"priority\", \"cancel_requested\" \
+                 FROM \"kiln_jobs\" {filter} ORDER BY CASE \"status\" WHEN 'failed' THEN 0 WHEN 'running' THEN 1 ELSE 2 END, \"priority\" DESC, \"run_at\" LIMIT 200"
             ),
             binds,
         )
@@ -547,11 +566,16 @@ async fn jobs_page(db: &Db, query: &HashMap<String, String>, notice: Option<&str
                     }
                     actions.push(button(&format!("/kiln/jobs/{id}/cancel"), "Cancel", &back, true));
                 }
-                _ => actions.push("<span class=muted>finishing</span>".to_owned()),
+                _ if r.get::<i64, _>(11) != 0 => actions.push("<span class=muted>stopping…</span>".to_owned()),
+                _ => actions.push(button(&format!("/kiln/jobs/{id}/cancel"), "Stop", &back, true)),
             }
+            let priority = match r.get::<i64, _>(10) {
+                0 => String::new(),
+                p => format!(" <span class=muted>priority {p}</span>"),
+            };
             let batch = r.get::<Option<i64>, _>(9).map(|b| format!(" <a href=\"/kiln/batches/{b}\">batch #{b}</a>")).unwrap_or_default();
             format!(
-                "<tr><td>#{id}</td><td><b>{}</b>{batch}<pre class=muted>{}</pre></td><td>{}</td><td><span class=\"pill {status}\">{shown}</span></td><td>{}/{}</td><td>{}</td><td><pre>{}</pre></td><td><div class=actions>{}</div></td></tr>",
+                "<tr><td>#{id}</td><td><b>{}</b>{priority}{batch}<pre class=muted>{}</pre></td><td>{}</td><td><span class=\"pill {status}\">{shown}</span></td><td>{}/{}</td><td>{}</td><td><pre>{}</pre></td><td><div class=actions>{}</div></td></tr>",
                 esc(&r.get::<String, _>(1)),
                 esc(&r.get::<String, _>(8)),
                 esc(&r.get::<String, _>(2)),
@@ -795,8 +819,8 @@ async fn batch_page(db: &Db, id: i64, notice: Option<&str>) -> crate::Result<Res
 }
 
 /// Handles a control form's POST. Refuses cross-site requests and posts without the token.
-pub(crate) async fn act(db: &Db, viewer: Viewer, request: Request) -> Response {
-    VIEWER.scope(viewer, act_on(db, request)).await
+pub(crate) async fn act(ctx: &crate::Ctx, viewer: Viewer, request: Request) -> Response {
+    VIEWER.scope(viewer, act_on(&ctx.db, request)).await
 }
 
 async fn act_on(db: &Db, request: Request) -> Response {
@@ -841,7 +865,7 @@ async fn act_on(db: &Db, request: Request) -> Response {
                 };
                 let verb = match verb {
                     "retry" => "Retried",
-                    "cancel" => "Removed",
+                    "cancel" => "Cancelled",
                     _ => "Started",
                 };
                 if done { format!("{verb} job #{id}.") } else { format!("Job #{id} had already moved on.") }
@@ -974,4 +998,163 @@ async fn sign_ins_page(db: &Db, query: &Query) -> crate::Result<Response> {
         )
     };
     Ok(page("sign_ins", "Sign-ins", &body))
+}
+
+async fn notifications_page(db: &Db, query: &Query) -> crate::Result<Response> {
+    let state = param(query, "state");
+    let kind = param(query, "kind");
+    let rows = db
+        .fetch_all(
+            "SELECT \"id\", \"recipient_table\", \"recipient_id\", \"kind\", \"title\", COALESCE(\"body\", ''), COALESCE(\"url\", ''), \
+             \"read_at\" IS NOT NULL, \"created_at\" FROM \"kiln_notifications\" ORDER BY \"id\" DESC LIMIT 1000",
+            vec![],
+        )
+        .await?;
+    let total = rows.len();
+    let shown: Vec<_> = rows
+        .iter()
+        .filter(|r| match state {
+            "unread" => r.get::<i64, _>(7) == 0,
+            "read" => r.get::<i64, _>(7) != 0,
+            _ => true,
+        })
+        .filter(|r| kind.is_empty() || kind == "all" || r.get::<&str, _>(3) == kind)
+        .filter(|r| {
+            let to = format!("{} #{}", r.get::<&str, _>(1), r.get::<i64, _>(2));
+            matches(query, &[&to, r.get::<&str, _>(3), r.get::<&str, _>(4), r.get::<&str, _>(5)])
+        })
+        .take(200)
+        .collect();
+    let body_rows: String = shown
+        .iter()
+        .map(|r| {
+            let read = r.get::<i64, _>(7) != 0;
+            format!(
+                "<tr><td>#{}</td><td><code>{}</code> #{}</td><td>{}</td><td><b>{}</b><div class=muted>{}</div></td><td>{}</td><td class=muted>{}</td></tr>",
+                r.get::<i64, _>(0),
+                esc(r.get::<&str, _>(1)),
+                r.get::<i64, _>(2),
+                esc(r.get::<&str, _>(3)),
+                esc(r.get::<&str, _>(4)),
+                esc(r.get::<&str, _>(5)),
+                if read { "<span class=muted>read</span>" } else { "<span class=\"pill running\">unread</span>" },
+                when(r.get::<i64, _>(8) / 1_000_000),
+            )
+        })
+        .collect();
+    let kinds = crate::notify::kinds();
+    let kind_options: Vec<(&str, &str)> =
+        std::iter::once(("all", "Any type")).chain(kinds.iter().map(|k| (*k, *k))).collect();
+    let body = if total == 0 {
+        "<p class=empty>No notifications yet. Send one with <code>MyNotification { .. }.notify(&amp;tx, &amp;user)</code>.</p>".to_owned()
+    } else {
+        format!(
+            "{}{}{}{}<div class=tbl><table><thead><tr><th>Id</th><th>To</th><th>Type</th><th>Notification</th><th></th><th>Sent (UTC)</th></tr></thead><tbody>{body_rows}</tbody></table></div>",
+            search_bar("/kiln/notifications", query, "Recipient (users #3), type or text", &["state", "kind"]),
+            tabs(
+                "/kiln/notifications",
+                query,
+                "state",
+                &[("all", "All"), ("unread", "Unread"), ("read", "Read")],
+                &["q", "kind"]
+            ),
+            if kinds.len() > 1 {
+                tabs("/kiln/notifications", query, "kind", &kind_options, &["q", "state"])
+            } else {
+                String::new()
+            },
+            showing(shown.len(), total),
+        )
+    };
+    Ok(page("notifications", "Notifications", &body))
+}
+
+/// What a page shows, cheaply: when it changes, the page refreshes.
+fn signature_sql(page: &str) -> &'static str {
+    const JOBS: &str = "(SELECT COUNT(*) || ':' || COALESCE(MAX(\"id\"), 0) || ':' || COALESCE(SUM(\"attempts\"), 0) || ':' || \
+        COALESCE(SUM(\"status\" = 'running'), 0) || ':' || COALESCE(SUM(\"cancel_requested\"), 0) || ':' || COALESCE(SUM(\"status\" = 'failed'), 0) || ':' || \
+        COALESCE(SUM(\"run_at\"), 0) FROM \"kiln_jobs\") || '|' || (SELECT COUNT(*) FROM \"kiln_queue_pauses\")";
+    const BATCHES: &str = "(SELECT COUNT(*) || ':' || COALESCE(SUM(\"pending\"), 0) || ':' || COALESCE(SUM(\"succeeded\"), 0) || ':' || \
+        COALESCE(SUM(\"fired_success\" + \"fired_failure\" + \"fired_complete\" + \"fired_cancel\"), 0) || ':' || COALESCE(SUM(\"status\" = 'cancelled'), 0) FROM \"kiln_batches\")";
+    const SCHEDULES: &str = "(SELECT COUNT(*) || ':' || COALESCE(SUM(\"last_run_at\"), 0) || ':' || COALESCE(SUM(\"paused\"), 0) || ':' || COALESCE(SUM(\"next_run_at\"), 0) FROM \"kiln_schedules\")";
+    const MAIL: &str = "(SELECT COALESCE(MAX(\"id\"), 0) FROM \"kiln_mail\")";
+    const BROADCASTS: &str = "(SELECT COALESCE(MAX(\"id\"), 0) FROM \"kiln_stream_messages\")";
+    const SIGN_INS: &str = "(SELECT COUNT(*) || ':' || COALESCE(MAX(\"id\"), 0) FROM \"kiln_sessions\")";
+    const NOTIFICATIONS: &str =
+        "(SELECT COUNT(*) || ':' || COALESCE(SUM(\"read_at\" IS NULL), 0) FROM \"kiln_notifications\")";
+    match page {
+        "jobs" => concat_sql(&[JOBS]),
+        "batches" => concat_sql(&[BATCHES, JOBS]),
+        "schedules" => concat_sql(&[SCHEDULES]),
+        "mail" => concat_sql(&[MAIL]),
+        "broadcasts" => concat_sql(&[BROADCASTS]),
+        "sign_ins" => concat_sql(&[SIGN_INS]),
+        "notifications" => concat_sql(&[NOTIFICATIONS]),
+        "routes" | "records" => "SELECT ''",
+        _ => concat_sql(&[JOBS, BATCHES, SCHEDULES, MAIL, BROADCASTS, SIGN_INS, NOTIFICATIONS]),
+    }
+}
+
+/// `SELECT a || '|' || b ...`, built once per page kind.
+fn concat_sql(parts: &[&str]) -> &'static str {
+    static CACHE: std::sync::Mutex<Vec<(String, &'static str)>> = std::sync::Mutex::new(Vec::new());
+    let key = parts.join("#");
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, sql)) = cache.iter().find(|(k, _)| *k == key) {
+        return sql;
+    }
+    let sql: &'static str = Box::leak(format!("SELECT {}", parts.join(" || '|' || ")).into_boxed_str());
+    cache.push((key, sql));
+    sql
+}
+
+/// `/kiln/live?page=jobs`: Server-Sent Events that tell the page to refresh (Turbo morphs
+/// it in place) whenever what it shows changes. Checked once a second; writes nothing.
+fn live(db: Db, page: String) -> Response {
+    struct State {
+        db: Db,
+        sql: &'static str,
+        last: Option<String>,
+        idle: u32,
+    }
+    async fn next(
+        mut state: State,
+    ) -> Option<(std::result::Result<axum::body::Bytes, std::convert::Infallible>, State)> {
+        loop {
+            tokio::select! {
+                () = crate::jobs::shutdown_requested() => return None,
+                () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            }
+            let now: Option<String> =
+                state.db.fetch_all(state.sql, vec![]).await.ok().and_then(|rows| rows.first().map(|r| r.get(0)));
+            let changed = match (&state.last, &now) {
+                (Some(before), Some(now)) => before != now,
+                _ => false,
+            };
+            if now.is_some() {
+                state.last = now;
+            }
+            if changed {
+                state.idle = 0;
+                let chunk = "data: <turbo-stream action=\"refresh\"></turbo-stream>\n\n";
+                return Some((Ok(axum::body::Bytes::from_static(chunk.as_bytes())), state));
+            }
+            state.idle += 1;
+            if state.idle >= 15 {
+                state.idle = 0;
+                return Some((Ok(axum::body::Bytes::from_static(b": keepalive\n\n")), state));
+            }
+        }
+    }
+    let state = State { db, sql: signature_sql(&page), last: None, idle: 0 };
+    let first = futures_util::stream::once(async {
+        Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(b"retry: 2000\n\n"))
+    });
+    let body = Body::from_stream(futures_util::StreamExt::chain(first, futures_util::stream::unfold(state, next)));
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("x-accel-buffering", "no")
+        .body(body)
+        .expect("valid stream response")
 }

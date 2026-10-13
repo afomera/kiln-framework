@@ -20,7 +20,17 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::app::App;
+
+/// Signals received (Ctrl-C, SIGTERM, SIGHUP). The first stops every process cleanly;
+/// a second kills them.
+static STOP: AtomicU32 = AtomicU32::new(0);
+
+fn stopping() -> bool {
+    STOP.load(Ordering::SeqCst) > 0
+}
 
 const COLORS: [&str; 6] = ["36", "35", "33", "32", "34", "31"];
 
@@ -42,6 +52,13 @@ pub fn run(app: &App, port: Option<u16>) -> Result<bool, String> {
     let width = procs.iter().map(|p| p.name.len()).max().unwrap_or(3).max(3);
     let port = port.map(|p| p.to_string()).or_else(|| std::env::var("PORT").ok()).unwrap_or_else(|| "3000".into());
     let say = |message: &str| println!("\x1b[1m{:>width$} |\x1b[0m {message}", "dev");
+    // However `kiln dev` is stopped (Ctrl-C, an IDE's stop button, `kill`, a closed
+    // terminal), it stops what it started, so nothing keeps holding the port.
+    let _ = ctrlc::set_handler(|| {
+        if STOP.fetch_add(1, Ordering::SeqCst) > 0 {
+            eprintln!("\nkiln dev: forcing everything to stop");
+        }
+    });
 
     // The first build: wait for a fix if it fails.
     let mut seen = snapshot(app);
@@ -49,8 +66,14 @@ pub fn run(app: &App, port: Option<u16>) -> Result<bool, String> {
         if let Some(binary) = build(app)? {
             break binary;
         }
+        if stopping() {
+            return Ok(true);
+        }
         say("build failed; waiting for changes");
-        seen = wait_for_change(app, &seen);
+        match wait_for_change(app, &seen) {
+            Some(now) => seen = now,
+            None => return Ok(true),
+        }
     };
     say(&format!("http://127.0.0.1:{port}  (watching src/ and Cargo.toml)"));
     for proc in &mut procs {
@@ -59,6 +82,13 @@ pub fn run(app: &App, port: Option<u16>) -> Result<bool, String> {
 
     loop {
         thread::sleep(Duration::from_millis(300));
+        if stopping() {
+            say("stopping");
+            for proc in &mut procs {
+                stop(proc);
+            }
+            return Ok(true);
+        }
         for proc in &mut procs {
             if let Some(child) = &mut proc.child
                 && let Ok(Some(status)) = child.try_wait()
@@ -148,6 +178,10 @@ fn start(proc: &mut Proc, binary: &Path, port: &str, width: usize) -> Result<(),
         .env("APP", binary)
         .env("PORT", port)
         .env("CLICOLOR_FORCE", "1")
+        // Kiln apps exit when this pipe closes, so they can't outlive `kiln dev` even if
+        // it's killed outright (SIGKILL) and can't stop them itself.
+        .env("KILN_DEV_STDIN_WATCH", "1")
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -168,7 +202,7 @@ fn pipe(output: impl Read + Send + 'static, prefix: String) {
 }
 
 /// SIGTERM to the shell and anything it started (shells usually exec a lone command, but
-/// not always), then SIGKILL if it hasn't exited after five seconds.
+/// not always), then SIGKILL after five seconds, or at once on a second Ctrl-C.
 fn stop(proc: &mut Proc) {
     let Some(mut child) = proc.child.take() else { return };
     let pid = child.id().to_string();
@@ -178,8 +212,12 @@ fn stop(proc: &mut Proc) {
         if let Ok(Some(_)) = child.try_wait() {
             return;
         }
+        if STOP.load(Ordering::SeqCst) > 1 {
+            break;
+        }
         thread::sleep(Duration::from_millis(100));
     }
+    let _ = Command::new("pkill").args(["-KILL", "-P", &pid]).status();
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -205,13 +243,17 @@ fn collect(path: &Path, files: &mut Vec<(PathBuf, SystemTime)>) {
     }
 }
 
-fn wait_for_change(app: &App, seen: &[(PathBuf, SystemTime)]) -> Vec<(PathBuf, SystemTime)> {
+/// The next change, or `None` if `kiln dev` is asked to stop first.
+fn wait_for_change(app: &App, seen: &[(PathBuf, SystemTime)]) -> Option<Vec<(PathBuf, SystemTime)>> {
     loop {
         thread::sleep(Duration::from_millis(300));
+        if stopping() {
+            return None;
+        }
         let now = snapshot(app);
         if now != seen {
             thread::sleep(Duration::from_millis(150));
-            return snapshot(app);
+            return Some(snapshot(app));
         }
     }
 }

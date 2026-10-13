@@ -49,13 +49,21 @@ pub(crate) struct JobSpec {
     pub queue: String,
     pub payload: String,
     pub max_attempts: i64,
+    #[serde(default)]
+    pub priority: i64,
 }
 
 impl JobSpec {
     fn of<J: JobInfo>(job: &J) -> Result<Self> {
         let payload = serde_json::to_string(job)
             .map_err(|e| Error::BadRequest(format!("job `{}` doesn't serialize: {e}", J::NAME)))?;
-        Ok(Self { name: J::NAME.to_owned(), queue: J::QUEUE.to_owned(), payload, max_attempts: J::ATTEMPTS })
+        Ok(Self {
+            name: J::NAME.to_owned(),
+            queue: J::QUEUE.to_owned(),
+            payload,
+            max_attempts: J::ATTEMPTS,
+            priority: J::PRIORITY,
+        })
     }
 }
 

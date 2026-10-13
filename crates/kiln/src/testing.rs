@@ -56,9 +56,7 @@ impl TestApp {
         let root = migrations.parent().and_then(Path::parent).unwrap_or(Path::new("."));
         crate::config::set_root(root);
         let app = configure(App::new(db.clone()).root(root))?;
-        if let Some(schedule) = app.ctx().try_get::<crate::Schedule>() {
-            db.sync_schedules(schedule, Timestamp::now()).await?;
-        }
+        crate::jobs::sync_app(app.ctx()).await?;
         Ok(Self { app, db, sequence: AtomicU64::new(0) })
     }
 
@@ -129,6 +127,24 @@ impl TestApp {
             );
             Ok(())
         }
+    }
+
+    /// Renders one mail's preview: `app.render_mail_preview::<WelcomeEmail>()`.
+    pub async fn render_mail_preview<M: crate::mail::Preview>(&self) -> Result<crate::mail::Message> {
+        M::preview(self.app.ctx()).await?.message()
+    }
+
+    /// Renders every mail preview (`#[mail(.., preview)]`), so a broken one fails a test.
+    /// Returns `(name, message)` pairs.
+    pub async fn render_mail_previews(&self) -> Result<Vec<(&'static str, crate::mail::Message)>> {
+        let mut out = vec![];
+        for def in crate::mail::previews() {
+            let message = (def.render)(self.app.ctx().clone())
+                .await
+                .map_err(|e| crate::Error::Job(format!("the `{}` mail preview failed: {e}", def.name)))?;
+            out.push((def.name, message));
+        }
+        Ok(out)
     }
 
     /// Mail delivered so far, oldest first. `deliver_later` queues a job: run
@@ -445,4 +461,26 @@ impl TestResponse {
         assert!(self.flash.values().any(|m| m == message), "expected flash {message:?}; flash was {:?}", self.flash);
         self
     }
+}
+
+/// Ids of jobs named `name` that haven't finished, oldest first.
+pub async fn job_ids(db: &Db, name: &str) -> Result<Vec<i64>> {
+    let rows = db
+        .fetch_all(
+            "SELECT \"id\" FROM \"kiln_jobs\" WHERE \"name\" = ? ORDER BY \"id\"",
+            vec![crate::Value::Text(name.to_owned())],
+        )
+        .await?;
+    Ok(rows.iter().map(|r| sqlx::Row::get(r, 0)).collect())
+}
+
+/// Attempts used by unfinished jobs named `name`, oldest first.
+pub async fn job_attempts(db: &Db, name: &str) -> Result<Vec<i64>> {
+    let rows = db
+        .fetch_all(
+            "SELECT \"attempts\" FROM \"kiln_jobs\" WHERE \"name\" = ? ORDER BY \"id\"",
+            vec![crate::Value::Text(name.to_owned())],
+        )
+        .await?;
+    Ok(rows.iter().map(|r| sqlx::Row::get(r, 0)).collect())
 }

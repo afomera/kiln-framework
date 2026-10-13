@@ -10,19 +10,28 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut queue: Option<LitStr> = None;
     let mut attempts: Option<LitInt> = None;
     let mut unique_for: Option<i64> = None;
+    let mut timeout: Option<i64> = None;
+    let mut priority: Option<syn::Expr> = None;
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("job")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("queue") {
                 queue = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("attempts") {
                 attempts = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("priority") {
+                priority = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("timeout") {
+                let lit: LitStr = meta.value()?.parse()?;
+                timeout = Some(seconds(&lit.value()).ok_or_else(|| {
+                    Error::new(lit.span(), "expected a duration like \"30s\", \"10m\" or \"2h\"")
+                })?);
             } else if meta.path.is_ident("unique_for") {
                 let lit: LitStr = meta.value()?.parse()?;
                 unique_for = Some(seconds(&lit.value()).ok_or_else(|| {
                     Error::new(lit.span(), "expected a duration like \"30s\", \"10m\", \"2h\" or \"1d\"")
                 })?);
             } else {
-                return Err(meta.error("expected `queue = \"..\"`, `attempts = N` or `unique_for = \"10m\"`"));
+                return Err(meta.error("expected `queue = \"..\"`, `attempts = N`, `priority = N`, `timeout = \"30s\"` or `unique_for = \"10m\"`"));
             }
             Ok(())
         })?;
@@ -31,6 +40,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let attempts = attempts.map(|a| quote! { const ATTEMPTS: i64 = #a; });
     let unique_for = unique_for
         .map(|s| quote! { const UNIQUE_FOR: ::core::option::Option<i64> = ::core::option::Option::Some(#s); });
+    let priority = priority.map(|p| quote! { const PRIORITY: i64 = #p; });
+    let timeout_const =
+        timeout.map(|s| quote! { const TIMEOUT: ::core::option::Option<i64> = ::core::option::Option::Some(#s); });
     let name_str = name.to_string();
     Ok(quote! {
         impl ::kiln::jobs::JobInfo for #name {
@@ -38,10 +50,16 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             #queue
             #attempts
             #unique_for
+            #priority
+            #timeout_const
         }
 
         ::kiln::__private::inventory::submit! {
-            ::kiln::jobs::JobDef { name: #name_str, run: ::kiln::jobs::run_job::<#name> }
+            ::kiln::jobs::JobDef {
+                name: #name_str,
+                run: ::kiln::jobs::run_job::<#name>,
+                timeout: <#name as ::kiln::jobs::JobInfo>::TIMEOUT,
+            }
         }
     })
 }

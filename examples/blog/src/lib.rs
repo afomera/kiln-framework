@@ -7,6 +7,7 @@ pub mod factories;
 pub mod forms;
 pub mod jobs;
 pub mod mail;
+pub mod notifications;
 pub mod ops;
 pub mod parts;
 pub mod policies;

@@ -19,6 +19,7 @@ pub mod form;
 pub mod jobs;
 pub mod mail;
 mod migrate;
+pub mod notify;
 pub mod policy;
 mod query;
 mod realtime;
@@ -58,8 +59,9 @@ pub use jiff as time;
 pub use batch::{Batch, BatchId};
 pub use config::Secret;
 pub use jobs::{Enqueue, Perform};
-pub use kiln_macros::{Config, DbEnum, Form, Job, Mail, Record, View, action, part, test};
-pub use mail::Mail;
+pub use kiln_macros::{Config, DbEnum, Form, Job, Mail, Notification, Record, View, action, part, test};
+pub use mail::{Mail, Preview};
+pub use notify::{Notify, Via};
 pub use schedule::Schedule;
 
 use sqlx::sqlite::SqliteRow;
@@ -104,12 +106,12 @@ pub trait Record: Sized + Clone + Send + Sync + serde::Serialize + 'static {
 }
 
 pub mod prelude {
-    pub use kiln_macros::{Config, Form, Job};
+    pub use kiln_macros::{Config, Form, Job, Notification};
 
     pub use crate::{
-        App, Batch, BatchId, Ctx, Current, Db, DbEnum, Enqueue, Error, Id, Json, Loaded, Mail, Param, Perform, Query,
-        Record, Redirect, Result, Schedule, Secret, Session, Timestamp, Turbo, TurboStream, View, ViewOrRedirect,
-        action,
+        App, Batch, BatchId, Ctx, Current, Db, DbEnum, Enqueue, Error, Id, Json, Loaded, Mail, Notify, Param, Perform,
+        Preview, Query, Record, Redirect, Result, Schedule, Secret, Session, Timestamp, Turbo, TurboStream, Via, View,
+        ViewOrRedirect, action,
         form::{Form, FormState, OrRender, Valid},
         part,
         policy::{Allows, Authorize, Authorized},

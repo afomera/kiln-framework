@@ -246,11 +246,14 @@ impl Cli {
 
     async fn serve(self) -> Result {
         let app = self.app().await?;
-        if workers() > 0 {
-            tokio::spawn(crate::jobs::work(app.ctx().clone(), workers()));
-        }
+        let worker = (workers() > 0).then(|| tokio::spawn(crate::jobs::work(app.ctx().clone(), workers())));
         let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
-        app.serve(&format!("127.0.0.1:{port}")).await
+        app.serve(&format!("127.0.0.1:{port}")).await?;
+        // Shutting down: let running jobs finish (or be released) before exiting.
+        if let Some(worker) = worker {
+            let _ = worker.await;
+        }
+        Ok(())
     }
 
     /// The configured app, refusing to start with pending migrations.

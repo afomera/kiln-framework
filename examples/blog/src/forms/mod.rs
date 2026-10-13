@@ -1,4 +1,5 @@
 mod bookmark_form;
+mod change_password_form;
 mod comment_form;
 mod new_password_form;
 mod password_reset_request_form;
@@ -8,6 +9,7 @@ mod sign_up_form;
 mod subscription_form;
 
 pub use bookmark_form::BookmarkForm;
+pub use change_password_form::ChangePasswordForm;
 pub use comment_form::CommentForm;
 pub use new_password_form::NewPasswordForm;
 pub use password_reset_request_form::PasswordResetRequestForm;

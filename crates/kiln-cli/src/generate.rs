@@ -67,6 +67,24 @@ pub enum Generate {
         #[arg(long)]
         force: bool,
     },
+    /// A notification (inbox, mail, broadcast) in src/notifications, with a test:
+    /// `kiln g notification comment_posted`. The recipient is the record people sign in as
+    /// (`--to Merchant` for another).
+    Notification {
+        name: String,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// A `/settings/notifications` page where people turn notification channels on and off.
+    /// `kiln g notification` adds it the first time.
+    NotificationSettings {
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
     /// Password authentication for `User`: sign up, sign in and out, password resets,
     /// email confirmation, and a page listing where you're signed in. Adds
     /// `password_digest` and `confirmed_at` to the User record (with a migration) and
@@ -110,6 +128,13 @@ impl Generate {
             Generate::Part { record, force } => (part(app, &record)?, force, None),
             Generate::Job { name, force } => (job(app, &name)?, force, None),
             Generate::Mail { name, force } => (mail(app, &name)?, force, None),
+            Generate::Notification { name, to, force } => (notification(app, &name, to.as_deref())?, force, None),
+            Generate::NotificationSettings { to, force } => {
+                let to = recipient(app, to.as_deref())?;
+                let mut plan = Plan::default();
+                notification_settings(app, &to, &mut plan);
+                (plan, force, None)
+            }
             Generate::Auth { no_migration, force } => {
                 (auth(app, force)?, force, (!no_migration).then(|| "add_passwords_to_users".to_owned()))
             }
@@ -320,14 +345,7 @@ impl Resource {
         if !force && app.path(&format!("src/records/{snake}.rs")).exists() {
             return Err(format!("src/records/{snake}.rs already exists (pass --force to regenerate)"));
         }
-        // Record types people sign in as, from `signs_in::<T, _>(..)` in src/app.rs.
-        let app_rs = std::fs::read_to_string(app.path("src/app.rs")).unwrap_or_default();
-        let mut signs_in: Vec<String> = app_rs
-            .split("signs_in::<")
-            .skip(1)
-            .filter_map(|rest| rest.split([',', '>']).next().map(|t| t.trim().to_owned()))
-            .filter(|t| !t.is_empty())
-            .collect();
+        let mut signs_in = signs_in_records(app);
         if signs_in.is_empty() {
             signs_in.push("User".to_owned());
         }
@@ -969,6 +987,112 @@ fn job(app: &App, name: &str) -> Result<Plan, String> {
     Ok(plan)
 }
 
+/// Record types people sign in as, from `signs_in::<T, _>(..)` in src/app.rs.
+fn signs_in_records(app: &App) -> Vec<String> {
+    let app_rs = std::fs::read_to_string(app.path("src/app.rs")).unwrap_or_default();
+    app_rs
+        .split("signs_in::<")
+        .skip(1)
+        .filter_map(|rest| rest.split([',', '>']).next().map(|t| t.trim().to_owned()))
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// `kiln g notification comment_posted [--to User]`
+fn notification(app: &App, name: &str, to: Option<&str>) -> Result<Plan, String> {
+    if !is_snake(name) || !name.contains('_') {
+        return Err("notifications are named for what happened, e.g. `comment_posted`".into());
+    }
+    let to = recipient(app, to)?;
+    let to_snake = snake(&to);
+    let pascal_name = pascal(name);
+    let human_name = human(name);
+    let values = [
+        ("Name", pascal_name.as_str()),
+        ("name", name),
+        ("To", to.as_str()),
+        ("to", to_snake.as_str()),
+        ("human", human_name.as_str()),
+        ("krate", &app.crate_name()),
+    ];
+    let mut plan = Plan::default();
+    plan.file(
+        format!("src/notifications/{name}.rs"),
+        fill(
+            "use kiln::prelude::*;\nuse serde::{Deserialize, Serialize};\n\nuse crate::records::@@To@@;\n\n/// Send it with `@@Name@@ { .. }.notify(&tx, &@@to@@).await?` inside the write's transaction.\n/// Fields are stored as JSON until delivery: pass ids, and load fresh data in `deliver`.\n/// People can turn its email off at /settings/notifications (`optional(..)` lists the\n/// channels they may turn off; `optional()` for notices nobody may mute).\n#[derive(Notification, Serialize, Deserialize, Debug)]\n#[notification(description = \"@@human@@\", optional(mail))]\npub struct @@Name@@ {}\n\nimpl Notify for @@Name@@ {\n    type To = @@To@@;\n\n    /// What `to` gets. `via.inbox(..)` for the in-app inbox, `via.mail(SomeMail { .. })?` for\n    /// email, `via.broadcast(stream, turbo)` for open pages. Check `to`'s preferences here.\n    async fn deliver(&self, _ctx: &Ctx, _to: &@@To@@, via: &mut Via) -> Result {\n        via.inbox(\"@@human@@\");\n        // via.mail(SomeMail { to: to.email.clone(), .. })?;   // skipped if they turned email off\n        Ok(())\n    }\n}\n",
+            &values,
+        ),
+    );
+    plan.module("src/notifications/mod.rs", format!("mod {name};"));
+    plan.module("src/notifications/mod.rs", format!("pub use {name}::{pascal_name};"));
+    plan.module("src/lib.rs", "pub mod notifications;");
+    if !app.path("src/actions/notification_settings/index.rs").exists() {
+        notification_settings(app, &to, &mut plan);
+    }
+    plan.file(
+        format!("tests/notification_{name}.rs"),
+        fill(
+            "use @@krate@@::{notifications::@@Name@@, records::*};\nuse kiln::{prelude::*, testing::TestApp};\n\n#[kiln::test]\nasync fn @@name@@_reaches_the_inbox(app: TestApp) -> Result {\n    let @@to@@ = app.create::<@@To@@>().await?;\n    @@Name@@ {}.notify(&app.db, &@@to@@).await?;\n    app.perform_enqueued_jobs().await?;\n    let inbox = app.db.inbox(&@@to@@, 10).await?;\n    assert_eq!(inbox.len(), 1);\n    assert_eq!(inbox[0].kind, \"@@Name@@\");\n    assert_eq!(app.db.unread_notifications(&@@to@@).await?, 1);\n    Ok(())\n}\n",
+            &values,
+        ),
+    );
+    Ok(plan)
+}
+
+/// The record notifications go to: `--to`, else the first `signs_in::<..>` record.
+fn recipient(app: &App, to: Option<&str>) -> Result<String, String> {
+    let to = match to {
+        Some(to) => pascal(to),
+        None => signs_in_records(app).first().cloned().unwrap_or_else(|| "User".to_owned()),
+    };
+    let to_snake = snake(&to);
+    if !app.path(&format!("src/records/{to_snake}.rs")).exists() {
+        return Err(format!("no `{to}` record (src/records/{to_snake}.rs) to notify"));
+    }
+    Ok(to)
+}
+
+/// `/settings/notifications`: every switch `db.notification_prefs` lists, with on/off.
+fn notification_settings(app: &App, to: &str, plan: &mut Plan) {
+    let to_snake = snake(to);
+    let values = [("To", to), ("to", to_snake.as_str()), ("krate", &app.crate_name())];
+    plan.file(
+        "src/actions/notification_settings/index.rs",
+        fill(
+            "use kiln::prelude::*;\n\nuse crate::{records::@@To@@, views::notification_settings::Index};\n\n/// What the signed-in @@to@@ gets, and where.\n#[action(GET \"/settings/notifications\")]\npub async fn index(ctx: Ctx, @@to@@: Current<@@To@@>) -> Result<Index> {\n    Ok(Index { prefs: ctx.db.notification_prefs(&*@@to@@).await? })\n}\n",
+            &values,
+        ),
+    );
+    plan.file(
+        "src/actions/notification_settings/update.rs",
+        fill(
+            "use kiln::{notify::Channel, prelude::*};\n\nuse crate::{actions::notification_settings, records::@@To@@};\n\n/// Turns one channel on or off: `kind` is a notification type, or `*` for all of them.\n#[action(PATCH \"/settings/notifications/{kind}/{channel}/{state}\")]\npub async fn update(\n    ctx: Ctx,\n    @@to@@: Current<@@To@@>,\n    kind: Param<String>,\n    channel: Param<String>,\n    state: Param<String>,\n) -> Result<Redirect> {\n    let channel: Channel = channel.parse()?;\n    let on = state.as_str() == \"on\";\n    ctx.db.set_notification_pref(&*@@to@@, &kind, channel, on).await?;\n    Ok(Redirect::to(notification_settings::index::path()).notice(if on { \"Turned on.\" } else { \"Turned off.\" }))\n}\n",
+            &values,
+        ),
+    );
+    plan.module("src/actions/notification_settings/mod.rs", "pub mod index;");
+    plan.module("src/actions/notification_settings/mod.rs", "pub mod update;");
+    plan.module("src/actions/mod.rs", "pub mod notification_settings;");
+    plan.file(
+        "src/views/notification_settings/index.rs",
+        "use kiln::{notify::NotificationPref, prelude::*};\n\n#[derive(View)]\n#[view(template = \"notification_settings/index\")]\npub struct Index {\n    pub prefs: Vec<NotificationPref>,\n}\n".to_owned(),
+    );
+    plan.module("src/views/notification_settings/mod.rs", "mod index;");
+    plan.module("src/views/notification_settings/mod.rs", "pub use index::Index;");
+    plan.module("src/views/mod.rs", "pub mod notification_settings;");
+    plan.file(
+        "templates/notification_settings/index.html.jinja",
+        "{% set title = \"Notifications\" %}\n<h1>Notification settings</h1>\n<table>\n  <thead><tr><th>Notification</th><th>Channel</th><th></th></tr></thead>\n  <tbody>\n    {% for pref in prefs %}\n    <tr id=\"pref_{{ pref.kind }}_{{ pref.channel }}\">\n      <td>{% if pref.kind == \"*\" %}<strong>{{ pref.description }}</strong>{% else %}{{ pref.description }}{% endif %}</td>\n      <td>{{ pref.channel }}</td>\n      <td>\n        {% if pref.enabled %}\n        {{ form_start(path(\"notification_settings::update\", kind=pref.kind, channel=pref.channel, state=\"off\"), method=\"patch\", class=\"inline\") }}<button>Turn off</button>{{ form_end() }}\n        {% else %}\n        <em>Off</em> {{ form_start(path(\"notification_settings::update\", kind=pref.kind, channel=pref.channel, state=\"on\"), method=\"patch\", class=\"inline\") }}<button>Turn on</button>{{ form_end() }}\n        {% endif %}\n      </td>\n    </tr>\n    {% else %}\n    <tr><td colspan=\"3\">No notifications can be turned off yet.</td></tr>\n    {% endfor %}\n  </tbody>\n</table>\n".to_owned(),
+    );
+    plan.file(
+        "tests/notification_settings.rs",
+        fill(
+            "use @@krate@@::{actions::notification_settings, records::*};\nuse kiln::{notify::Channel, prelude::*, testing::TestApp};\n\n#[kiln::test]\nasync fn people_turn_every_email_off_and_on(app: TestApp) -> Result {\n    let @@to@@ = app.create::<@@To@@>().await?;\n    let client = app.sign_in_as(&@@to@@);\n    client.get_html(notification_settings::index::path()).await.assert_status(200);\n    client.patch_form(notification_settings::update::path(\"*\", \"mail\", \"off\"), &[]).await.assert_flash(\"Turned off.\");\n    let mail = |prefs: &[kiln::notify::NotificationPref]| prefs.iter().find(|p| p.kind == \"*\" && p.channel == Channel::Mail).map(|p| p.enabled);\n    assert_eq!(mail(&app.db.notification_prefs(&@@to@@).await?), Some(false));\n    client.patch_form(notification_settings::update::path(\"*\", \"mail\", \"on\"), &[]).await.assert_flash(\"Turned on.\");\n    assert_eq!(mail(&app.db.notification_prefs(&@@to@@).await?), Some(true));\n    Ok(())\n}\n\n#[kiln::test]\nasync fn signed_out_people_cannot_change_settings(app: TestApp) -> Result {\n    app.client().patch_form(notification_settings::update::path(\"*\", \"mail\", \"off\"), &[]).await.assert_status(401);\n    Ok(())\n}\n",
+            &values,
+        ),
+    );
+}
+
 /// `kiln g mail welcome_email`
 fn mail(app: &App, name: &str) -> Result<Plan, String> {
     if !is_snake(name) {
@@ -980,7 +1104,7 @@ fn mail(app: &App, name: &str) -> Result<Plan, String> {
     plan.file(
         format!("src/mail/{name}.rs"),
         fill(
-            "use kiln::prelude::*;\nuse serde::Serialize;\n\n/// Send it with `@@Name@@ { .. }.deliver_later(&tx).await?` inside the write's transaction.\n/// Every field is available to the templates and the subject.\n#[derive(Mail, Serialize, Debug)]\n#[mail(template = \"mail/@@name@@\", subject = \"@@human@@ for {{ name }}\")]\npub struct @@Name@@ {\n    pub to: String,\n    pub name: String,\n}\n",
+            "use kiln::prelude::*;\nuse serde::Serialize;\n\n/// Send it with `@@Name@@ { .. }.deliver_later(&tx).await?` inside the write's transaction.\n/// Every field is available to the templates and the subject.\n#[derive(Mail, Serialize, Debug)]\n#[mail(template = \"mail/@@name@@\", subject = \"@@human@@ for {{ name }}\", preview)]\npub struct @@Name@@ {\n    pub to: String,\n    pub name: String,\n}\n\n/// Sample data for /kiln/mail/previews (may read `ctx.db`).\nimpl Preview for @@Name@@ {\n    async fn preview(_ctx: &Ctx) -> Result<Self> {\n        Ok(Self { to: \"ada@example.com\".into(), name: \"Ada\".into() })\n    }\n}\n",
             &values,
         ),
     );
@@ -1004,7 +1128,7 @@ fn mail(app: &App, name: &str) -> Result<Plan, String> {
     plan.file(
         format!("tests/mail_{name}.rs"),
         fill(
-            "use @@krate@@::mail::@@Name@@;\nuse kiln::{prelude::*, testing::TestApp};\n\n#[kiln::test]\nasync fn @@name@@_is_delivered(app: TestApp) -> Result {\n    @@Name@@ { to: \"ada@example.com\".into(), name: \"Ada\".into() }.deliver_later(&app.db).await?;\n    app.perform_enqueued_jobs().await?;\n    let mail = app.assert_mailed(\"ada@example.com\", \"Hi Ada\").await?;\n    assert!(mail.text.is_some());\n    Ok(())\n}\n",
+            "use @@krate@@::mail::@@Name@@;\nuse kiln::{prelude::*, testing::TestApp};\n\n#[kiln::test]\nasync fn @@name@@_is_delivered(app: TestApp) -> Result {\n    @@Name@@ { to: \"ada@example.com\".into(), name: \"Ada\".into() }.deliver_later(&app.db).await?;\n    app.perform_enqueued_jobs().await?;\n    let mail = app.assert_mailed(\"ada@example.com\", \"Hi Ada\").await?;\n    assert!(mail.text.is_some());\n    assert!(app.render_mail_preview::<@@Name@@>().await?.contains(\"Hi Ada\"));\n    Ok(())\n}\n",
             &values,
         ),
     );
@@ -1019,6 +1143,8 @@ macro_rules! auth_files {
 
 const AUTH_FILES: &[(&str, &str)] = auth_files![
     "src/actions/confirmations/show.rs",
+    "src/actions/password_settings/edit.rs",
+    "src/actions/password_settings/update.rs",
     "src/actions/passwords/create.rs",
     "src/actions/passwords/edit.rs",
     "src/actions/passwords/new.rs",
@@ -1031,16 +1157,20 @@ const AUTH_FILES: &[(&str, &str)] = auth_files![
     "src/actions/sign_ins/destroy.rs",
     "src/actions/sign_ins/destroy_others.rs",
     "src/actions/sign_ins/index.rs",
+    "src/forms/change_password_form.rs",
     "src/forms/new_password_form.rs",
     "src/forms/password_reset_request_form.rs",
     "src/forms/sign_in_form.rs",
     "src/forms/sign_up_form.rs",
     "src/mail/email_confirmation.rs",
+    "src/mail/password_changed.rs",
     "src/mail/password_reset.rs",
+    "src/ops/change_password.rs",
     "src/ops/confirm_email.rs",
     "src/ops/request_password_reset.rs",
     "src/ops/reset_password.rs",
     "src/ops/sign_up.rs",
+    "src/views/password_settings/edit.rs",
     "src/views/passwords/edit.rs",
     "src/views/passwords/new.rs",
     "src/views/registrations/new.rs",
@@ -1049,8 +1179,11 @@ const AUTH_FILES: &[(&str, &str)] = auth_files![
     "templates/layouts/mail.html.jinja",
     "templates/mail/email_confirmation.html.jinja",
     "templates/mail/email_confirmation.txt.jinja",
+    "templates/mail/password_changed.html.jinja",
+    "templates/mail/password_changed.txt.jinja",
     "templates/mail/password_reset.html.jinja",
     "templates/mail/password_reset.txt.jinja",
+    "templates/password_settings/edit.html.jinja",
     "templates/passwords/edit.html.jinja",
     "templates/passwords/new.html.jinja",
     "templates/registrations/new.html.jinja",
@@ -1102,7 +1235,8 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
         let contents = fill(contents, &[("krate", &krate)]);
         if app.path(path).exists() { plan.replace(*path, contents) } else { plan.file(*path, contents) }
     }
-    if let Some(layout) = read("templates/layouts/app.html.jinja") {
+    // Only once: regenerating (`--force`) must not add the links again.
+    if let Some(layout) = read("templates/layouts/app.html.jinja").filter(|l| !l.contains("registrations::new")) {
         let updated = layout
             .replacen(
                 "<span>{{ current_user.name }}</span>",
@@ -1126,9 +1260,17 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
                 "sign_up_form:SignUpForm",
                 "password_reset_request_form:PasswordResetRequestForm",
                 "new_password_form:NewPasswordForm",
+                "change_password_form:ChangePasswordForm",
             ][..],
         ),
-        ("mail", &["email_confirmation:EmailConfirmation", "password_reset:PasswordReset"][..]),
+        (
+            "mail",
+            &[
+                "email_confirmation:EmailConfirmation",
+                "password_reset:PasswordReset",
+                "password_changed:PasswordChanged",
+            ][..],
+        ),
         (
             "ops",
             &[
@@ -1137,6 +1279,8 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
                 "request_password_reset:request_password_reset",
                 "reset_password:reset_password",
                 "reset_password:user_for_reset",
+                "change_password:change_password",
+                "change_password:PasswordChange",
             ][..],
         ),
     ] {
@@ -1154,6 +1298,7 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
         ("confirmations", &["show"][..]),
         ("passwords", &["new", "create", "edit", "update"][..]),
         ("sign_ins", &["index", "destroy", "destroy_others"][..]),
+        ("password_settings", &["edit", "update"][..]),
     ] {
         plan.module("src/actions/mod.rs", format!("pub mod {resource};"));
         for verb in verbs {
@@ -1165,6 +1310,7 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
         ("registrations", &["new:New"][..]),
         ("passwords", &["new:New", "edit:Edit"][..]),
         ("sign_ins", &["index:Index"][..]),
+        ("password_settings", &["edit:Edit"][..]),
     ] {
         plan.module("src/views/mod.rs", format!("pub mod {resource};"));
         for view in views {

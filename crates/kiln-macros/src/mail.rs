@@ -18,14 +18,17 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     }
     let mut template: Option<LitStr> = None;
     let mut subject: Option<LitStr> = None;
+    let mut preview = false;
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("mail")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("template") {
                 template = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("subject") {
                 subject = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("preview") {
+                preview = true;
             } else {
-                return Err(meta.error("expected `template = \"mail/..\"` or `subject = \"..\"`"));
+                return Err(meta.error("expected `template = \"mail/..\"`, `subject = \"..\"` or `preview`"));
             }
             Ok(())
         })?;
@@ -52,7 +55,17 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     } else {
         quote!(::core::option::Option::None)
     };
+    let name_str = name.to_string();
+    let preview = preview.then(|| {
+        quote! {
+            ::kiln::__private::inventory::submit! {
+                ::kiln::mail::PreviewDef { name: #name_str, render: ::kiln::mail::render_preview::<#name> }
+            }
+        }
+    });
     Ok(quote! {
+        #preview
+
         impl ::kiln::mail::Mail for #name {
             const ROOT: &'static str = ::core::concat!(::core::env!("CARGO_MANIFEST_DIR"), "/templates");
             const TEMPLATE: &'static str = #html;

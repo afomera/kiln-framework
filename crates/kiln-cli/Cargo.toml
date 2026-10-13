@@ -16,3 +16,4 @@ proc-macro2 = { workspace = true, features = ["span-locations"] }
 quote.workspace = true
 serde_json.workspace = true
 syn.workspace = true
+ctrlc = { version = "3", features = ["termination"] }

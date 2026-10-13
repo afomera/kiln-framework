@@ -134,15 +134,25 @@ async fn paused_schedules_skip_and_can_still_run_on_demand(app: TestApp) -> Resu
     Ok(())
 }
 
+#[derive(Job, Serialize, Deserialize)]
+#[job(queue = "parked")]
+struct Parked;
+
+impl Perform for Parked {
+    async fn perform(self, _ctx: &Ctx) -> Result {
+        Ok(())
+    }
+}
+
 #[kiln::test]
 async fn paused_queues_hold_their_jobs(app: TestApp) -> Result {
-    app.db.pause_queue("flaky").await?;
-    AlwaysFails.enqueue(&app.db).await?;
+    app.db.pause_queue("parked").await?;
+    Parked.enqueue(&app.db).await?;
     assert_eq!(app.perform_enqueued_jobs().await?, 0, "nothing runs from a paused queue");
     let queues = app.db.queues().await?;
-    assert!(queues.iter().any(|(q, paused, queued, ..)| q == "flaky" && *paused && *queued == 1), "{queues:?}");
-    app.db.resume_queue("flaky").await?;
-    assert!(app.perform_enqueued_jobs().await.is_err(), "runs (and fails) once resumed");
+    assert!(queues.iter().any(|(q, paused, queued, ..)| q == "parked" && *paused && *queued == 1), "{queues:?}");
+    app.db.resume_queue("parked").await?;
+    assert_eq!(app.perform_enqueued_jobs().await?, 1, "runs once resumed");
     Ok(())
 }
 

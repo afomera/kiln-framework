@@ -1,5 +1,6 @@
 {% set title = "Where you're signed in" %}
 <h1>Where you're signed in</h1>
+<p><a href="{{ path("password_settings::edit") }}">Change your password</a></p>
 <ul class="sign-ins">
   {% for sign_in in sign_ins %}
   <li id="sign_in_{{ sign_in.id }}">

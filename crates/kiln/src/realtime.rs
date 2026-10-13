@@ -204,6 +204,8 @@ async fn next_chunk(mut state: Listener) -> Option<(std::result::Result<Bytes, I
                     return None;
                 }
             }
+            // A shutting-down server ends its streams; browsers reconnect elsewhere.
+            () = crate::jobs::shutdown_requested() => return None,
             () = tokio::time::sleep(POLL) => {}
         }
     }

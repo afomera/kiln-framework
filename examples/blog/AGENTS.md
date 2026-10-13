@@ -16,7 +16,8 @@ Run them from the app directory.
 | Domain operation | `kiln g op publish_post` |
 | Presentation methods | `kiln g part Post` |
 | Background job | `kiln g job send_digest` |
-| Email | `kiln g mail welcome_email` |
+| Email | `kiln g mail welcome_email` (with a preview at `/kiln/mail/previews`) |
+| Notification (inbox + email + live) | `kiln g notification comment_posted [--to User]` (adds `/settings/notifications` the first time) |
 | Passwords, sign-up, resets, sign-in list | `kiln g auth` (once; replaces the demo sign-in) |
 | Schema change | edit the record struct → `kiln db diff <snake_case_name>` → review the SQL → `kiln db migrate` |
 | Verify | `kiln check` (must end `0 errors`), then `kiln test` |
@@ -59,6 +60,7 @@ generated tests passing.
 | Background job | `src/jobs/{verb}_{noun}.rs` | `#[derive(Job, Serialize, Deserialize)]` + `impl Perform` |
 | Email | `src/mail/{name}.rs` + `templates/mail/{name}.html.jinja` (+ `.txt.jinja`) | `#[derive(Mail, Serialize)] #[mail(template = "mail/{name}", subject = "..")]` with a `to: String` field; wrapped in `layouts/mail.html.jinja` |
 | Recurring jobs | `src/schedule.rs` | `pub fn schedule(s: Schedule) -> Schedule { s.cron("0 3 * * *", Job {}) }`, registered with `app.schedule(schedule::schedule)` |
+| Notification | `src/notifications/{what_happened}.rs` | `#[derive(Notification, Serialize, Deserialize)] #[notification(description = "..", optional(mail))]` + `impl Notify` |
 | Dev processes | `Procfile.dev` | `name: command`; `$APP` is the app binary |
 | What templates see of a signed-in record | `src/views/current_user.rs` | `#[derive(Serialize)] struct CurrentUser` + `fn of(&User) -> Self` |
 | Page | `src/views/{resource}/{verb}.rs` + `templates/{resource}/{verb}.html.jinja` | `#[derive(View)]` |
@@ -143,6 +145,12 @@ generated tests passing.
   delays it. Store ids, not records, and reload in `perform`; jobs retry with backoff and
   may run twice, so make them safe to repeat. The web process runs jobs too; for a
   separate worker use `web: WORKERS=0 $APP serve` and `worker: $APP work` in `Procfile.dev`.
+- **Job options:** `#[job(queue = "imports", priority = 10, timeout = "30s", attempts = 5, unique_for = "10m")]`.
+  Higher priority runs first; an attempt past `timeout` is stopped and retried. Cap a queue
+  across all processes with `app.queue_limit("imports", 2)` in `src/app.rs`. Running jobs can be
+  cancelled (`kiln jobs cancel <id>`, `/kiln/jobs`): they stop at their next `.await`.
+  On SIGTERM workers finish within `JOB_SHUTDOWN_GRACE` (25s in production) and put
+  unfinished jobs back.
 - **Jobs act as the system.** A job that changes a policy-guarded record calls an op with
   `kiln::policy::as_system::<Update, _>(record)` (never in actions: K0304). `#[job(unique_for = "10m")]`
   collapses duplicate enqueues.
@@ -172,6 +180,13 @@ generated tests passing.
   `{{ url(path("posts::show", slug=post.slug)) }}` (base: `APP_URL`). `MAIL_URL` picks the
   transport (`smtp://user:pass@host:587`, `smtps://..`); in development and tests mail
   goes to the outbox: browse it at `/kiln/mail`. `MAIL_FROM` sets the sender.
+- **Mail previews:** add `preview` to `#[mail(..)]` and `impl Preview for X { async fn preview(ctx: &Ctx) -> Result<Self> { .. } }`;
+  test them all with `app.render_mail_previews().await?`.
+- **Notifications:** `CommentPosted { comment_id }.notify(&tx, &author).await?`. In `deliver`,
+  `via.inbox("title").link(path)`, `via.mail(Mail { .. })?`, `via.broadcast(stream, turbo)`.
+  Channels people turned off at `/settings/notifications` are dropped by `via` itself; don't
+  re-check them. Inbox: `db.inbox(&user, 20)`, `db.unread_notifications(&user)`,
+  `db.mark_notification_read(&user, id)`. Test with `perform_enqueued_jobs` then `db.inbox`.
 - **Testing mail:** `app.perform_enqueued_jobs().await?`, then
   `app.assert_mailed("ada@example.com", "Welcome").await?` (returns the message), or
   `app.outbox()`; `mail.message()?` renders without sending.

@@ -2,7 +2,7 @@
 //! signing devices out.
 
 use blog::{
-    actions::{confirmations, passwords, registrations, sessions, sign_ins},
+    actions::{confirmations, password_settings, passwords, registrations, sessions, sign_ins},
     records::*,
 };
 use kiln::{auth, prelude::*, testing::TestApp};
@@ -155,5 +155,77 @@ async fn users_see_and_sign_out_their_devices(app: TestApp) -> Result {
     laptop.delete(sign_ins::destroy_others::path()).await.assert_flash("Signed out 1 other device.");
     phone.get(sign_ins::index::path()).await.assert_status(401);
     laptop.get(sign_ins::index::path()).await.assert_status(200);
+    Ok(())
+}
+
+#[kiln::test]
+async fn mail_previews_render(app: TestApp) -> Result {
+    user(&app).await?;
+    for (name, mail) in app.render_mail_previews().await? {
+        assert!(!mail.subject.is_empty(), "{name} has a subject");
+    }
+    Ok(())
+}
+
+#[kiln::test]
+async fn changing_the_password_keeps_this_browser_and_signs_out_the_rest(app: TestApp) -> Result {
+    let user = user(&app).await?;
+    let laptop = app.sign_in_as(&user);
+    let phone = app.sign_in_as(&user);
+    phone.get(sign_ins::index::path()).await.assert_status(200);
+    laptop.get_html(password_settings::edit::path()).await.assert_status(200).assert_contains("Current password");
+
+    let form = [
+        ("current_password", "password"),
+        ("password", "analytical engine"),
+        ("password_confirmation", "analytical engine"),
+    ];
+    laptop
+        .patch_form(password_settings::update::path(), &form)
+        .await
+        .assert_redirect(&sign_ins::index::path())
+        .assert_flash("Password changed. We signed out your other device.");
+    laptop.get(sign_ins::index::path()).await.assert_status(200);
+    phone.get(sign_ins::index::path()).await.assert_status(401);
+
+    let user = User::find(user.id).one_or_404(&app.db).await?;
+    assert!(auth::verify_password("analytical engine", &user.password_digest));
+    app.perform_enqueued_jobs().await?;
+    app.assert_mailed("ada@example.com", "Your password was changed").await?;
+    Ok(())
+}
+
+#[kiln::test]
+async fn password_changes_need_the_current_password_and_a_match(app: TestApp) -> Result {
+    let client = app.sign_in_as(&user(&app).await?);
+    let wrong = [
+        ("current_password", "nope"),
+        ("password", "analytical engine"),
+        ("password_confirmation", "analytical engine"),
+    ];
+    client
+        .patch_form(password_settings::update::path(), &wrong)
+        .await
+        .assert_status(422)
+        .assert_contains("Current password is incorrect");
+    let mismatch = [
+        ("current_password", "password"),
+        ("password", "analytical engine"),
+        ("password_confirmation", "difference engine"),
+    ];
+    client
+        .patch_form(password_settings::update::path(), &mismatch)
+        .await
+        .assert_status(422)
+        .assert_contains("doesn&#x27;t match");
+    let short = [("current_password", "password"), ("password", "short"), ("password_confirmation", "short")];
+    client
+        .patch_form(password_settings::update::path(), &short)
+        .await
+        .assert_status(422)
+        .assert_not_contains("value=\"password\"");
+    app.client().patch_form(password_settings::update::path(), &wrong).await.assert_status(401);
+    app.perform_enqueued_jobs().await?;
+    assert!(app.outbox().await?.is_empty(), "no notice when nothing changed");
     Ok(())
 }

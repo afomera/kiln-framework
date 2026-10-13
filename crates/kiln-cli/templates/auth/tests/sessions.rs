@@ -6,6 +6,12 @@ async fn sign_in_and_out(app: TestApp) -> Result {
     // Factories give every user the password `password`.
     let user = app.create::<User>().await?;
     let client = app.client();
+    // Password managers fill sign-in forms from these hints.
+    client
+        .get_html(sessions::new::path())
+        .await
+        .assert_contains("autocomplete=\"current-password\"")
+        .assert_contains("autocomplete=\"email\"");
     client
         .post_form(sessions::create::path(), &[("email", &user.email), ("password", "password")])
         .await

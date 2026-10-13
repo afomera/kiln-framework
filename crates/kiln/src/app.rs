@@ -132,6 +132,8 @@ struct Shared {
     sign_ins: Arc<[Arc<dyn SignIn>]>,
     assets: Option<Assets>,
     tools: Option<ToolsAccess>,
+    /// The app's context, for `/kiln` pages that run app code (mail previews).
+    ctx: Ctx,
 }
 
 #[derive(Clone)]
@@ -183,6 +185,15 @@ impl App {
             })
         }));
         self
+    }
+
+    /// Caps how many jobs from `queue` run at once, across every worker process:
+    /// `app.queue_limit("imports", 2)`. Other queues are limited only by the workers.
+    pub fn queue_limit(self, queue: &'static str, max_running: i64) -> Self {
+        let mut limits = self.ctx.try_get::<crate::jobs::QueueLimits>().cloned().unwrap_or_default();
+        limits.0.retain(|(q, _)| *q != queue);
+        limits.0.push((queue, max_running));
+        self.provide(limits)
     }
 
     /// The app's recurring jobs: `app.schedule(schedule::schedule)` with the function in
@@ -257,6 +268,7 @@ impl App {
             sign_ins,
             assets: self.assets.clone(),
             tools: self.tools.clone(),
+            ctx: self.ctx.clone(),
         });
         // Method override must happen before routing, so request handling wraps the whole
         // router instead of each route.
@@ -264,13 +276,25 @@ impl App {
     }
 
     pub async fn serve(self, addr: &str) -> Result<()> {
-        // So /kiln/schedules is right even when jobs run in another process.
-        if let Some(schedule) = self.ctx.try_get::<crate::Schedule>() {
-            self.ctx.db.sync_schedules(schedule, crate::Timestamp::now()).await?;
-        }
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        // So /kiln is right even when jobs run in another process.
+        crate::jobs::sync_app(&self.ctx).await?;
+        crate::jobs::listen_for_shutdown();
+        crate::jobs::exit_with_kiln_dev();
+        let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                let port = addr.rsplit(':').next().unwrap_or(addr);
+                Error::BadRequest(format!(
+                    "{addr} is already in use. Something else is listening there; see what with `lsof -nP -iTCP:{port} -sTCP:LISTEN`, or run on another port (`kiln dev --port 4000`)"
+                ))
+            } else {
+                e.into()
+            }
+        })?;
         println!("{}\n\nkiln listening on http://{addr}", routes_table());
-        axum::serve(listener, self.router().into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
+        // SIGTERM stops new connections and lets requests finish (open streams end).
+        axum::serve(listener, self.router().into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .with_graceful_shutdown(crate::jobs::shutdown_requested())
+            .await?;
         Ok(())
     }
 }
@@ -418,7 +442,7 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
     if *request.method() == Method::POST
         && let Some(viewer) = viewer.clone()
     {
-        return crate::devtools::act(&shared.db, viewer, request).await;
+        return crate::devtools::act(&shared.ctx, viewer, request).await;
     }
     // Static files skip sessions and logging: they never set cookies.
     if matches!(*request.method(), Method::GET | Method::HEAD) {
@@ -430,7 +454,7 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
             realtime::serve(shared.db.clone(), &shared.key, path, last_event_id).await
         } else if path == "/kiln" || path.starts_with("/kiln/") {
             let page = match viewer {
-                Some(viewer) => crate::devtools::serve(&shared.db, viewer, path, request.uri().query()).await,
+                Some(viewer) => crate::devtools::serve(&shared.ctx, viewer, path, request.uri().query()).await,
                 None => None,
             };
             page.or_else(|| assets::serve_kiln(path))
