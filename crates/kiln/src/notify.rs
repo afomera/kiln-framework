@@ -464,6 +464,25 @@ impl Db {
         Ok(!rows.is_empty())
     }
 
+    /// Marks one of `to`'s entries read and returns it (`None` for anyone else's id), e.g. to
+    /// follow its `url`.
+    pub async fn read_notification<T: Record>(&self, to: &T, id: i64) -> Result<Option<InboxItem>> {
+        let rows = self
+            .fetch_all(
+                "UPDATE \"kiln_notifications\" SET \"read_at\" = COALESCE(\"read_at\", ?) \
+                 WHERE \"id\" = ? AND \"recipient_table\" = ? AND \"recipient_id\" = ? \
+                 RETURNING \"id\", \"kind\", \"title\", \"body\", \"url\", \"read_at\", \"created_at\"",
+                vec![
+                    Value::Integer(now()),
+                    Value::Integer(id),
+                    Value::Text(T::TABLE.to_owned()),
+                    Value::Integer(to.id().get()),
+                ],
+            )
+            .await?;
+        Ok(rows.first().map(row_to_notification))
+    }
+
     pub async fn mark_all_notifications_read<T: Record>(&self, to: &T) -> Result<usize> {
         let rows = self
             .fetch_all(

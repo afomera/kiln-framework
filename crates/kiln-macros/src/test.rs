@@ -43,7 +43,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             )
             .await
             .expect("the test app boots and its migrations apply");
-            #inner(__kiln_app).await
+            __kiln_app.run(#inner).await
         }
 
         #func

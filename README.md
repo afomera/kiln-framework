@@ -32,7 +32,7 @@ Agents working in an app start with its `AGENTS.md` ([the template](crates/kiln-
 | --- | --- |
 | Records: the struct is the schema; typed columns, `Id<T>`, queries, `insert`/`update`/`delete` | `crates/kiln/src/query.rs`, `crates/kiln-macros/src/record.rs` |
 | `Loaded<T, (rels..)>` preloading; N+1 is a compile error | `crates/kiln/src/rel.rs` |
-| Schema diffs: `kiln db diff <name>` writes reviewed SQL from the structs, including SQLite table rebuilds; `db migrate`, `db status`, drift detection | `crates/kiln/src/migrate.rs` |
+| Schema diffs: `kiln db diff <name>` writes reviewed SQL from the structs, including SQLite table rebuilds and Postgres ALTERs; `db migrate`, `db status`, drift detection, `db undo`, `db squash` (one file per past year) | `crates/kiln/src/migrate.rs` |
 | Transactions: `ctx.db.transaction(\|tx\| async move { .. })` | `crates/kiln/src/db.rs` |
 | `#[action(PATCH "/posts/{slug}")]`, typed `path(..)` helpers, link-time route registry | `crates/kiln-macros/src/action.rs` |
 | API pipeline: `#[action(GET "/api/posts", pipeline = Api)]`, `Json<T>`, JSON/form bodies through `Form<T>`, problem+json errors, no session cookie | `crates/kiln/src/app.rs`, `error_page.rs` |
@@ -63,6 +63,7 @@ writes the record, migration, form, policy, three ops, seven actions, four views
 | K0202 | The record structs match `db/snapshot.json` (no undiffed schema change) |
 | K0301 | A function that writes a policy-guarded record (`Post::insert/update/delete`) takes the matching `Authorized<_, Post>` proof |
 | K0203 | (warn) Migrations not yet applied to the development database |
+| K0204 | `db/snapshot.json` was written with a migration that's since been deleted (`kiln db undo` restores it) |
 | K0302 | (warn) A data-changing action has no test that calls its path helper |
 | K0402 | Every `path("..")` in a template names a real route |
 | K0403 | Every `include`/`extends` names a real template |

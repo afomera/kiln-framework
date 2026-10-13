@@ -44,6 +44,9 @@ Commands:
   batches             Recent batches; batches cancel <id>
   db migrate          Apply pending migrations
   db diff <name>      Write a migration for changes to the record structs
+  db undo             Delete the newest migration and restore the snapshot from before it
+  db squash [--before <year>]
+                      One migration file per past year (default: every year before this one)
   db status [--json]  Pending migrations and schema drift
   db seed             Run the app's seed function
   db reset            Recreate the development database, migrate and seed
@@ -92,6 +95,32 @@ impl Cli {
         self.root.join("db/snapshot.json")
     }
 
+    /// The snapshot as it was before migration `version`, kept for `db undo`. Local only
+    /// (`db/.kiln/` is gitignored): undo is for a migration you just generated.
+    fn snapshot_backup(&self, version: &str) -> PathBuf {
+        self.root.join(format!("db/.kiln/snapshot-before-{version}.json"))
+    }
+
+    /// An error when the snapshot was written with a migration that's no longer on disk
+    /// (deleted by hand): diffing from it would leave that change out.
+    fn check_snapshot_current(&self, snapshot: &Snapshot) -> Result {
+        let Some(version) = &snapshot.migration else { return Ok(()) };
+        let on_disk = crate::migrate::load_migrations(&self.migrations_dir())?
+            .iter()
+            .any(|m| m.parts().iter().any(|p| &p.version == version));
+        if on_disk {
+            return Ok(());
+        }
+        let fix = if self.snapshot_backup(version).exists() {
+            "run `kiln db undo` to restore the snapshot from before it".to_owned()
+        } else {
+            "restore the file, or db/snapshot.json from version control".to_owned()
+        };
+        Err(Error::BadRequest(format!(
+            "db/snapshot.json was written with migration {version}, which is gone; {fix}, then `kiln db diff` again"
+        )))
+    }
+
     /// The backend the app's migrations are written for (`db/snapshot.json`).
     fn backend(&self) -> &'static dyn crate::dialect::Dialect {
         Snapshot::load(&self.snapshot_path()).map(|s| s.dialect()).unwrap_or(&crate::dialect::Sqlite)
@@ -128,6 +157,9 @@ impl Cli {
                 Ok(())
             }
             ["db", "diff", name] => self.diff(name),
+            ["db", "undo"] => self.undo().await,
+            ["db", "squash"] => self.squash(&jiff::Timestamp::now().strftime("%Y").to_string()).await,
+            ["db", "squash", "--before", year] => self.squash(year).await,
             ["db", "status", rest @ ..] => self.status(rest.contains(&"--json")).await,
             ["db", "seed"] => self.run_seed().await,
             ["db", "reset"] => self.reset().await,
@@ -318,6 +350,7 @@ impl Cli {
             return Err(Error::BadRequest(format!("migration names are snake_case, e.g. create_posts (got `{name}`)")));
         }
         let old = Snapshot::load(&self.snapshot_path())?;
+        self.check_snapshot_current(&old)?;
         // The backend is fixed by the first migration: the snapshot's, else DATABASE_URL's.
         let dialect = match (&old.backend, std::env::var("DATABASE_URL")) {
             (Some(_), Ok(url)) if crate::dialect::for_url(&url)?.name() != old.dialect().name() => {
@@ -339,6 +372,9 @@ impl Cli {
             return Ok(());
         }
         let path = write_migration(&self.migrations_dir(), name, &changes)?;
+        let version = path.file_name().and_then(|f| f.to_str()).and_then(|f| f.split('_').next()).unwrap_or_default();
+        old.save(&self.snapshot_backup(version))?;
+        new.migration = Some(version.to_owned());
         new.save(&self.snapshot_path())?;
         println!("created {}", relative(&path, &self.root));
         for note in &changes.notes {
@@ -395,12 +431,81 @@ impl Cli {
         Ok(())
     }
 
+    async fn undo(&self) -> Result {
+        let snapshot = Snapshot::load(&self.snapshot_path())?;
+        let Some(version) = snapshot.migration.clone() else {
+            return Err(Error::BadRequest(
+                "nothing to undo: db/snapshot.json doesn't name the migration it was written with".into(),
+            ));
+        };
+        let backup = self.snapshot_backup(&version);
+        if !backup.exists() {
+            return Err(Error::BadRequest(format!(
+                "no saved snapshot from before {version} (it was generated elsewhere); restore db/snapshot.json from version control instead"
+            )));
+        }
+        let migrations = crate::migrate::load_migrations(&self.migrations_dir())?;
+        let file = migrations.iter().find(|m| m.version == version);
+        if file.is_some_and(|m| m.is_squash()) {
+            return Err(Error::BadRequest(format!("{version} is a squash; undo only removes generated migrations")));
+        }
+        let applied = match self.db().await {
+            Ok(db) => db.applied_migrations().await.unwrap_or_default().contains(&version),
+            Err(_) => false,
+        };
+        if let Some(m) = file {
+            std::fs::remove_file(&m.path)?;
+            println!("removed {}", relative(&m.path, &self.root));
+        }
+        std::fs::rename(&backup, self.snapshot_path())?;
+        println!("restored db/snapshot.json from before {version}");
+        if applied {
+            println!(
+                "the development database has it applied: `kiln db reset` rebuilds it from the remaining migrations"
+            );
+        }
+        Ok(())
+    }
+
+    async fn squash(&self, before_year: &str) -> Result {
+        if before_year.len() != 4 || !before_year.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::BadRequest(format!("--before takes a year, e.g. 2026 (got `{before_year}`)")));
+        }
+        // Only squash what has run here: a pending migration may still change.
+        let dir = self.migrations_dir();
+        let pending = self.db().await?.pending_migrations(&dir).await?;
+        if let Some(m) = pending.iter().find(|m| m.version[..4] < *before_year) {
+            return Err(Error::BadRequest(format!(
+                "{}_{} hasn't been applied here; run `kiln db migrate` before squashing",
+                m.version, m.name
+            )));
+        }
+        let squashed = crate::migrate::squash(&dir, before_year)?;
+        if squashed.is_empty() {
+            println!("Nothing to squash before {before_year}.");
+        }
+        for s in &squashed {
+            println!("{}: {} migrations -> {}", s.year, s.parts, relative(&s.path, &self.root));
+            for path in &s.replaced {
+                println!("  removed {}", relative(path, &self.root));
+            }
+        }
+        if !squashed.is_empty() {
+            println!("databases that ran the originals skip these; commit the change in one go");
+        }
+        Ok(())
+    }
+
     async fn status(&self, json: bool) -> Result {
+        let stale = self.check_snapshot_current(&Snapshot::load(&self.snapshot_path())?).err().map(|e| e.to_string());
+        if let (Some(stale), false) = (&stale, json) {
+            return Err(Error::BadRequest(stale.clone()));
+        }
         let drift = !diff(&Snapshot::load(&self.snapshot_path())?, &Snapshot::from_records()).is_empty();
         let pending = self.db().await?.pending_migrations(&self.migrations_dir()).await?;
         if json {
             let pending: Vec<String> = pending.iter().map(|m| format!("{}_{}", m.version, m.name)).collect();
-            println!("{}", serde_json::json!({ "drift": drift, "pending": pending }));
+            println!("{}", serde_json::json!({ "drift": drift, "pending": pending, "stale_snapshot": stale }));
             return Ok(());
         }
         if drift {

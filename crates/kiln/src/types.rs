@@ -97,9 +97,21 @@ impl<'de, T> Deserialize<'de> for Id<T> {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(jiff::Timestamp);
 
+tokio::task_local! {
+    /// Microseconds a test has moved the clock (`app.travel(..)`); set around each
+    /// `#[kiln::test]`.
+    pub(crate) static CLOCK_OFFSET: std::sync::Arc<std::sync::atomic::AtomicI64>;
+}
+
 impl Timestamp {
+    /// The current time; in tests, moved by `app.travel(..)` / `app.travel_to(..)`.
     pub fn now() -> Self {
-        Self(jiff::Timestamp::now())
+        let real = jiff::Timestamp::now();
+        let offset = CLOCK_OFFSET.try_with(|o| o.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(0);
+        if offset == 0 {
+            return Self(real);
+        }
+        Self(real.checked_add(jiff::SignedDuration::from_micros(offset)).unwrap_or(real))
     }
 
     pub fn from_jiff(ts: jiff::Timestamp) -> Self {

@@ -14,7 +14,8 @@ pub enum Generate {
     /// A CRUD resource: record, migration, form, policy, ops, actions, views, templates,
     /// factory and tests. Fields: `title:string body:text published_at:timestamp?
     /// owner:ref:User`. Types: string, text, rich_text, integer, float, bool, timestamp,
-    /// ref:<Record>; a trailing `?` makes a field optional. The first required ref to a record people sign
+    /// ref:<Record>; a trailing `?` makes a field optional, and `:internal`
+    /// (`sent_at:timestamp?:internal`) keeps a field the app sets off the form. The first required ref to a record people sign
     /// in as (registered with `signs_in::<..>` in src/app.rs, e.g. `owner:ref:User` or
     /// `seller:ref:Merchant`) is the owner: set from the signed-in record. Owned resources
     /// are private: only the owner can list, see, edit or delete them. Pass `--public` to
@@ -122,9 +123,9 @@ impl Generate {
                 (plan, force, (!no_migration).then(|| format!("create_{}", r.plural)))
             }
             Generate::Action { resource, name, method, path, force } => {
-                (action(&resource, &name, &method, &path)?, force, None)
+                (action(app, &resource, &name, &method, &path)?, force, None)
             }
-            Generate::Op { name, force } => (op(&name)?, force, None),
+            Generate::Op { name, force } => (op(app, &name)?, force, None),
             Generate::Part { record, force } => (part(app, &record)?, force, None),
             Generate::Job { name, force } => (job(app, &name)?, force, None),
             Generate::Mail { name, force } => (mail(app, &name)?, force, None),
@@ -206,15 +207,25 @@ struct Field {
     target_label: Option<String>,
     /// `rich_text?`: the editor may be left empty (no `length` rule).
     may_be_empty: bool,
+    /// `sent_at:timestamp?:internal`: set by the app, not the form (starts empty).
+    internal: bool,
 }
 
 impl Field {
     fn parse(spec: &str) -> Result<Self, String> {
-        let parts: Vec<&str> = spec.split(':').collect();
+        let mut parts: Vec<&str> = spec.split(':').collect();
+        let internal = parts.len() > 2 && parts.last() == Some(&"internal");
+        if internal {
+            parts.pop();
+        }
         let (name, ty, target) = match parts.as_slice() {
             [name, ty] => (*name, *ty, None),
             [name, "ref", target] => (*name, "ref", Some(*target)),
-            _ => return Err(format!("`{spec}`: fields are `name:type` or `name:ref:Record`")),
+            _ => {
+                return Err(format!(
+                    "`{spec}`: fields are `name:type`, `name:ref:Record`, or either with `:internal` (set by the app, not the form)"
+                ));
+            }
         };
         let (ty, mut optional) = match ty.strip_suffix('?') {
             Some(ty) => (ty, true),
@@ -257,6 +268,11 @@ impl Field {
         }
         // An empty editor is an empty RichText, so `?` means "may be left empty", not Option.
         let rich_optional = kind == Kind::RichText && optional;
+        if internal && !optional && !matches!(kind, Kind::Bool | Kind::Integer) {
+            return Err(format!(
+                "`{spec}`: an internal field needs a starting value; make it optional (`{name}:{ty}?:internal`), or a bool or integer (false / 0)"
+            ));
+        }
         Ok(Self {
             name,
             kind,
@@ -264,6 +280,7 @@ impl Field {
             target,
             target_label: None,
             may_be_empty: rich_optional,
+            internal,
         })
     }
 
@@ -287,6 +304,20 @@ impl Field {
         if self.optional { format!("Option<{}>", self.base_type()) } else { self.base_type() }
     }
 
+    /// `email`, `contact_email`: an address (validated, and sampled as one).
+    fn is_email(&self) -> bool {
+        self.kind == Kind::String && (self.name == "email" || self.name.ends_with("_email"))
+    }
+
+    /// What a new record starts with when the form doesn't set the field.
+    fn starting_value(&self) -> &'static str {
+        match self.kind {
+            _ if self.optional => "None",
+            Kind::Bool => "false",
+            _ => "0",
+        }
+    }
+
     fn is_text(&self) -> bool {
         matches!(self.kind, Kind::String | Kind::Text)
     }
@@ -297,6 +328,9 @@ impl Field {
 
     /// A value a test submits in a form.
     fn sample(&self, prefix: &str) -> String {
+        if self.is_email() {
+            return format!("{}@example.com", prefix.to_lowercase());
+        }
         match self.kind {
             Kind::String | Kind::Text | Kind::RichText => format!("{prefix} {}", self.name.replace('_', " ")),
             // Small values, so adding a `range(..)` rule later doesn't break the tests.
@@ -424,9 +458,9 @@ impl Resource {
         self.owner.as_ref().and_then(|o| self.fields.iter().find(|f| &f.name == o))
     }
 
-    /// Fields the form edits: everything except the owner.
+    /// Fields the form edits: everything except the owner and internal fields.
     fn form_fields(&self) -> Vec<&Field> {
-        self.fields.iter().filter(|f| Some(&f.name) != self.owner.as_ref()).collect()
+        self.fields.iter().filter(|f| Some(&f.name) != self.owner.as_ref() && !f.internal).collect()
     }
 
     fn record(&self, plan: &mut Plan) {
@@ -487,6 +521,7 @@ impl Resource {
         for f in &self.fields {
             let value = match (f.kind, f.optional) {
                 (_, true) => "None".to_owned(),
+                (Kind::String, _) if f.is_email() => format!("format!(\"{}{{n}}@example.com\")", self.snake),
                 (Kind::String, _) => format!("format!(\"{} {{n}}\")", human(&f.name)),
                 (Kind::Text, _) => format!("\"{} text.\".into()", human(&f.name)),
                 (Kind::RichText, _) => format!("\"<p>{} text.</p>\".into()", human(&f.name)),
@@ -534,6 +569,8 @@ impl Resource {
         let mut body = String::new();
         for f in &fields {
             match (f.kind, f.optional) {
+                (Kind::String, false) if f.is_email() => body.push_str("    #[validate(email)]\n"),
+                (Kind::String, true) if f.is_email() => body.push_str("    #[validate(email)]\n"),
                 (Kind::String, false) => body.push_str("    #[validate(length(min = 1, max = 200))]\n"),
                 (Kind::String, true) => body.push_str("    #[validate(length(max = 200))]\n"),
                 (Kind::Text, false) => body.push_str("    #[validate(length(min = 1))]\n    #[form(textarea)]\n"),
@@ -554,6 +591,9 @@ impl Resource {
             .collect();
         let mut new_values: String =
             fields.iter().map(|f| format!("            {c}: self.{c},\n", c = f.column())).collect();
+        for f in self.fields.iter().filter(|f| f.internal) {
+            new_values.push_str(&format!("            {}: {},\n", f.column(), f.starting_value()));
+        }
         let (owner_param, owner_doc) = match self.owner_field() {
             Some(owner) => {
                 new_values.push_str(&format!("            {}: {}.id,\n", owner.column(), owner.name));
@@ -931,7 +971,7 @@ fn snake_of(pascal_name: &str) -> String {
 }
 
 /// `kiln g action posts publish POST /posts/{slug}/publish`
-fn action(resource: &str, name: &str, method: &str, path: &str) -> Result<Plan, String> {
+fn action(app: &App, resource: &str, name: &str, method: &str, path: &str) -> Result<Plan, String> {
     if !is_snake(resource) || !is_snake(name) {
         return Err(
             "resource and action names are snake_case, e.g. `kiln g action posts publish POST /posts/{slug}/publish`"
@@ -946,6 +986,18 @@ fn action(resource: &str, name: &str, method: &str, path: &str) -> Result<Plan, 
         return Err("paths start with `/`".into());
     }
     let captures: Vec<&str> = path.split('/').filter_map(|s| s.strip_prefix('{')?.strip_suffix('}')).collect();
+    // `posts` with an existing `Post` record and an `{id}` in the path: load, authorize, test.
+    if captures.first() == Some(&"id") {
+        let record = std::fs::read_dir(app.path("src/records"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.strip_suffix(".rs").map(str::to_owned))
+            .find(|r| r != "mod" && plural(r) == resource);
+        if let Some(record) = record {
+            return record_action(app, resource, &record, name, &method, path, &captures[1..]);
+        }
+    }
     let mut args = vec!["_ctx: Ctx".to_owned()];
     args.extend(captures.iter().map(|c| format!("{c}: Param<String>")));
     let ret = if method == "GET" { "Result<String>" } else { "Result<Redirect>" };
@@ -962,11 +1014,156 @@ fn action(resource: &str, name: &str, method: &str, path: &str) -> Result<Plan, 
     Ok(plan)
 }
 
-/// `kiln g op publish_post`
-fn op(name: &str) -> Result<Plan, String> {
-    if !is_snake(name) || !name.contains('_') {
-        return Err("operations are named `verb_noun`, e.g. `publish_post`".into());
+/// `kiln g action issues send POST /issues/{id}/send` when `Issue` exists: the action loads
+/// the record, authorizes the signed-in user (`Read` for GET, `Update` otherwise), and has a
+/// view (GET) or a redirect, plus tests.
+fn record_action(
+    app: &App,
+    resource: &str,
+    record: &str,
+    name: &str,
+    method: &str,
+    path: &str,
+    other_captures: &[&str],
+) -> Result<Plan, String> {
+    let record_pascal = pascal(record);
+    let mut signs_in = signs_in_records(app);
+    if signs_in.is_empty() {
+        signs_in.push("User".to_owned());
     }
+    let actor = signs_in[0].clone();
+    let actor_snake = snake_of(&actor);
+    let get = method == "GET";
+    let permission = if get { "Read" } else { "Update" };
+    let has_policy = app.path(&format!("src/policies/{record}.rs")).exists();
+    let has_show = app.path(&format!("src/actions/{resource}/show.rs")).exists();
+    let record_source = std::fs::read_to_string(app.path(&format!("src/records/{record}.rs"))).unwrap_or_default();
+    // `belongs_to(owner: User)` on the record: the owner is who may act on it.
+    let owner = record_source.split("belongs_to(").skip(1).find_map(|rest| {
+        let (rel, ty) = rest.split_once(')')?.0.split_once(':')?;
+        (ty.trim() == actor).then(|| rel.trim().to_owned())
+    });
+    let human_name = human(name);
+    let pascal_name = pascal(name);
+
+    let mut args = vec![
+        "ctx: Ctx".to_owned(),
+        format!("{actor_snake}: Current<{actor}>"),
+        format!("id: Param<Id<{record_pascal}>>"),
+    ];
+    args.extend(other_captures.iter().map(|c| format!("{c}: Param<String>")));
+    let load = format!("{record_pascal}::find(*id).one_or_404(&ctx.db).await?");
+    let (imports, load_line) = if has_policy {
+        (
+            format!("use kiln::{{policy::{permission}, prelude::*}};"),
+            format!("    let {record} = {actor_snake}.authorize::<{permission}, _>({load})?;\n"),
+        )
+    } else {
+        (
+            "use kiln::prelude::*;".to_owned(),
+            format!(
+                "    // No policy for {record_pascal} yet: add src/policies/{record}.rs and authorize here.\n    let _ = &{actor_snake};\n    let {record} = {load};\n"
+            ),
+        )
+    };
+    let unwrap = if has_policy { ".into_inner()" } else { "" };
+    let mut plan = Plan::default();
+    let body = if get {
+        format!(
+            "{imports}\n\nuse crate::{{records::*, views::{resource}::{pascal_name}}};\n\n#[action(GET \"{path}\")]\npub async fn {name}({}) -> Result<{pascal_name}> {{\n{load_line}    Ok({pascal_name} {{ {record}: {record}{unwrap} }})\n}}\n",
+            args.join(", ")
+        )
+    } else {
+        let back = if has_show {
+            format!("{resource}::show::path({record}.id)")
+        } else if app.path(&format!("src/actions/{resource}/index.rs")).exists() {
+            format!("{resource}::index::path()")
+        } else {
+            "\"/\"".to_owned()
+        };
+        let actions = if back.starts_with('"') { String::new() } else { format!("actions::{resource}, ") };
+        // Without a show page the record is only authorized, not used yet.
+        let keep = if has_show { String::new() } else { format!("    let _ = {record};\n") };
+        format!(
+            "{imports}\n\nuse crate::{{{actions}records::*}};\n\n/// {human_name}. Do the work in an op that takes the `Authorized` proof\n/// (`kiln g op {name}_{record}`), so the rule stays in one place.\n#[action({method} \"{path}\")]\npub async fn {name}({}) -> Result<Redirect> {{\n{load_line}    // ops::{name}_{record}(&ctx, {record}).await?;\n{keep}    Ok(Redirect::to({back}).notice(\"Done.\"))\n}}\n",
+            args.join(", ")
+        )
+    };
+    plan.file(format!("src/actions/{resource}/{name}.rs"), body);
+    plan.module(format!("src/actions/{resource}/mod.rs"), format!("pub mod {name};"));
+    plan.module("src/actions/mod.rs", format!("pub mod {resource};"));
+    if get {
+        plan.file(
+            format!("src/views/{resource}/{name}.rs"),
+            format!(
+                "use kiln::prelude::*;\n\nuse crate::records::{record_pascal};\n\n#[derive(View)]\n#[view(template = \"{resource}/{name}\")]\npub struct {pascal_name} {{\n    pub {record}: {record_pascal},\n}}\n"
+            ),
+        );
+        plan.module(format!("src/views/{resource}/mod.rs"), format!("mod {name};"));
+        plan.module(format!("src/views/{resource}/mod.rs"), format!("pub use {name}::{pascal_name};"));
+        plan.module("src/views/mod.rs", format!("pub mod {resource};"));
+        plan.file(
+            format!("templates/{resource}/{name}.html.jinja"),
+            format!("{{% set title = \"{human_name}\" %}}\n<h1>{human_name}</h1>\n<p>{record_pascal} #{{{{ {record}.id }}}}</p>\n"),
+        );
+    }
+
+    // Tests: signed out is refused; the owner (when the record has one) gets through.
+    let extra: String = other_captures.iter().map(|c| format!(", \"{c}\"")).collect();
+    let call = format!("{resource}::{name}::path({record}.id{extra})");
+    let request = match method {
+        "GET" => format!("get_html({call}).await.assert_status(200)"),
+        "DELETE" => format!("delete({call}).await.assert_status(303)"),
+        "PATCH" => format!("patch_form({call}, &[]).await.assert_status(303)"),
+        "PUT" => format!("put_form({call}, &[]).await.assert_status(303)"),
+        _ => format!("post_form({call}, &[]).await.assert_status(303)"),
+    };
+    let signed_out = match method {
+        "GET" => format!("get({call}).await"),
+        "DELETE" => format!("delete({call}).await"),
+        "PATCH" => format!("patch_form({call}, &[]).await"),
+        "PUT" => format!("put_form({call}, &[]).await"),
+        _ => format!("post_form({call}, &[]).await"),
+    };
+    let happy = match &owner {
+        Some(rel) => format!(
+            "\n#[kiln::test]\nasync fn the_owner_can_{name}_a_{record}(app: TestApp) -> Result {{\n    let {record} = app.create::<{record_pascal}>().await?;\n    let owner = {actor}::find({record}.{rel}_id).one_or_404(&app.db).await?;\n    app.sign_in_as(&owner).{request};\n    Ok(())\n}}\n"
+        ),
+        None => String::new(),
+    };
+    plan.file(
+        format!("tests/{resource}_{name}.rs"),
+        format!(
+            "use {krate}::{{actions::{resource}, records::*}};\nuse kiln::{{prelude::*, testing::TestApp}};\n{happy}\n#[kiln::test]\nasync fn signed_out_people_cannot_{name}_a_{record}(app: TestApp) -> Result {{\n    let {record} = app.create::<{record_pascal}>().await?;\n    app.client().{signed_out}.assert_status(401);\n    Ok(())\n}}\n",
+            krate = app.crate_name()
+        ),
+    );
+    Ok(plan)
+}
+
+/// Ops and jobs are named for what they do: `publish_post`, not `post_publish` or `publish`.
+fn check_verb_noun(app: &App, name: &str, what: &str, example: &str) -> Result<(), String> {
+    if !is_snake(name) || !name.contains('_') {
+        return Err(format!("{what} are named `verb_noun`, e.g. `{example}` (got `{name}`)"));
+    }
+    let (first, rest) = name.split_once('_').expect("checked above");
+    let records: Vec<String> = std::fs::read_dir(app.root.join("src/records"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.strip_suffix(".rs").map(str::to_owned))
+        .filter(|n| n != "mod")
+        .collect();
+    let noun = |w: &str| records.iter().any(|r| r == w || format!("{r}s") == w);
+    if noun(first) && !noun(rest) {
+        return Err(format!("{what} are named `verb_noun`, so the verb comes first: `{rest}_{first}`, not `{name}`"));
+    }
+    Ok(())
+}
+
+/// `kiln g op publish_post`
+fn op(app: &App, name: &str) -> Result<Plan, String> {
+    check_verb_noun(app, name, "operations", "publish_post")?;
     let mut plan = Plan::default();
     plan.file(
         format!("src/ops/{name}.rs"),
@@ -982,9 +1179,7 @@ fn op(name: &str) -> Result<Plan, String> {
 
 /// `kiln g job send_digest`
 fn job(app: &App, name: &str) -> Result<Plan, String> {
-    if !is_snake(name) || !name.contains('_') {
-        return Err("jobs are named `verb_noun`, e.g. `send_digest`".into());
-    }
+    check_verb_noun(app, name, "jobs", "send_digest")?;
     let pascal = pascal(name);
     let mut plan = Plan::default();
     plan.file(
@@ -1046,6 +1241,9 @@ fn notification(app: &App, name: &str, to: Option<&str>) -> Result<Plan, String>
     plan.module("src/notifications/mod.rs", format!("mod {name};"));
     plan.module("src/notifications/mod.rs", format!("pub use {name}::{pascal_name};"));
     plan.module("src/lib.rs", "pub mod notifications;");
+    if !app.path("src/actions/notifications/index.rs").exists() {
+        notification_inbox(app, &to, &mut plan);
+    }
     if !app.path("src/actions/notification_settings/index.rs").exists() {
         notification_settings(app, &to, &mut plan);
     }
@@ -1070,6 +1268,48 @@ fn recipient(app: &App, to: Option<&str>) -> Result<String, String> {
         return Err(format!("no `{to}` record (src/records/{to_snake}.rs) to notify"));
     }
     Ok(to)
+}
+
+/// `/notifications`: the signed-in recipient's inbox, newest first, with read tracking.
+fn notification_inbox(app: &App, to: &str, plan: &mut Plan) {
+    let to_snake = snake(to);
+    let values = [("To", to), ("to", to_snake.as_str()), ("krate", &app.crate_name())];
+    let files: [(&str, &str); 6] = [
+        (
+            "src/actions/notifications/index.rs",
+            "use kiln::prelude::*;\n\nuse crate::{records::@@To@@, views::notifications::Index};\n\n/// The signed-in @@to@@'s inbox. Link to it from the layout; `db.unread_notifications`\n/// gives a count for a badge.\n#[action(GET \"/notifications\")]\npub async fn index(ctx: Ctx, @@to@@: Current<@@To@@>) -> Result<Index> {\n    let notifications = ctx.db.inbox(&*@@to@@, 50).await?;\n    let unread = ctx.db.unread_notifications(&*@@to@@).await?;\n    Ok(Index { notifications, unread })\n}\n",
+        ),
+        (
+            "src/actions/notifications/read.rs",
+            "use kiln::prelude::*;\n\nuse crate::{actions::notifications, records::@@To@@};\n\n/// Marks one notification read and follows its link (someone else's id just goes to the inbox).\n#[action(PATCH \"/notifications/{id}/read\")]\npub async fn read(ctx: Ctx, @@to@@: Current<@@To@@>, id: Param<i64>) -> Result<Redirect> {\n    let link = ctx.db.read_notification(&*@@to@@, *id).await?.and_then(|n| n.url);\n    Ok(Redirect::to(link.unwrap_or_else(notifications::index::path)))\n}\n",
+        ),
+        (
+            "src/actions/notifications/read_all.rs",
+            "use kiln::prelude::*;\n\nuse crate::{actions::notifications, records::@@To@@};\n\n#[action(PATCH \"/notifications/read\")]\npub async fn read_all(ctx: Ctx, @@to@@: Current<@@To@@>) -> Result<Redirect> {\n    let count = ctx.db.mark_all_notifications_read(&*@@to@@).await?;\n    Ok(Redirect::to(notifications::index::path()).notice(format!(\"Marked {count} read.\")))\n}\n",
+        ),
+        (
+            "src/views/notifications/index.rs",
+            "use kiln::{notify::InboxItem, prelude::*};\n\n#[derive(View)]\n#[view(template = \"notifications/index\")]\npub struct Index {\n    pub notifications: Vec<InboxItem>,\n    pub unread: i64,\n}\n",
+        ),
+        (
+            "templates/notifications/index.html.jinja",
+            "{% set title = \"Notifications\" %}\n<h1>Notifications{% if unread %} <small>({{ unread }} unread)</small>{% endif %}</h1>\n{% if unread %}\n{{ form_start(path(\"notifications::read_all\"), method=\"patch\") }}<button>Mark all read</button>{{ form_end() }}\n{% endif %}\n<ul class=\"notifications\">\n  {% for n in notifications %}\n  <li id=\"notification_{{ n.id }}\"{% if not n.read %} class=\"unread\"{% endif %}>\n    {{ form_start(path(\"notifications::read\", id=n.id), method=\"patch\", class=\"inline\") }}<button class=\"link\">{{ n.title }}</button>{{ form_end() }}\n    {% if n.body %}<br><small>{{ n.body }}</small>{% endif %}\n    <br><small>{{ n.created_at | datetime }}</small>\n  </li>\n  {% else %}\n  <li>Nothing yet.</li>\n  {% endfor %}\n</ul>\n",
+        ),
+        (
+            "tests/notifications_inbox.rs",
+            "use @@krate@@::{actions::notifications, records::*};\nuse kiln::{prelude::*, testing::TestApp};\n\n#[kiln::test]\nasync fn the_inbox_lists_and_marks_notifications_read(app: TestApp) -> Result {\n    let @@to@@ = app.create::<@@To@@>().await?;\n    let client = app.sign_in_as(&@@to@@);\n    client.get_html(notifications::index::path()).await.assert_status(200).assert_contains(\"Nothing yet.\");\n    client.patch_form(notifications::read_all::path(), &[]).await.assert_flash(\"Marked 0 read.\");\n    Ok(())\n}\n\n#[kiln::test]\nasync fn nobody_reads_someone_elses_notifications(app: TestApp) -> Result {\n    let @@to@@ = app.create::<@@To@@>().await?;\n    // An id that isn't theirs marks nothing and just lands on their inbox.\n    app.sign_in_as(&@@to@@).patch_form(notifications::read::path(999_999), &[]).await.assert_redirect(&notifications::index::path());\n    Ok(())\n}\n\n#[kiln::test]\nasync fn signed_out_people_have_no_inbox(app: TestApp) -> Result {\n    app.client().get(notifications::index::path()).await.assert_status(401);\n    Ok(())\n}\n",
+        ),
+    ];
+    for (path, template) in files {
+        plan.file(path, fill(template, &values));
+    }
+    for module in ["index", "read", "read_all"] {
+        plan.module("src/actions/notifications/mod.rs", format!("pub mod {module};"));
+    }
+    plan.module("src/actions/mod.rs", "pub mod notifications;");
+    plan.module("src/views/notifications/mod.rs", "mod index;");
+    plan.module("src/views/notifications/mod.rs", "pub use index::Index;");
+    plan.module("src/views/mod.rs", "pub mod notifications;");
 }
 
 /// `/settings/notifications`: every switch `db.notification_prefs` lists, with on/off.

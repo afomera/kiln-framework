@@ -17,9 +17,11 @@ Run them from the app directory.
 | Presentation methods | `kiln g part Post` |
 | Background job | `kiln g job send_digest` |
 | Email | `kiln g mail welcome_email` (with a preview at `/kiln/mail/previews`) |
-| Notification (inbox + email + live) | `kiln g notification comment_posted [--to User]` (adds `/settings/notifications` the first time) |
+| Notification (inbox + email + live) | `kiln g notification comment_posted [--to User]` (adds the `/notifications` inbox and `/settings/notifications` the first time) |
 | Passwords, sign-up, resets, sign-in list | `kiln g auth` (once; replaces the demo sign-in) |
 | Schema change | edit the record struct → `kiln db diff <snake_case_name>` → review the SQL → `kiln db migrate` |
+| Redo a migration | `kiln db undo` (deletes the newest generated migration and restores the snapshot), then `kiln db diff` again. Never delete migration files by hand. |
+| Fewer migration files | `kiln db squash` (one file per past year; databases that ran the originals skip it) |
 | Verify | `kiln check` (must end `0 errors`), then `kiln test` |
 | Routes | `kiln routes` |
 | Run | `kiln dev` (port 3000; `--port 4000` for another): runs `Procfile.dev`, rebuilds and restarts on src/ changes |
@@ -31,7 +33,14 @@ Run them from the app directory.
 | Database | SQLite (`db/development.sqlite3`) or Postgres (`kiln new app --database postgres`: `postgres://localhost/<app>_development`, tests in `<app>_test`); `DATABASE_URL` / `TEST_DATABASE_URL` override. `db/snapshot.json` records which. |
 
 Field types: `string`, `text`, `rich_text` (the editor; `?` means it may be left empty), `integer`, `float`, `bool`, `timestamp`, `ref:<Record>`. A
-trailing `?` makes a field optional; quote it in zsh (`'notes:text?'`).
+trailing `?` makes a field optional; quote it in zsh (`'notes:text?'`). A trailing `:internal`
+(`'sent_at:timestamp?:internal'`, `sends:integer:internal`) is a field the app sets, not the form:
+it's left off the form and its tests, and new records start with `None`, `false` or `0`. Fields
+named `email` / `*_email` are validated as addresses and get `name1@example.com` factory values.
+
+`kiln g action issues send POST /issues/{id}/send`, when an `Issue` record exists, writes an
+action that loads the issue and authorizes the signed-in user (`Update`; `Read` for GET, which
+also gets a view and template), plus tests for the owner and for signed-out visitors.
 
 The first required ref to a record people sign in as (`owner:ref:User`, or
 `seller:ref:Merchant` once `Merchant` is registered in `src/app.rs`) is the **owner**: it's
@@ -143,7 +152,9 @@ generated tests passing.
   inside the same `ctx.db.transaction` as the write (a rolled-back write never
   broadcasts); in the page, `{{ turbo_stream_from("post:" ~ post.id) }}` (it renders a signed
   `<turbo-stream-source>` tag; assert on `turbo-stream-source` in page tests). Keep the stream
-  name in one helper (`post::stream_name`) so Rust and templates agree. Broadcasts go to
+  name in one helper (`post::stream_name(post_id: Id<Post>)`; don't name the parameter `id`,
+  which is the record module's column constant) so Rust and templates agree. Test the page with
+  `page.assert_streams_from("post:1")`. Broadcasts go to
   everyone, so their views can't use `current_user`. Reconnecting pages get what they
   missed; older gaps refresh the page.
 - **Testing Turbo and realtime:** `client.turbo_post_form(..)` submits like Turbo;
@@ -165,17 +176,23 @@ generated tests passing.
   collapses duplicate enqueues.
 - **Schedules:** `s.cron("0 3 * * *", Job {})` (UTC), `s.cron_in("0 9 * * mon", "America/New_York", ..)`,
   `s.every(SignedDuration::from_mins(15), ..)`; one schedule per job type. Missed runs run once, not
-  once per slot. Test with `app.run_schedules_at(Timestamp::now() + SignedDuration::from_hours(25))`.
+  once per slot. Test with `app.travel(SignedDuration::from_hours(25))`, then `app.run_schedules().await?`
+  (enqueues what's due) and `app.perform_due_jobs().await?`.
 - **Batches:** `Batch::new("Import").jobs(rows.map(..)).on_success(J).on_failure(J).on_complete(J).on_cancel(J).enqueue(&tx)`
   returns a `BatchId`; hooks are jobs and fire once. Inside a batch's job or hook, `BatchId::current()`;
   jobs fan out with `batch.add(&ctx.db, job)`, hooks read `batch.status(&ctx.db)`. A `BatchId` can be a
   record field (`pub import_batch: Option<BatchId>`); show progress with `ctx.db.batch(id).await?`, a
   `BatchStatus { status, total, pending, succeeded, failed, cancelled, .. }`. An empty batch finishes
-  (and succeeds) at once.
+  (and succeeds) at once. `.on_progress(J)` runs `J` after jobs finish (at most one waiting), with
+  `status` already counting the job that just ended: broadcast a progress bar from it.
 - **`/kiln` in production** is off unless `app.kiln_tools_for::<User>(|user| user.admin)` in `src/app.rs`;
   then only those users see it (others get a 404), and every control used is logged.
 - **Testing jobs:** `app.assert_enqueued::<SendDigest>(1).await?`, `app.enqueued::<J>()`, then
-  `app.perform_enqueued_jobs().await?` runs them all now (an error if one fails for good).
+  `app.perform_enqueued_jobs().await?` runs them all now, even ones scheduled for later (an error if
+  one fails for good); `app.perform_due_jobs()` runs only those due.
+- **Time in tests:** `app.travel(SignedDuration::from_hours(24 * 91))`, `app.travel_to(ts)`, `app.travel_back()`
+  move `Timestamp::now()` for the test, its requests and the jobs it performs (not threads it spawns).
+  Call ops directly with `app.ctx()`: `ops::publish_post(app.ctx(), proof).await?`.
 - **Sign-ins are database rows** (`kiln_sessions`); the cookie holds only a token.
   `session.sign_in(&ctx.db, &user).await?` / `session.sign_out::<User>(&ctx.db).await?`;
   `session.sign_ins(&ctx.db, &*user)` lists devices, `session.revoke(&ctx.db, &*user, id)`
@@ -203,14 +220,17 @@ generated tests passing.
 - **Rich text:** a `RichText` field (records and forms) renders the editor with `{{ field(form.body) }}`
   and is stored as sanitized HTML in a TEXT column; show it with `{{ post.body | rich_text }}`
   (never `| safe`). `#[validate(length(min = 1))]` counts words, not markup. `post.body.to_plain_text()`
-  for excerpts. Attachments are off until file storage exists.
+  in Rust or `{{ post.body | plain_text }}` in templates for excerpts. In mail, `| rich_text` leaves out
+  the page stylesheet and scripts; the mail layout styles it. Attachments are off until file storage exists.
 - **Mail previews:** add `preview` to `#[mail(..)]` and `impl Preview for X { async fn preview(ctx: &Ctx) -> Result<Self> { .. } }`;
   test them all with `app.render_mail_previews().await?`.
 - **Notifications:** `CommentPosted { comment_id }.notify(&tx, &author).await?`. In `deliver`,
   `via.inbox("title").link(path)`, `via.mail(Mail { .. })?`, `via.broadcast(stream, turbo)`.
   Channels people turned off at `/settings/notifications` are dropped by `via` itself; don't
   re-check them. Inbox: `db.inbox(&user, 20)`, `db.unread_notifications(&user)`,
-  `db.mark_notification_read(&user, id)`. Test with `perform_enqueued_jobs` then `db.inbox`.
+  `db.read_notification(&user, id)` (marks it read, returns it to follow `url`),
+  `db.mark_all_notifications_read(&user)`. The first `kiln g notification` also writes the `/notifications`
+  inbox page; link it from the layout. Test with `perform_enqueued_jobs` then `db.inbox`.
 - **Testing mail:** `app.perform_enqueued_jobs().await?`, then
   `app.assert_mailed("ada@example.com", "Welcome").await?` (returns the message), or
   `app.outbox()`; `mail.message()?` renders without sending.
@@ -224,6 +244,10 @@ generated tests passing.
 - **Inside a record's own file**, column and relation names are constants (`title`,
   `owner`), so a binding or parameter with one of those names won't compile there; pick
   another name (the generated `owned_by` uses `who`).
+- **Queries:** filters `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `like`, `is_null`, `is_not_null`, combined with
+  `.and(..)` / `.or(..)`; then `.order(..)`, `.limit(n)`, and `.all`, `.one`, `.one_or_404`, `.count`, `.exists`,
+  `.delete_all` (each takes `&ctx.db`). A request that clashes with a record's state (already sent) is
+  `Err(Error::Conflict("Already sent.".into()))`: a 409.
 - **Errors are reports** with stable codes (`K1003`, `K0202`, ...). Fetch any failing URL
   without `Accept: text/html` to get the report as Markdown. `kiln check` prints the first
   compiler error in full; fix that one first.

@@ -161,3 +161,34 @@ async fn an_empty_batch_succeeds_at_once(app: TestApp) -> Result {
     assert_eq!(hooks_for("empty"), ["complete", "success"]);
     Ok(())
 }
+
+static PROGRESS: std::sync::Mutex<Vec<i64>> = std::sync::Mutex::new(Vec::new());
+
+/// Records how many jobs had finished each time it ran.
+#[derive(Job, Serialize, Deserialize)]
+struct Progress;
+
+impl Perform for Progress {
+    async fn perform(self, ctx: &Ctx) -> Result {
+        let status = BatchId::current().expect("progress hooks know their batch").status(&ctx.db).await?;
+        PROGRESS.lock().unwrap().push(status.succeeded + status.failed);
+        Ok(())
+    }
+}
+
+#[kiln::test]
+async fn progress_hooks_count_the_job_that_just_finished(app: TestApp) -> Result {
+    let batch = Batch::new("Progress")
+        .jobs((0..3).map(|_| OneShot { fail: false }))
+        .on_progress(Progress)
+        .enqueue(&app.db)
+        .await?;
+    // Run one batch job at a time, then whatever progress it queued.
+    app.perform_enqueued_jobs().await?;
+    let seen = PROGRESS.lock().unwrap().clone();
+    assert_eq!(seen.last(), Some(&3), "the last report sees every job: {seen:?}");
+    assert!(seen.iter().all(|n| *n >= 1), "reports never lag behind the job that queued them: {seen:?}");
+    assert!(seen.len() <= 3, "at most one report per finished job: {seen:?}");
+    assert!(app.db.batch(batch).await?.unwrap().succeeded_entirely());
+    Ok(())
+}

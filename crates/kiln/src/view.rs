@@ -260,6 +260,8 @@ fn build_environment(root: &'static str) -> Environment<'static> {
             clean.as_html()
         ))
     });
+    // `{{ post.body | plain_text }}`: rich text as words, for excerpts and mail.
+    env.add_filter("plain_text", |html: String| crate::RichText::new(&html).to_plain_text());
     env.add_function("form_start", forms::form_start);
     env.add_function("form_end", forms::form_end);
     env.add_function("button_to", forms::button_to);

@@ -29,7 +29,7 @@ use axum::{
 use serde_json::{Map, Value};
 use tower::ServiceExt;
 
-use crate::{App, Db, Record, Result, SecretKey, Timestamp, session::COOKIE};
+use crate::{App, Ctx, Db, Record, Result, SecretKey, Timestamp, session::COOKIE};
 
 /// `json!({ "email": ".." })` for API tests, without a `serde_json` dependency.
 pub use serde_json::json;
@@ -39,6 +39,7 @@ pub struct TestApp {
     pub db: Db,
     app: App,
     sequence: AtomicU64,
+    clock: std::sync::Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl TestApp {
@@ -56,11 +57,45 @@ impl TestApp {
         crate::config::set_root(root);
         let app = configure(App::new(db.clone()).root(root))?;
         crate::jobs::sync_app(app.ctx()).await?;
-        Ok(Self { app, db, sequence: AtomicU64::new(0) })
+        Ok(Self { app, db, sequence: AtomicU64::new(0), clock: Default::default() })
     }
 
     pub fn app(&self) -> &App {
         &self.app
+    }
+
+    /// Runs `test` with this app's clock, so `travel` moves `Timestamp::now()` for it (and
+    /// for the requests and jobs it runs). `#[kiln::test]` calls this.
+    pub async fn run<F, Fut>(self, test: F) -> Fut::Output
+    where
+        F: FnOnce(Self) -> Fut,
+        Fut: std::future::Future,
+    {
+        let clock = self.clock.clone();
+        crate::types::CLOCK_OFFSET.scope(clock, test(self)).await
+    }
+
+    /// Moves the clock by `by` (negative goes back): `Timestamp::now()` in the test, its
+    /// requests and the jobs it performs. Time keeps passing from there.
+    pub fn travel(&self, by: jiff::SignedDuration) {
+        self.clock.fetch_add(by.as_micros() as i64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Moves the clock to `at`.
+    pub fn travel_to(&self, at: Timestamp) {
+        let real = jiff::Timestamp::now();
+        let offset = at.as_jiff().duration_since(real).as_micros() as i64;
+        self.clock.store(offset, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Puts the clock back.
+    pub fn travel_back(&self) {
+        self.clock.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A `Ctx` for calling ops and jobs directly: `publish_post(app.ctx(), ..)`.
+    pub fn ctx(&self) -> &Ctx {
+        self.app.ctx()
     }
 
     /// A signed-out client.
@@ -91,6 +126,17 @@ impl TestApp {
     /// this an error naming the job.
     pub async fn perform_enqueued_jobs(&self) -> Result<usize> {
         crate::jobs::perform_all(self.app.ctx()).await
+    }
+
+    /// Performs the jobs due by now (see `travel`), leaving later ones queued; repeats until
+    /// none are left, so jobs they enqueue run too.
+    pub async fn perform_due_jobs(&self) -> Result<usize> {
+        crate::jobs::perform_due(self.app.ctx()).await
+    }
+
+    /// Enqueues the schedule entries due by now (see `travel`): `app.travel(..)`, then this.
+    pub async fn run_schedules(&self) -> Result<Vec<String>> {
+        self.run_schedules_at(Timestamp::now()).await
     }
 
     /// Runs the app's schedule as if the clock read `at`: enqueues every entry due by
@@ -397,7 +443,13 @@ impl TestClient {
             }
             *self.session.lock().unwrap_or_else(|e| e.into_inner()) = updated;
         }
-        TestResponse { status, headers, text: String::from_utf8_lossy(&bytes).into_owned(), flash }
+        TestResponse {
+            status,
+            headers,
+            text: String::from_utf8_lossy(&bytes).into_owned(),
+            flash,
+            key: self.key.clone(),
+        }
     }
 
     /// The session from a `Set-Cookie` header, if the response changed it.
@@ -419,9 +471,22 @@ pub struct TestResponse {
     pub text: String,
     /// Flash set by this response (for the next page), e.g. `notice`.
     pub flash: BTreeMap<String, String>,
+    key: SecretKey,
 }
 
 impl TestResponse {
+    /// The page listens to `stream` (`{{ turbo_stream_from(stream) }}`).
+    #[track_caller]
+    pub fn assert_streams_from(&self, stream: &str) -> &Self {
+        let tag = crate::realtime::source_tag(&self.key, stream);
+        assert!(
+            self.text.contains(&tag),
+            "expected the page to stream from {stream:?} (`{tag}`); body:\n{}",
+            self.text
+        );
+        self
+    }
+
     #[track_caller]
     pub fn assert_status(&self, code: u16) -> &Self {
         assert_eq!(self.status.as_u16(), code, "unexpected status; body:\n{}", self.text);

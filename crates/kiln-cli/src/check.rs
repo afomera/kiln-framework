@@ -92,7 +92,9 @@ pub fn run(app: &App, json: bool) -> Result<bool, String> {
         match app.binary_output(&["db", "status", "--json"])? {
             Some(out) => {
                 let status: serde_json::Value = serde_json::from_str(out.trim()).unwrap_or_default();
-                if status["drift"].as_bool() == Some(true) {
+                if let Some(stale) = status["stale_snapshot"].as_str() {
+                    findings.error("K0204", stale.trim_start_matches("bad request: "), Some("db/snapshot.json"), None);
+                } else if status["drift"].as_bool() == Some(true) {
                     findings.error(
                         "K0202",
                         "the record structs changed since the last migration; run `kiln db diff <name>` and review the SQL",

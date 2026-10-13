@@ -122,6 +122,31 @@ async fn the_nightly_schedule_runs_once_per_slot(app: TestApp) -> Result {
 }
 
 #[kiln::test]
+async fn travelling_lets_the_nightly_job_find_stale_drafts(app: TestApp) -> Result {
+    let draft = app.create_with::<Post>(|p| p.status = PostStatus::Draft).await?;
+    let fresh_tomorrow = Timestamp::now() + SignedDuration::from_hours(24);
+    app.travel(SignedDuration::from_hours(24 * 91));
+    assert!(Timestamp::now() > fresh_tomorrow + SignedDuration::from_hours(24 * 89));
+    assert_eq!(app.run_schedules().await?, ["ArchiveOldDrafts"]);
+    assert_eq!(app.perform_due_jobs().await?, 1);
+    assert_eq!(Post::find(draft.id).one_or_404(&app.db).await?.status, PostStatus::Archived);
+    app.travel_back();
+    assert!(Timestamp::now() < fresh_tomorrow);
+    Ok(())
+}
+
+#[kiln::test]
+async fn due_jobs_wait_for_their_time(app: TestApp) -> Result {
+    let post = app.create::<Post>().await?;
+    Retitle { post_id: post.id, title: "Later".into() }.enqueue_in(&app.db, SignedDuration::from_hours(2)).await?;
+    assert_eq!(app.perform_due_jobs().await?, 0, "not due yet");
+    app.travel(SignedDuration::from_hours(3));
+    assert_eq!(app.perform_due_jobs().await?, 1);
+    assert_eq!(Post::find(post.id).one_or_404(&app.db).await?.title, "Later");
+    Ok(())
+}
+
+#[kiln::test]
 async fn paused_schedules_skip_and_can_still_run_on_demand(app: TestApp) -> Result {
     app.run_schedules_at(Timestamp::now()).await?;
     assert!(app.db.set_schedule_paused("ArchiveOldDrafts", true).await?);

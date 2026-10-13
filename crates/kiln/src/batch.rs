@@ -93,11 +93,12 @@ pub struct Batch {
     description: String,
     jobs: Vec<Result<JobSpec>>,
     hooks: [Option<Result<JobSpec>>; 4],
+    progress: Option<Result<JobSpec>>,
 }
 
 impl Batch {
     pub fn new(description: impl Into<String>) -> Self {
-        Self { description: description.into(), jobs: vec![], hooks: [None, None, None, None] }
+        Self { description: description.into(), jobs: vec![], hooks: [None, None, None, None], progress: None }
     }
 
     pub fn job<J: JobInfo>(mut self, job: J) -> Self {
@@ -128,6 +129,14 @@ impl Batch {
         self
     }
 
+    /// Enqueued after the batch's jobs finish, to report progress (broadcast a progress bar,
+    /// say). Inside it, `BatchId::current()` and `status` already count the job that just
+    /// finished. At most one waits at a time, so a big batch doesn't queue one per job.
+    pub fn on_progress<J: JobInfo>(mut self, job: J) -> Self {
+        self.progress = Some(JobSpec::of(&job));
+        self
+    }
+
     /// Enqueued when the batch is cancelled.
     pub fn on_cancel<J: JobInfo>(mut self, job: J) -> Self {
         self.hooks[3] = Some(JobSpec::of(&job));
@@ -143,6 +152,9 @@ impl Batch {
             if let Some(hook) = hook {
                 hooks.insert((*name).to_owned(), serde_json::to_value(hook?).expect("job specs serialize"));
             }
+        }
+        if let Some(progress) = self.progress {
+            hooks.insert("progress".to_owned(), serde_json::to_value(progress?).expect("job specs serialize"));
         }
         let description = self.description;
         db.transaction(|tx| async move {
@@ -278,7 +290,29 @@ pub(crate) async fn job_ended(tx: &Db, batch: BatchId, outcome: &str) -> Result<
     if outcome == "failed" {
         fire(tx, batch, "failure").await?;
     }
+    progress(tx, batch).await?;
     settle(tx, batch).await
+}
+
+/// Enqueues the batch's `on_progress` job, unless one is already waiting.
+async fn progress(tx: &Db, batch: BatchId) -> Result<()> {
+    let rows =
+        tx.fetch_all("SELECT \"hooks\" FROM \"kiln_batches\" WHERE \"id\" = ?", vec![Value::Integer(batch.0)]).await?;
+    let Some(row) = rows.first() else { return Ok(()) };
+    let hooks: serde_json::Value = serde_json::from_str(&row.get::<String, _>(0)).unwrap_or_default();
+    let Some(spec) = hooks.get("progress").and_then(|h| serde_json::from_value::<JobSpec>(h.clone()).ok()) else {
+        return Ok(());
+    };
+    let waiting = tx
+        .fetch_all(
+            "SELECT 1 FROM \"kiln_jobs\" WHERE \"batch_id\" = ? AND \"batch_hook\" = 1 AND \"name\" = ? AND \"status\" = 'queued'",
+            vec![Value::Integer(batch.0), Value::Text(spec.name.clone())],
+        )
+        .await?;
+    if waiting.is_empty() {
+        insert_job_in_batch(tx, &spec, Some(batch), true).await?;
+    }
+    Ok(())
 }
 
 /// A failed job of the batch was queued again.

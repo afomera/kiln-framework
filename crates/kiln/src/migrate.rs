@@ -40,6 +40,10 @@ pub struct Snapshot {
     /// `kiln db diff`. Older snapshots have none, meaning SQLite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// The version of the migration `kiln db diff` wrote alongside this snapshot. If that
+    /// file is gone, the snapshot is ahead of the migrations (`kiln db undo` restores it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration: Option<String>,
     pub tables: BTreeMap<String, TableSnapshot>,
 }
 
@@ -115,7 +119,7 @@ impl Snapshot {
                 (schema.table.to_owned(), TableSnapshot::from(&schema))
             })
             .collect();
-        Self { backend: None, tables }
+        Self { backend: None, migration: None, tables }
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -493,7 +497,44 @@ pub struct Migration {
     pub path: PathBuf,
 }
 
+/// One migration's SQL inside a file: the whole file, or one of the migrations a squash
+/// holds. Each part is recorded in `kiln_migrations` under its own version.
+#[derive(Debug, Clone)]
+pub struct Part {
+    pub version: String,
+    pub name: String,
+    pub sql: String,
+}
+
 impl Migration {
+    /// Written by `kiln db squash`: several migrations in one file, each after a
+    /// `-- kiln: part <version>_<name>` line.
+    pub fn is_squash(&self) -> bool {
+        self.sql.lines().any(|l| l.trim_start().starts_with("-- kiln: part "))
+    }
+
+    pub fn parts(&self) -> Vec<Part> {
+        if !self.is_squash() {
+            return vec![Part { version: self.version.clone(), name: self.name.clone(), sql: self.sql.clone() }];
+        }
+        let mut parts: Vec<Part> = vec![];
+        for line in self.sql.lines() {
+            if let Some(id) = line.trim().strip_prefix("-- kiln: part ") {
+                let (version, name) = id.trim().split_once('_').unwrap_or((id.trim(), ""));
+                parts.push(Part { version: version.to_owned(), name: name.to_owned(), sql: String::new() });
+            } else if let Some(part) = parts.last_mut() {
+                part.sql.push_str(line);
+                part.sql.push('\n');
+            }
+        }
+        parts
+    }
+
+    /// Whether every part is recorded as applied.
+    fn applied_in(&self, applied: &[String]) -> bool {
+        self.parts().iter().all(|p| applied.contains(&p.version))
+    }
+
     fn rebuild(&self) -> bool {
         self.sql.lines().any(|l| l.trim() == "-- kiln: rebuild")
     }
@@ -543,6 +584,62 @@ pub fn write_migration(dir: &Path, name: &str, diff: &Diff) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// A year's migrations, squashed into one file by [`squash`].
+#[derive(Debug)]
+pub struct Squashed {
+    pub year: String,
+    pub path: PathBuf,
+    /// The files it replaced (now deleted).
+    pub replaced: Vec<PathBuf>,
+    /// How many migrations it holds.
+    pub parts: usize,
+}
+
+/// Squashes the migrations in `dir` from years before `before_year` into one file per year,
+/// `<last version>_squash_<year>.sql`. The SQL is kept as written, part by part, so new
+/// databases run exactly what old ones did, and databases that ran the originals skip it.
+pub fn squash(dir: &Path, before_year: &str) -> Result<Vec<Squashed>> {
+    let mut years: BTreeMap<String, Vec<Migration>> = BTreeMap::new();
+    for m in load_migrations(dir)?.into_iter().filter(|m| m.version[..4] < *before_year) {
+        years.entry(m.version[..4].to_owned()).or_default().push(m);
+    }
+    let mut done = vec![];
+    for (year, migrations) in years {
+        if migrations.len() < 2 {
+            continue;
+        }
+        let backend = migrations[0].backend().to_owned();
+        if let Some(other) = migrations.iter().find(|m| m.backend() != backend) {
+            return Err(Error::BadRequest(format!(
+                "{} is written for {}, but the other {year} migrations for {backend}; squash needs one backend",
+                other.path.display(),
+                other.backend()
+            )));
+        }
+        let parts: Vec<Part> = migrations.iter().flat_map(Migration::parts).collect();
+        let mut sql = format!(
+            "-- kiln: backend {backend}\n-- Squash: {} migrations from {year}\n\
+             -- Written by `kiln db squash`. Databases that ran these skip them; new ones run each part in order.\n",
+            parts.len()
+        );
+        for part in &parts {
+            let body: Vec<&str> =
+                part.sql.lines().filter(|l| !l.trim_start().starts_with("-- kiln: backend")).collect();
+            sql.push_str(&format!("\n-- kiln: part {}_{}\n{}\n", part.version, part.name, body.join("\n").trim()));
+        }
+        let last = &parts.last().expect("a year has migrations").version;
+        let path = dir.join(format!("{last}_squash_{year}.sql"));
+        fs::write(&path, sql)?;
+        let mut replaced = vec![];
+        for m in migrations.iter().filter(|m| m.path != path) {
+            fs::remove_file(&m.path)?;
+            replaced.push(m.path.clone());
+        }
+        done.push(Squashed { year, path, replaced, parts: parts.len() });
+    }
+    Ok(done)
+}
+
 const MIGRATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS \"kiln_migrations\" (\
     \"version\" TEXT PRIMARY KEY, \"name\" TEXT NOT NULL, \"applied_at\" INTEGER NOT NULL)";
 
@@ -557,15 +654,16 @@ impl Db {
     /// Migrations in `dir` that haven't been applied.
     pub async fn pending_migrations(&self, dir: &Path) -> Result<Vec<Migration>> {
         let applied = self.applied_migrations().await?;
-        Ok(load_migrations(dir)?.into_iter().filter(|m| !applied.contains(&m.version)).collect())
+        Ok(load_migrations(dir)?.into_iter().filter(|m| !m.applied_in(&applied)).collect())
     }
 
     /// Applies every pending migration in `dir`, each in its own transaction, and returns
     /// what was applied.
     pub async fn migrate(&self, dir: &Path) -> Result<Vec<Migration>> {
-        let pending = self.pending_migrations(dir).await?;
+        let applied = self.applied_migrations().await?;
+        let pending: Vec<Migration> = load_migrations(dir)?.into_iter().filter(|m| !m.applied_in(&applied)).collect();
         for migration in &pending {
-            self.apply(migration)
+            self.apply(migration, &applied)
                 .await
                 .map_err(|e| Error::BadRequest(format!("migration {} failed: {e}", migration.path.display())))?;
             tracing::info!(target: "kiln::migrate", version = %migration.version, name = %migration.name, "applied");
@@ -573,7 +671,9 @@ impl Db {
         Ok(pending)
     }
 
-    async fn apply(&self, migration: &Migration) -> Result<()> {
+    /// Runs the parts of `migration` not yet in `applied` (all of them, unless it's a squash
+    /// some of whose migrations ran before it was squashed) and records each one.
+    async fn apply(&self, migration: &Migration, applied: &[String]) -> Result<()> {
         let backend = self.dialect().name();
         if migration.backend() != backend {
             return Err(Error::Config(format!(
@@ -581,6 +681,7 @@ impl Db {
                 migration.backend()
             )));
         }
+        let parts: Vec<Part> = migration.parts().into_iter().filter(|p| !applied.contains(&p.version)).collect();
         let rebuild = migration.rebuild() && backend == "sqlite";
         let mut conn = self.acquire().await?;
         if rebuild {
@@ -589,7 +690,8 @@ impl Db {
         }
         let result = async {
             let mut tx = conn.begin().await?;
-            sqlx::raw_sql(&migration.sql).execute(&mut *tx).await?;
+            let sql: String = parts.iter().map(|p| p.sql.as_str()).collect::<Vec<_>>().join("\n");
+            sqlx::raw_sql(&sql).execute(&mut *tx).await?;
             if rebuild {
                 let violations = sqlx::query("PRAGMA foreign_key_check").fetch_all(&mut *tx).await?;
                 if !violations.is_empty() {
@@ -603,12 +705,14 @@ impl Db {
                 "INSERT INTO \"kiln_migrations\" (\"version\", \"name\", \"applied_at\") VALUES (?, ?, ?)",
                 vec![Value::Integer(0), Value::Integer(0), Value::Integer(0)],
             );
-            sqlx::query(&insert)
-                .bind(&migration.version)
-                .bind(&migration.name)
-                .bind(jiff::Timestamp::now().as_second())
-                .execute(&mut *tx)
-                .await?;
+            for part in &parts {
+                sqlx::query(&insert)
+                    .bind(&part.version)
+                    .bind(&part.name)
+                    .bind(jiff::Timestamp::now().as_second())
+                    .execute(&mut *tx)
+                    .await?;
+            }
             tx.commit().await?;
             Ok(())
         }
@@ -638,7 +742,11 @@ mod tests {
     }
 
     fn snapshot(columns: Vec<ColumnSnapshot>) -> Snapshot {
-        Snapshot { backend: None, tables: BTreeMap::from([("posts".to_owned(), TableSnapshot { columns })]) }
+        Snapshot {
+            backend: None,
+            migration: None,
+            tables: BTreeMap::from([("posts".to_owned(), TableSnapshot { columns })]),
+        }
     }
 
     #[test]
@@ -742,5 +850,58 @@ mod tests {
         let posts = d.statements.iter().position(|s| s.starts_with("CREATE TABLE \"posts\"")).unwrap();
         assert!(users < posts, "{:?}", d.statements);
         assert!(d.statements[posts].contains("BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY"));
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kiln-migrate-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const M1: &str = "-- kiln: backend sqlite\nCREATE TABLE \"a\" (\"id\" INTEGER PRIMARY KEY);\n";
+    const M2: &str = "-- kiln: backend sqlite\nCREATE TABLE \"b\" (\"id\" INTEGER PRIMARY KEY);\n";
+    const M3: &str = "-- kiln: backend sqlite\nCREATE TABLE \"c\" (\"id\" INTEGER PRIMARY KEY);\n";
+
+    #[test]
+    fn squash_keeps_one_file_per_past_year() {
+        let dir = temp_dir("squash");
+        fs::write(dir.join("20250103120000_create_a.sql"), M1).unwrap();
+        fs::write(dir.join("20250611120000_create_b.sql"), M2).unwrap();
+        fs::write(dir.join("20260102120000_create_c.sql"), M3).unwrap();
+        let done = squash(&dir, "2026").unwrap();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].parts, 2);
+        let files: Vec<String> =
+            load_migrations(&dir).unwrap().iter().map(|m| format!("{}_{}", m.version, m.name)).collect();
+        assert_eq!(files, ["20250611120000_squash_2025", "20260102120000_create_c"]);
+        let squashed = &load_migrations(&dir).unwrap()[0];
+        assert!(squashed.is_squash());
+        assert_eq!(squashed.backend(), "sqlite");
+        let parts: Vec<String> = squashed.parts().iter().map(|p| p.version.clone()).collect();
+        assert_eq!(parts, ["20250103120000", "20250611120000"]);
+        // Squashing again changes nothing.
+        assert!(squash(&dir, "2026").unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn squashes_run_only_the_parts_a_database_has_not() {
+        let dir = temp_dir("partial");
+        fs::write(dir.join("20250103120000_create_a.sql"), M1).unwrap();
+        let db = Db::memory().await.unwrap();
+        assert_eq!(db.migrate(&dir).await.unwrap().len(), 1);
+        // A teammate's migration lands, then the year is squashed before this database ran it.
+        fs::write(dir.join("20250611120000_create_b.sql"), M2).unwrap();
+        squash(&dir, "2026").unwrap();
+        assert_eq!(db.pending_migrations(&dir).await.unwrap().len(), 1);
+        db.migrate(&dir).await.unwrap(); // would fail if `a` were created again
+        assert!(db.pending_migrations(&dir).await.unwrap().is_empty());
+        assert_eq!(db.applied_migrations().await.unwrap(), ["20250103120000", "20250611120000"]);
+        // A fresh database runs every part.
+        let fresh = Db::memory().await.unwrap();
+        fresh.migrate(&dir).await.unwrap();
+        fresh.execute("INSERT INTO \"b\" (\"id\") VALUES (1)").await.unwrap();
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -33,6 +33,10 @@ pub enum Error {
     Config(String),
     #[error("{0}")]
     Job(String),
+    /// The request is fine but clashes with the record's state: an issue already sent, a
+    /// seat already taken. Responds 409 with the message.
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("invalid or missing CSRF token")]
     Csrf,
     /// A page rendered in place of the action's normal response, e.g. a form re-rendered
@@ -55,6 +59,7 @@ impl Error {
             Error::Unauthenticated { .. } => StatusCode::UNAUTHORIZED,
             Error::Forbidden { .. } | Error::Csrf => StatusCode::FORBIDDEN,
             Error::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Error::Conflict(_) => StatusCode::CONFLICT,
             Error::Rendered { status, .. } => *status,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -71,6 +76,7 @@ impl Error {
             Error::Forbidden { .. } => "K1008",
             Error::Rendered { .. } => "K1009",
             Error::Invalid(_) => "K1010",
+            Error::Conflict(_) => "K1011",
             Error::Config(_) => "K1401",
             Error::Job(_) => "K1501",
             Error::Template(_) => "K1101",
@@ -101,14 +107,19 @@ impl Error {
             Error::Database(e) => {
                 report.message = e.to_string();
                 let text = e.to_string();
-                if text.contains("UNIQUE constraint failed") {
+                if text.contains("UNIQUE constraint failed") || text.contains("violates unique constraint") {
                     report.hint("A unique index rejected the write. Check for an existing row first, or validate uniqueness before inserting.");
-                } else if text.contains("FOREIGN KEY constraint failed") {
+                } else if text.contains("FOREIGN KEY constraint failed")
+                    || text.contains("violates foreign key constraint")
+                {
                     report.hint("A foreign key points at a row that doesn't exist. Insert the parent first, or check the id you're passing.");
-                } else if text.contains("no such table") || text.contains("no such column") {
+                } else if text.contains("no such table")
+                    || text.contains("no such column")
+                    || (text.contains("does not exist") && (text.contains("relation") || text.contains("column")))
+                {
                     report.hint("The database schema is behind the record structs. Run `kiln db diff <name>` and `kiln db migrate`.");
                 } else {
-                    report.hint("The message above comes from SQLite through sqlx.");
+                    report.hint("The message above comes from the database, through sqlx.");
                 }
             }
             Error::Integrity(message) => {
@@ -138,6 +149,10 @@ impl Error {
                 report.hint("The token rotates on sign-in and sign-out, so reload the form after either.");
             }
             Error::Rendered { .. } => {}
+            Error::Conflict(message) => {
+                report.message = message.clone();
+                report.hint("An action returned `Error::Conflict`: the request clashes with the record's current state. For browsers, a redirect with a flash is often kinder.");
+            }
             Error::Config(message) => {
                 report.message = message.clone();
                 report.hint("Values come from environment variables, then `config/secrets.enc` (`kiln secrets set KEY value`), then the field's `default`.");
@@ -171,6 +186,7 @@ impl Error {
             Error::Csrf => "Invalid CSRF token",
             Error::Rendered { .. } => "Rendered",
             Error::Invalid(_) => "Invalid input",
+            Error::Conflict(_) => "Conflict",
             Error::Config(_) => "Config error",
             Error::Job(_) => "Job failed",
         }

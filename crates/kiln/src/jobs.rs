@@ -622,7 +622,12 @@ async fn work_one(ctx: &Ctx, all: bool) -> Result<Worked> {
             Ok(payload) => {
                 // Spawned so a panic fails the job instead of the worker, and so the watcher
                 // can stop it: dropping a future ends it at its next `.await`.
-                let handle = tokio::spawn(CURRENT_BATCH.scope(job.batch, (def.run)(ctx.clone(), payload)));
+                let run = CURRENT_BATCH.scope(job.batch, (def.run)(ctx.clone(), payload));
+                // A test's moved clock (`app.travel`) follows the job into its task.
+                let handle = match crate::types::CLOCK_OFFSET.try_with(Clone::clone) {
+                    Ok(clock) => tokio::spawn(crate::types::CLOCK_OFFSET.scope(clock, run)),
+                    Err(_) => tokio::spawn(run),
+                };
                 watch_attempt(ctx, &job, def.timeout, handle).await
             }
         },
@@ -839,10 +844,19 @@ pub async fn work(ctx: Ctx, concurrency: usize) {
 /// Runs every queued job, including ones they enqueue, regardless of `run_at`. For tests:
 /// a job that uses up its attempts is an error naming it (after the rest have run).
 pub async fn perform_all(ctx: &Ctx) -> Result<usize> {
+    perform(ctx, true).await
+}
+
+/// Like [`perform_all`], but only jobs due by `Timestamp::now()` (which tests can move).
+pub async fn perform_due(ctx: &Ctx) -> Result<usize> {
+    perform(ctx, false).await
+}
+
+async fn perform(ctx: &Ctx, all: bool) -> Result<usize> {
     let mut done = 0;
     let mut failed = vec![];
     loop {
-        match work_one(ctx, true).await? {
+        match work_one(ctx, all).await? {
             Worked::Idle => break,
             Worked::Ran => done += 1,
             Worked::FailedForGood(e) => failed.push(e),

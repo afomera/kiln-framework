@@ -4,3 +4,4 @@
 tmp/
 .playwright-mcp/
 config/master.key
+db/.kiln/
