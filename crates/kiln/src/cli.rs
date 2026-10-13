@@ -42,6 +42,7 @@ Commands:
   jobs pause <queue>  Stop taking jobs from a queue; jobs resume <queue> undoes it
   schedules           Recurring jobs; schedules pause|resume|run <job name>
   batches             Recent batches; batches cancel <id>
+  health              Exit 0 if the running server answers GET /up (for HEALTHCHECK)
   db migrate          Apply pending migrations
   db diff <name>      Write a migration for changes to the record structs
   db undo             Delete the newest migration and restore the snapshot from before it
@@ -57,9 +58,26 @@ Commands:
 
 impl Cli {
     /// `root` is the app crate's directory: pass `env!("CARGO_MANIFEST_DIR")`.
+    ///
+    /// A deployed binary reads its files (templates, assets, `public/`, migrations) from
+    /// `KILN_ROOT` instead, since the directory it was compiled in isn't there.
     pub fn new(root: &str) -> Self {
-        crate::config::set_root(std::path::Path::new(root));
-        Self { root: PathBuf::from(root), seed: None, configure: None }
+        let root = crate::config::root_override().unwrap_or_else(|| PathBuf::from(root));
+        Self { root, seed: None, configure: None }
+    }
+
+    /// The app's templates, assets, migrations and secrets as compiled into the binary:
+    /// `.files(kiln::embedded_files!())`. Release builds then need nothing beside them, and
+    /// run with the current directory as the app's root (where `storage/` is written).
+    /// Debug builds embed nothing; `KILN_ROOT` makes a release build read from disk instead.
+    pub fn files(mut self, embedded: crate::Embedded) -> Self {
+        if !embedded.is_empty() && crate::config::root_override().is_none() {
+            crate::files::install(embedded);
+            if let Ok(cwd) = std::env::current_dir() {
+                self.root = cwd;
+            }
+        }
+        self
     }
 
     /// Sample data for `db seed` and `db reset`.
@@ -80,6 +98,7 @@ impl Cli {
 
     /// Runs the command from the process arguments and exits non-zero on failure.
     pub async fn run(self) {
+        crate::config::set_root(&self.root);
         let args: Vec<String> = std::env::args().skip(1).collect();
         if let Err(e) = self.dispatch(&args.iter().map(String::as_str).collect::<Vec<_>>()).await {
             eprintln!("error: {e}");
@@ -126,22 +145,31 @@ impl Cli {
         Snapshot::load(&self.snapshot_path()).map(|s| s.dialect()).unwrap_or(&crate::dialect::Sqlite)
     }
 
-    /// `DATABASE_URL`, else the backend's development database: `db/development.sqlite3`,
-    /// or `postgres://localhost/<app>_development`.
+    /// `DATABASE_URL`, else the backend's default: SQLite in `storage/` beside uploaded files
+    /// (`storage/development.sqlite3`, `storage/production.sqlite3`), so one directory (one
+    /// volume, in a container) holds all the app's data; or `postgres://localhost/<app>_development`.
     fn database_url(&self) -> String {
         if let Ok(url) = std::env::var("DATABASE_URL") {
             return url;
         }
         match self.backend().name() {
             "postgres" => format!("postgres://localhost/{}_development", app_name(&self.root)),
-            _ => format!("sqlite://{}", self.root.join("db/development.sqlite3").display()),
+            _ => format!("sqlite://{}", self.sqlite_path().display()),
         }
+    }
+
+    /// The default SQLite file, in `storage/` beside uploaded files.
+    fn sqlite_path(&self) -> PathBuf {
+        let name = if crate::config::is_production() { "production" } else { "development" };
+        self.root.join(format!("storage/{name}.sqlite3"))
     }
 
     /// The app's database, plus separate ones for Kiln's queue, cache and broadcasts when
     /// `QUEUE_DATABASE_URL`, `CACHE_DATABASE_URL` or `STREAMS_DATABASE_URL` name them.
     async fn db(&self) -> Result<Db> {
-        std::fs::create_dir_all(self.root.join("db"))?;
+        if let Some(dir) = self.sqlite_path().parent() {
+            std::fs::create_dir_all(dir)?;
+        }
         let mut db = Db::connect_or_create(&self.database_url()).await?;
         for (role, name) in [
             (crate::db::Role::Queue, "QUEUE_DATABASE_URL"),
@@ -166,6 +194,7 @@ impl Cli {
     async fn dispatch(self, args: &[&str]) -> Result {
         match args {
             [] | ["serve"] => self.serve().await,
+            ["health"] => health(),
             ["db", "migrate"] => {
                 let applied = self.db().await?.migrate(&self.migrations_dir()).await?;
                 if applied.is_empty() {
@@ -312,7 +341,10 @@ impl Cli {
         let app = self.app().await?;
         let worker = (workers() > 0).then(|| tokio::spawn(crate::jobs::work(app.ctx().clone(), workers())));
         let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
-        app.serve(&format!("127.0.0.1:{port}")).await?;
+        // Containers and hosts reach the app from outside; development stays local.
+        let host = std::env::var("HOST")
+            .unwrap_or_else(|_| if crate::config::is_production() { "0.0.0.0".into() } else { "127.0.0.1".into() });
+        app.serve(&format!("{host}:{port}")).await?;
         // Shutting down: let running jobs finish (or be released) before exiting.
         if let Some(worker) = worker {
             let _ = worker.await;
@@ -560,7 +592,7 @@ impl Cli {
             self.db().await?.execute_script("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").await?;
         } else {
             for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(self.root.join(format!("db/development.sqlite3{suffix}")));
+                let _ = std::fs::remove_file(format!("{}{suffix}", self.sqlite_path().display()));
             }
         }
         let applied = self.db().await?.migrate(&self.migrations_dir()).await?;
@@ -597,6 +629,9 @@ fn parse_id(id: &str) -> Result<i64> {
 
 /// The app's package name from Cargo.toml (`-` as `_`), for default database names.
 pub(crate) fn app_name(root: &Path) -> String {
+    if let Some(package) = crate::files::package() {
+        return package.replace('-', "_");
+    }
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
     let mut in_package = false;
     for line in manifest.lines().map(str::trim) {
@@ -610,4 +645,26 @@ pub(crate) fn app_name(root: &Path) -> String {
         }
     }
     root.file_name().map(|n| n.to_string_lossy().replace('-', "_")).unwrap_or_else(|| "app".into())
+}
+
+/// `<app> health`: asks the server on `PORT` for `/up`, for container health checks (no curl
+/// needed in the image).
+fn health() -> Result {
+    use std::io::{Read, Write};
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &format!("127.0.0.1:{port}").parse().map_err(|_| Error::Config(format!("PORT `{port}` isn't a port")))?,
+        std::time::Duration::from_secs(3),
+    )?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    stream.write_all(b"GET /up HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
+    let mut response = String::new();
+    let _ = stream.take(256).read_to_string(&mut response);
+    let status = response.split_whitespace().nth(1).unwrap_or("none");
+    if status == "200" {
+        println!("up");
+        Ok(())
+    } else {
+        Err(Error::Config(format!("GET /up answered {status}")))
+    }
 }

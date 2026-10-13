@@ -123,11 +123,10 @@ impl Snapshot {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        match fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text)
+        match crate::files::read_string(path) {
+            Some(text) => serde_json::from_str(&text)
                 .map_err(|e| Error::BadRequest(format!("{} is not a valid schema snapshot: {e}", path.display()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
+            None => Ok(Self::default()),
         }
     }
 
@@ -548,21 +547,19 @@ impl Migration {
 
 /// Migration files in `dir`, oldest first. Missing directory means no migrations.
 pub fn load_migrations(dir: &Path) -> Result<Vec<Migration>> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(e) => return Err(e.into()),
-    };
     let mut migrations = Vec::new();
-    for entry in entries {
-        let path = entry?.path();
+    for path in crate::files::walk(dir) {
+        if path.parent() != Some(dir) {
+            continue;
+        }
         let Some(file) = path.file_name().and_then(|f| f.to_str()) else { continue };
         let Some(stem) = file.strip_suffix(".sql") else { continue };
         let Some((version, name)) = stem.split_once('_') else { continue };
         if version.len() != 14 || !version.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        let sql = fs::read_to_string(&path)?;
+        let sql = crate::files::read_string(&path)
+            .ok_or_else(|| Error::Integrity(format!("couldn't read {}", path.display())))?;
         migrations.push(Migration { version: version.to_owned(), name: name.to_owned(), sql, path });
     }
     migrations.sort_by(|a, b| a.version.cmp(&b.version));

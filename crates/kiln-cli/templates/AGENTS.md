@@ -21,6 +21,7 @@ Run them from the app directory.
 | Passwords, sign-up, resets, sign-in list | `kiln g auth` (once; replaces the demo sign-in) |
 | Schema change | edit the record struct → `kiln db diff <snake_case_name>` → review the SQL → `kiln db migrate` |
 | Redo a migration | `kiln db undo` (deletes the newest generated migration and restores the snapshot), then `kiln db diff` again. Never delete migration files by hand. |
+| Deploy | `kiln build --docker` builds the production image from `Dockerfile` (`docker run -p 8080:8080 -e KILN_SECRET_KEY=… -v app-storage:/app/storage app`; migrations run on boot, `GET /up` is the health check). `kiln build` makes `dist/<app>`: one binary with templates, assets, migrations and secrets compiled in (`.files(kiln::embedded_files!())` in `src/main.rs`; debug builds read them from disk), run with `KILN_ENV=production` where it may create `storage/`. In production SQLite is `storage/production.sqlite3` (next to uploads: keep `storage/` on a volume) and the server binds `0.0.0.0` (`HOST`, `PORT`). `kiln g dockerfile` adds the files to an older app. |
 | Fewer migration files | `kiln db squash` (one file per past year; databases that ran the originals skip it) |
 | Verify | `kiln check` (must end `0 errors`), then `kiln test` |
 | Routes | `kiln routes` |
@@ -30,7 +31,7 @@ Run them from the app directory.
 | Inspect the running app | `/kiln` in development: routes, records, jobs, schedules, batches, mail, broadcasts, sign-ins, each searchable, with controls (retry, cancel, pause, run now) |
 | Secrets | `kiln secrets set SMTP_URL smtp://..`, `kiln secrets show` (key in `config/master.key`, never committed) |
 | Fresh database | `kiln db reset` (migrate + seed); sign in at /session/new as ada@example.com |
-| Database | SQLite (`db/development.sqlite3`) or Postgres (`kiln new app --database postgres`: `postgres://localhost/<app>_development`, tests in `<app>_test`); `DATABASE_URL` / `TEST_DATABASE_URL` override. `db/snapshot.json` records which. Kiln's queue, cache and broadcast log can each live in their own database (`QUEUE_DATABASE_URL`, `CACHE_DATABASE_URL`, `STREAMS_DATABASE_URL`, same backend); then jobs and broadcasts sent inside a transaction are handed over when it commits (a rollback still sends nothing). |
+| Database | SQLite (`storage/development.sqlite3`, beside uploaded files) or Postgres (`kiln new app --database postgres`: `postgres://localhost/<app>_development`, tests in `<app>_test`); `DATABASE_URL` / `TEST_DATABASE_URL` override. `db/snapshot.json` records which. Kiln's queue, cache and broadcast log can each live in their own database (`QUEUE_DATABASE_URL`, `CACHE_DATABASE_URL`, `STREAMS_DATABASE_URL`, same backend); then jobs and broadcasts sent inside a transaction are handed over when it commits (a rollback still sends nothing). |
 
 Field types: `string`, `text`, `rich_text` (the editor; `?` means it may be left empty), `integer`, `float`, `bool`, `timestamp`, `file`, `image` (uploads; `image` accepts only images), `ref:<Record>`. A
 trailing `?` makes a field optional; quote it in zsh (`'notes:text?'`). A trailing `:internal`

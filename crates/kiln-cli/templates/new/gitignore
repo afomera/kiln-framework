@@ -4,3 +4,4 @@ tmp/
 config/master.key
 db/.kiln/
 storage/
+dist/

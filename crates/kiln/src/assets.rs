@@ -162,14 +162,19 @@ fn safe_relative(name: &str) -> Option<&Path> {
 /// Content hashes of asset files, cached until the file changes.
 fn file_hash(path: &Path) -> Option<String> {
     static CACHE: OnceLock<Mutex<BTreeMap<PathBuf, (SystemTime, String)>>> = OnceLock::new();
-    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    // Embedded files never change.
+    let modified = if crate::files::embedded() {
+        SystemTime::UNIX_EPOCH
+    } else {
+        std::fs::metadata(path).and_then(|m| m.modified()).ok()?
+    };
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, hash)) = cache.get(path)
         && *at == modified
     {
         return Some(hash.clone());
     }
-    let hash = short_hash(&std::fs::read(path).ok()?);
+    let hash = short_hash(&crate::files::read(path)?);
     cache.insert(path.to_owned(), (modified, hash.clone()));
     Some(hash)
 }
@@ -219,34 +224,25 @@ impl Assets {
             ("kiln/rich-text".to_owned(), rich_text_js().url.clone()),
             ("kiln/rich-text-display".to_owned(), rich_text_display_js().url.clone()),
         ]);
-        let mut stack = vec![self.assets.clone()];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                let Ok(relative) = path.strip_prefix(&self.assets) else { continue };
-                let name = relative.to_string_lossy().replace('\\', "/");
-                if let (Some(module), Some(url)) = (name.strip_suffix(".js"), self.url(&name)) {
-                    imports.insert(module.to_owned(), url);
-                }
+        for path in crate::files::walk(&self.assets) {
+            let Ok(relative) = path.strip_prefix(&self.assets) else { continue };
+            let name = relative.to_string_lossy().replace('\\', "/");
+            if let (Some(module), Some(url)) = (name.strip_suffix(".js"), self.url(&name)) {
+                imports.insert(module.to_owned(), url);
             }
         }
         imports
     }
 
     pub fn has_application_js(&self) -> bool {
-        self.assets.join("application.js").is_file()
+        crate::files::is_file(&self.assets.join("application.js"))
     }
 
     /// Serves `/assets/<fingerprinted name>`.
     pub fn serve_asset(&self, requested: &str) -> Option<Response> {
         let (name, hash) = split_fingerprint(requested)?;
         let path = self.assets.join(safe_relative(&name)?);
-        let bytes = std::fs::read(&path).ok()?;
+        let bytes = crate::files::read(&path)?.into_owned();
         // A stale fingerprint still gets the current file, just not cached forever.
         let immutable = short_hash(&bytes) == hash;
         Some(file_response(&name, bytes, immutable))
@@ -257,10 +253,10 @@ impl Assets {
         let name = request_path.trim_start_matches('/');
         // `/` is `public/index.html` when there is one.
         let mut path = if name.is_empty() { self.public.clone() } else { self.public.join(safe_relative(name)?) };
-        if path.is_dir() {
+        if crate::files::is_dir(&path) {
             path = path.join("index.html");
         }
-        let bytes = std::fs::read(&path).ok()?;
+        let bytes = crate::files::read(&path)?.into_owned();
         Some(file_response(&path.to_string_lossy(), bytes, false))
     }
 }

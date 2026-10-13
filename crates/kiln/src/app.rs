@@ -307,8 +307,9 @@ impl App {
                 e.into()
             }
         })?;
-        // Under `kiln dev` the routes have their own pane (and `kiln routes` lists them).
-        if std::env::var("KILN_DEV_STDIN_WATCH").as_deref() == Ok("1") {
+        // Under `kiln dev` the routes have their own pane, and production logs want one line;
+        // `kiln routes` (or `<app> routes`) lists them.
+        if std::env::var("KILN_DEV_STDIN_WATCH").as_deref() == Ok("1") || crate::config::is_production() {
             println!("kiln listening on http://{addr} ({} routes)", routes().len());
         } else {
             println!("{}\n\nkiln listening on http://{addr}", routes_table());
@@ -452,6 +453,18 @@ fn cookie_in<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a s
         .find_map(|pair| pair.trim().strip_prefix(name)?.strip_prefix('='))
 }
 
+/// `GET /up`: 200 when the app is running and its database answers, 503 otherwise. For
+/// load balancers and container health checks; not logged, no session.
+async fn up(db: &Db) -> Response {
+    match db.fetch_all("SELECT 1", vec![]).await {
+        Ok(_) => (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], "up\n").into_response(),
+        Err(e) => {
+            tracing::error!(target: "kiln::request", error = %e, "health check: the database didn't answer");
+            (StatusCode::SERVICE_UNAVAILABLE, [(header::CACHE_CONTROL, "no-store")], "down\n").into_response()
+        }
+    }
+}
+
 /// In development, the migrations not yet applied (`version_name`); none in production.
 async fn pending_migration_names(db: &Db) -> Vec<String> {
     if crate::config::is_production() {
@@ -537,6 +550,8 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
             shared.assets.as_ref().and_then(|a| a.serve_asset(name))
         } else if path == crate::dev_reload::PATH && crate::dev_reload::enabled() {
             shared.assets.as_ref().map(crate::dev_reload::serve)
+        } else if path == "/up" && !routes().iter().any(|r| r.path == "/up") {
+            Some(up(&shared.db).await)
         } else if path.starts_with(crate::storage::FILES_PATH) {
             crate::storage::serve(&shared.ctx, &shared.key, path).await
         } else if path.starts_with(crate::storage::VARIANTS_PATH) {

@@ -10,6 +10,7 @@ mod edit;
 mod generate;
 mod names;
 mod new;
+mod release;
 
 use std::process::ExitCode;
 
@@ -73,6 +74,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// A release build to deploy: `dist/` (binary plus templates, assets, migrations), or
+    /// with `--docker` the app's production image (see its Dockerfile).
+    Build {
+        #[arg(long)]
+        docker: bool,
+    },
     /// Compile, then check conventions, schema drift and template routes.
     Check {
         /// `text` (default) or `json`.
@@ -129,6 +136,7 @@ fn main() -> ExitCode {
             }
             Command::Routes { json } => app.run_binary(if json { &["routes", "--json"] } else { &["routes"] }),
             Command::Check { format } => check::run(&app, format == "json"),
+            Command::Build { docker } => release::run(&app, docker),
             Command::Test { args } => {
                 app.cargo(&[&["test", "--quiet"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
             }

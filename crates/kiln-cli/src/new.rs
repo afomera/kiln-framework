@@ -17,6 +17,7 @@ macro_rules! starter {
 
 const FILES: &[(&str, &str)] = starter![
     "Cargo.toml",
+    "build.rs",
     "rustfmt.toml",
     "gitignore",
     "src/main.rs",
@@ -96,6 +97,9 @@ pub fn run(name: &str, kiln: Option<&Path>, database: &str) -> Result<(), String
     }
     write(&dir.join("AGENTS.md"), AGENTS_MD)?;
     println!("create  {}", dir.join("AGENTS.md").display());
+    for path in crate::release::write_deploy_files(&dir, app, true)? {
+        println!("create  {}", path.display());
+    }
     if database != "sqlite" {
         // The snapshot records the backend; migrations, `kiln dev` and tests follow it.
         write(&dir.join("db/snapshot.json"), &format!("{{\n  \"backend\": \"{database}\",\n  \"tables\": {{}}\n}}\n"))?;

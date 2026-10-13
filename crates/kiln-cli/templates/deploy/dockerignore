@@ -1,0 +1,9 @@
+target/
+dist/
+storage/
+tmp/
+db/*.sqlite3*
+db/.kiln/
+config/master.key
+.git/
+.env*

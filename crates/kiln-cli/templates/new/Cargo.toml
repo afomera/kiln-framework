@@ -17,6 +17,11 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# Release binaries without their symbol table: about 20% smaller. Panic messages keep
+# their file and line; backtraces show addresses instead of function names.
+[profile.release]
+strip = true
+
 # Password hashing is slow without optimizations.
 [profile.dev.package.argon2]
 opt-level = 3

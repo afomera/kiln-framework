@@ -18,6 +18,7 @@ mod devtools;
 pub mod dialect;
 mod error;
 mod error_page;
+mod files;
 pub mod form;
 pub mod jobs;
 pub mod mail;
@@ -45,6 +46,7 @@ pub use axum::Json;
 pub use cli::Cli;
 pub use db::{Db, Role, Row};
 pub use error::{Error, Result};
+pub use files::Embedded;
 pub use migrate::{
     ColumnSnapshot, Diff, Migration, RecordDef, Snapshot, TableSnapshot, diff, diff_for, load_migrations, records,
     write_migration,
@@ -67,7 +69,9 @@ pub use jiff as time;
 pub use batch::{Batch, BatchId};
 pub use config::Secret;
 pub use jobs::{Enqueue, Perform};
-pub use kiln_macros::{Config, DbEnum, Form, Job, Mail, Notification, Record, View, action, part, test};
+pub use kiln_macros::{
+    Config, DbEnum, Form, Job, Mail, Notification, Record, View, action, embedded_files, part, test,
+};
 pub use mail::{Mail, Preview};
 pub use notify::{Notify, Via};
 pub use schedule::Schedule;

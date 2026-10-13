@@ -14,7 +14,7 @@ Spec: [Kiln Framework Spec](https://claude.ai/artifact/PNHemnZU3NnUq51gfW65uv)
 ```sh
 make install            # builds the CLI and links it as `kiln-dev` in ~/.local/bin
 cd examples/blog
-kiln-dev db reset       # create db/development.sqlite3, migrate, seed
+kiln-dev db reset       # create storage/development.sqlite3, migrate, seed
 kiln-dev dev            # http://127.0.0.1:3000 (sign in as ada@example.com)
 kiln-dev check          # compile + conventions + schema + template routes
 kiln-dev test

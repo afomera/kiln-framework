@@ -211,7 +211,23 @@ fn environment(root: &'static str) -> Arc<Environment<'static>> {
 
 fn build_environment(root: &'static str) -> Environment<'static> {
     let mut env = Environment::new();
-    env.set_loader(minijinja::path_loader(root));
+    // Views know their templates by the path they were compiled with; a deployed binary
+    // finds them under `KILN_ROOT` instead.
+    let embedded = crate::files::embedded() && root.ends_with("/templates");
+    let templates = match crate::config::root_override() {
+        Some(deployed) if root.ends_with("/templates") => deployed.join("templates"),
+        _ => std::path::PathBuf::from(root),
+    };
+    let assets = match crate::config::root().filter(|_| embedded) {
+        // Compiled-in templates: assets are compiled in beside them, under the app's root.
+        Some(app_root) => crate::assets::Assets::at(&app_root),
+        None => crate::assets::Assets::beside_templates(&templates.to_string_lossy()),
+    };
+    if embedded {
+        env.set_loader(|name| Ok(crate::files::template(name)));
+    } else {
+        env.set_loader(minijinja::path_loader(templates));
+    }
     env.set_undefined_behavior(UndefinedBehavior::Strict);
     // Block tags (`{% if %}`, `{% set %}`) don't leave blank lines behind.
     env.set_trim_blocks(true);
@@ -227,7 +243,6 @@ fn build_environment(root: &'static str) -> Environment<'static> {
     env.add_function("csrf_token", csrf_token);
     env.add_function("csrf_meta", csrf_meta);
     env.add_function("turbo_stream_from", turbo_stream_from);
-    let assets = crate::assets::Assets::beside_templates(root);
     let lookup = assets.clone();
     // Asset URLs are safe to emit unescaped (like `path()`), so `/` isn't turned into `&#x2f;`.
     env.add_function("asset", move |name: String| -> std::result::Result<Value, minijinja::Error> {

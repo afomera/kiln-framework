@@ -50,6 +50,12 @@ pub enum Generate {
         #[arg(long)]
         force: bool,
     },
+    /// The production Dockerfile, its entrypoint and `.dockerignore` (new apps have them):
+    /// `kiln g dockerfile`, then `kiln build --docker`.
+    Dockerfile {
+        #[arg(long)]
+        force: bool,
+    },
     /// An operation in src/ops: `kiln g op publish_post`.
     Op {
         name: String,
@@ -124,6 +130,18 @@ impl Generate {
             }
             Generate::Action { resource, name, method, path, force } => {
                 (action(app, &resource, &name, &method, &path)?, force, None)
+            }
+            Generate::Dockerfile { force } => {
+                let written = crate::release::write_deploy_files(&app.root, &app.package, force)?;
+                if written.is_empty() {
+                    println!(
+                        "Dockerfile, .dockerignore and bin/docker-entrypoint already exist (--force rewrites them)"
+                    );
+                }
+                for path in written {
+                    println!("create  {}", path.strip_prefix(&app.root).unwrap_or(&path).display());
+                }
+                return Ok(());
             }
             Generate::Op { name, force } => (op(app, &name)?, force, None),
             Generate::Part { record, force } => (part(app, &record)?, force, None),

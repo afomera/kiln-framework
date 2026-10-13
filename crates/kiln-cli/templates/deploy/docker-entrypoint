@@ -1,0 +1,9 @@
+#!/bin/sh
+# Applies pending migrations before the server starts, then hands over to the app. Set
+# KILN_MIGRATE_ON_BOOT=0 when a release step runs `@@app@@ db migrate` instead (several
+# servers starting at once, say).
+set -e
+if [ "$1" = "serve" ] && [ "${KILN_MIGRATE_ON_BOOT:-1}" = "1" ]; then
+  /app/bin/@@app@@ db migrate
+fi
+exec /app/bin/@@app@@ "$@"

@@ -101,6 +101,11 @@ pub(crate) fn set_root(root: &Path) {
     let _ = ROOT.set(root.to_owned());
 }
 
+/// `KILN_ROOT`: where a deployed app's files are (templates, assets, public, migrations).
+pub(crate) fn root_override() -> Option<PathBuf> {
+    std::env::var("KILN_ROOT").ok().filter(|r| !r.is_empty()).map(PathBuf::from)
+}
+
 /// The app directory, once `kiln::Cli` or a test set it.
 pub(crate) fn root() -> Option<PathBuf> {
     ROOT.get().cloned()
@@ -236,12 +241,11 @@ impl Secrets {
     pub fn open(root: &Path) -> Result<Option<Self>> {
         let (path, _) = Self::paths(root);
         let Some(key) = Self::read_key(root)? else { return Ok(None) };
-        let encoded = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        let encoded = match crate::files::read_string(&path) {
+            Some(text) => text,
+            None => {
                 return Ok(Some(Self { path, key, values: BTreeMap::new() }));
             }
-            Err(e) => return Err(e.into()),
         };
         let bytes = STANDARD
             .decode(encoded.trim())

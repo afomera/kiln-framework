@@ -7,6 +7,7 @@ use syn::{DeriveInput, parse_macro_input};
 mod action;
 mod config;
 mod db_enum;
+mod embed;
 mod form;
 mod job;
 mod mail;
@@ -109,6 +110,13 @@ fn with_stub(error: syn::Error, stub: proc_macro2::TokenStream) -> proc_macro2::
 
 /// A test against a fresh in-memory app with the crate's migrations applied:
 /// `#[kiln::test] async fn creates_post(app: TestApp) -> kiln::Result { .. }`.
+/// The app's templates, assets, `public/` files, migrations, schema snapshot and encrypted
+/// secrets, compiled into release builds: `kiln::Cli::new(..).files(kiln::embedded_files!())`.
+#[proc_macro]
+pub fn embedded_files(input: TokenStream) -> TokenStream {
+    embed::expand(input.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
 #[proc_macro_attribute]
 pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     test::expand(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
