@@ -7,10 +7,12 @@ edition = "2024"
 version = "0.0.1"
 license = "MIT OR Apache-2.0"
 rust-version = "1.88"
+repository = "https://github.com/afomera/kiln-framework"
 
 [workspace.dependencies]
-kiln = { path = "crates/kiln", package = "kiln-framework" }
-kiln-macros = { path = "crates/kiln-macros", package = "kiln-framework-macros" }
+# Versions as well as paths: crates.io resolves the version, the workspace the path.
+kiln = { path = "crates/kiln", package = "kiln-framework", version = "0.0.1" }
+kiln-macros = { path = "crates/kiln-macros", package = "kiln-framework-macros", version = "0.0.1" }
 axum = "0.8"
 inventory = "0.3"
 jiff = "0.2"

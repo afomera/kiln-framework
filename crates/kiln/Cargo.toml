@@ -5,6 +5,10 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["web", "framework", "http", "fullstack", "agents"]
+categories = ["web-programming::http-server"]
 
 # Published as `kiln-framework`; apps still write `use kiln::..`.
 [lib]

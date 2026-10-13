@@ -16,7 +16,9 @@ macro_rules! starter {
 }
 
 const FILES: &[(&str, &str)] = starter![
-    "Cargo.toml",
+    // Stored under another name: a `Cargo.toml` would make cargo treat the template as a
+    // package of its own and leave it out of the published CLI.
+    "Cargo.toml.template",
     "build.rs",
     "rustfmt.toml",
     "gitignore",
@@ -76,22 +78,34 @@ pub fn run(name: &str, kiln: Option<&Path>, database: &str) -> Result<(), String
     if dir.exists() {
         return Err(format!("{} already exists", dir.display()));
     }
-    let kiln_path = match kiln {
-        Some(path) => path.canonicalize().map_err(|e| format!("--kiln {}: {e}", path.display()))?,
-        None => default_kiln_path(),
+    // Kiln's source when there is one (`--kiln`, or the checkout this CLI was built in);
+    // otherwise the published crate at this CLI's version.
+    let kiln_dependency = match kiln {
+        Some(path) => {
+            let path = path.canonicalize().map_err(|e| format!("--kiln {}: {e}", path.display()))?;
+            if !path.join("Cargo.toml").exists() {
+                return Err(format!("no kiln crate at {}; pass --kiln <path to crates/kiln>", path.display()));
+            }
+            format!("{{ path = \"{}\" }}", path.display())
+        }
+        None => match default_kiln_path() {
+            path if path.join("Cargo.toml").exists() => format!("{{ path = \"{}\" }}", path.display()),
+            _ => format!("\"{}\"", env!("CARGO_PKG_VERSION")),
+        },
     };
-    if !kiln_path.join("Cargo.toml").exists() {
-        return Err(format!("no kiln crate at {}; pass --kiln <path to crates/kiln>", kiln_path.display()));
-    }
 
     let title = human(&crate_name);
     for (path, contents) in FILES {
-        let target = dir.join(if *path == "gitignore" { ".gitignore" } else { path });
+        let target = dir.join(match *path {
+            "gitignore" => ".gitignore",
+            "Cargo.toml.template" => "Cargo.toml",
+            path => path,
+        });
         let contents = contents
             .replace("@@app@@", app)
             .replace("@@crate@@", &crate_name)
             .replace("@@App@@", &title)
-            .replace("@@kiln_path@@", &kiln_path.display().to_string());
+            .replace("@@kiln_dependency@@", &kiln_dependency);
         write(&target, &contents)?;
         println!("create  {}", target.display());
     }

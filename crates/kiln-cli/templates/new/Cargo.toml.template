@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 # Kiln is published as `kiln-framework`; the library is still `kiln` (`use kiln::..`).
-kiln-framework = { path = "@@kiln_path@@" }
+kiln-framework = @@kiln_dependency@@
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tracing-subscriber = "0.3"

@@ -5,6 +5,10 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["web", "framework", "macros"]
+categories = ["web-programming::http-server"]
 
 [lib]
 name = "kiln_macros"

@@ -84,3 +84,7 @@ writes the record, migration, form, policy, three ops, seven actions, four views
 - zsh treats `?` as a glob, so quote optional fields: `'notes:text?'`.
 - Factories live in `src/factories.rs` (not `tests/`) because of Rust's orphan rule.
 - SQLite only. Postgres is planned as its own step after M1.
+
+## License
+
+Kiln is © 2026 [Andrea Fomera](https://afomera.dev), dual-licensed under either of [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option. Vendored libraries keep their own licenses: Turbo (MIT) and Lexxy with what it bundles (MIT; DOMPurify under Apache 2.0), in `crates/kiln/vendor/`.
