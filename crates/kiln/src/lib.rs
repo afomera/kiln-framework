@@ -6,20 +6,27 @@
 extern crate self as kiln;
 
 mod app;
+mod assets;
+pub mod auth;
 mod cli;
+pub mod config;
 mod db;
 mod error;
 mod error_page;
 pub mod form;
+pub mod jobs;
+pub mod mail;
 mod migrate;
 pub mod policy;
 mod query;
+mod realtime;
 mod redirect;
 pub mod rel;
 mod routing;
 mod schema;
 pub mod session;
 pub mod testing;
+pub mod turbo;
 mod types;
 pub mod view;
 
@@ -33,18 +40,22 @@ pub use migrate::{
     write_migration,
 };
 pub use query::{Column, Delete, Expr, Insert, Order, Query, Update};
-pub use redirect::Redirect;
+pub use redirect::{Redirect, ViewOrRedirect};
 pub use rel::{Append, BoxFuture, HasRel, HasRelation, Loaded, RelSet, Relation};
 pub use routing::{Param, PathArg, RouteDef, routes, routes_table};
 pub use schema::{ColumnSchema, TableSchema};
 pub use session::{Current, Flash, SecretKey, Session};
+pub use turbo::{Turbo, TurboStream};
 pub use types::{FromColumn, Id, SqlType, Timestamp, ToValue, Value};
 pub use view::{Part, PartsEnabled, View};
 
 /// Dates and times (the `jiff` crate), e.g. `kiln::time::SignedDuration`.
 pub use jiff as time;
 
-pub use kiln_macros::{DbEnum, Form, Record, View, action, part, test};
+pub use config::Secret;
+pub use jobs::{Enqueue, Perform};
+pub use mail::Mail;
+pub use kiln_macros::{Config, DbEnum, Form, Job, Mail, Record, View, action, part, test};
 
 use sqlx::sqlite::SqliteRow;
 
@@ -88,11 +99,11 @@ pub trait Record: Sized + Clone + Send + Sync + serde::Serialize + 'static {
 }
 
 pub mod prelude {
-    pub use kiln_macros::Form;
+    pub use kiln_macros::{Config, Form, Job};
 
     pub use crate::{
-        App, Ctx, Current, Db, DbEnum, Error, Id, Json, Loaded, Param, Query, Record, Redirect, Result, Session,
-        Timestamp, View, action,
+        App, Ctx, Current, Db, DbEnum, Enqueue, Error, Id, Json, Loaded, Mail, Param, Perform, Query, Record, Redirect, Result, Secret, Session,
+        Timestamp, Turbo, TurboStream, View, ViewOrRedirect, action,
         form::{Form, FormState, OrRender, Valid},
         part,
         policy::{Allows, Authorize, Authorized},

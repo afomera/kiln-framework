@@ -12,9 +12,14 @@
 </article>
 <section>
   <h2>Comments</h2>
-  <ul>
-    {% for comment in post.comments %}
-    <li><strong>{{ comment.author.name }}</strong>: {{ comment.body }}</li>
-    {% endfor %}
+  {# Live: new comments from anyone appear without a reload. #}
+  {{ turbo_stream_from("post:" ~ post.id) }}
+  <ul id="comments">
+    {% for comment in post.comments %}{% include "comments/_comment.html.jinja" %}{% endfor %}
   </ul>
+  {% if current_user %}
+  {% with form = comment_form, post_slug = post.slug %}{% include "comments/_form.html.jinja" %}{% endwith %}
+  {% else %}
+  <p><a href="{{ path("sessions::new") }}">Sign in</a> to comment.</p>
+  {% endif %}
 </section>

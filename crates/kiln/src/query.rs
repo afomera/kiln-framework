@@ -107,6 +107,11 @@ impl<T> Expr<T> {
         Self { sql, binds, _marker: PhantomData }
     }
 
+    /// Kiln's own SQL (sign-in lookups); not for apps.
+    pub(crate) fn raw(sql: &str, binds: Vec<Value>) -> Self {
+        Self::new(sql.to_owned(), binds)
+    }
+
     pub fn and(self, other: Expr<T>) -> Expr<T> {
         self.join("AND", other)
     }

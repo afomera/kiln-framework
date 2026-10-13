@@ -1,13 +1,24 @@
+mod confirm_email;
 mod create_bookmark;
+mod create_comment;
 mod create_post;
 mod delete_bookmark;
 mod delete_post;
+mod request_password_reset;
+mod reset_password;
+mod sign_up;
 mod update_bookmark;
 mod update_post;
 
+pub use confirm_email::confirm_email;
 pub use create_bookmark::create_bookmark;
+pub use create_comment::create_comment;
 pub use create_post::create_post;
 pub use delete_bookmark::delete_bookmark;
 pub use delete_post::delete_post;
+pub use request_password_reset::request_password_reset;
+pub use reset_password::reset_password;
+pub use reset_password::user_for_reset;
+pub use sign_up::sign_up;
 pub use update_bookmark::update_bookmark;
 pub use update_post::update_post;

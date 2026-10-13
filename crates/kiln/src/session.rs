@@ -1,7 +1,8 @@
 //! Sessions, flash messages, CSRF tokens and the signed-in user.
 //!
 //! The session is a JSON map in a signed cookie (HMAC-SHA256). Kiln's request middleware
-//! loads it before the action runs and writes it back only when it changed.
+//! loads it before the action runs and writes it back only when it changed. Sign-ins are
+//! rows in the database; the cookie holds only their token (see `kiln::auth`).
 
 use std::{
     collections::BTreeMap,
@@ -20,7 +21,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use sha2::Sha256;
 
-use crate::{Ctx, Error, Id, Record};
+use crate::{Ctx, Error, Record};
 
 pub const COOKIE: &str = "_kiln_session";
 const FLASH_KEY: &str = "_flash";
@@ -54,6 +55,21 @@ impl SecretKey {
         format!("{}.{}", URL_SAFE_NO_PAD.encode(&payload), URL_SAFE_NO_PAD.encode(self.mac(&payload)))
     }
 
+    /// `name.signature`, for values handed to the browser that it must not forge.
+    pub(crate) fn sign_str(&self, value: &str) -> String {
+        format!("{}.{}", URL_SAFE_NO_PAD.encode(value), URL_SAFE_NO_PAD.encode(self.mac(value.as_bytes())))
+    }
+
+    pub(crate) fn verify_str(&self, signed: &str) -> Option<String> {
+        let (value, signature) = signed.split_once('.')?;
+        let value = URL_SAFE_NO_PAD.decode(value).ok()?;
+        let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.0).ok()?;
+        mac.update(&value);
+        mac.verify_slice(&signature).ok()?;
+        String::from_utf8(value).ok()
+    }
+
     pub(crate) fn verify(&self, cookie: &str) -> Option<Map<String, Value>> {
         let (payload, signature) = cookie.split_once('.')?;
         let payload = URL_SAFE_NO_PAD.decode(payload).ok()?;
@@ -82,11 +98,21 @@ pub struct Session {
 struct State {
     data: Map<String, Value>,
     changed: bool,
+    /// `(user agent, ip)` of the request, recorded with sign-ins.
+    client: (String, String),
 }
 
 impl Session {
     pub(crate) fn from_data(data: Map<String, Value>) -> Self {
-        Self { inner: Arc::new(Mutex::new(State { data, changed: false })) }
+        Self { inner: Arc::new(Mutex::new(State { data, changed: false, client: Default::default() })) }
+    }
+
+    pub(crate) fn set_client(&self, user_agent: String, ip: String) {
+        self.state().client = (user_agent, ip);
+    }
+
+    pub(crate) fn client(&self) -> (String, String) {
+        self.state().client.clone()
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -118,19 +144,21 @@ impl Session {
         state.changed = true;
     }
 
-    /// Signs `record` in as the current `T` (usually `User`). Rotates the CSRF token.
-    pub fn sign_in<T: Record>(&self, record: &T) {
-        self.insert(&current_key::<T>(), record.id().get());
-        self.remove(CSRF_KEY);
+    /// The sign-in token for `T` (see `kiln::auth`).
+    pub(crate) fn sign_in_token<T: Record>(&self) -> Option<String> {
+        self.get::<String>(&current_key::<T>())
     }
 
-    pub fn sign_out<T: Record>(&self) {
-        self.remove(&current_key::<T>());
+    /// Sets or clears the sign-in token for `T`, rotating the CSRF token either way.
+    pub(crate) fn set_sign_in_token<T: Record>(&self, token: Option<String>) {
+        match token {
+            Some(token) => self.insert(&current_key::<T>(), token),
+            None => {
+                self.remove(&current_key::<T>());
+                self.remove(&format!("{}.seen", current_key::<T>()));
+            }
+        }
         self.remove(CSRF_KEY);
-    }
-
-    pub fn current_id<T: Record>(&self) -> Option<Id<T>> {
-        self.get::<i64>(&current_key::<T>()).map(Id::new)
     }
 
     /// The CSRF token for this session, created on first use.
@@ -225,12 +253,14 @@ pub(crate) async fn signed_in<T: Record>(session: &Session, db: &crate::Db) -> R
     if let Some(hit) = cache.as_ref().and_then(|c| c.get::<T>()) {
         return Ok(hit);
     }
-    let record = match session.current_id::<T>() {
-        Some(id) => {
-            let record = T::find(id).one(db).await?;
-            if record.is_none() {
-                // The record was deleted; drop the stale sign-in.
-                session.sign_out::<T>();
+    let record = match session.sign_in_token::<T>() {
+        Some(token) => {
+            let record = crate::auth::find_signed_in::<T>(db, &token).await?;
+            if record.is_some() {
+                crate::auth::touch_sign_in(db, session, T::TABLE, &token).await?;
+            } else {
+                // Signed out elsewhere, expired, or the record was deleted.
+                session.set_sign_in_token::<T>(None);
             }
             record
         }
@@ -265,6 +295,10 @@ pub(crate) struct RequestScope {
     pub session: Session,
     pub flash: Flash,
     pub cache: Arc<RequestCache>,
+    /// A Turbo Frame request: pages render without their layout.
+    pub frame: bool,
+    /// Signs stream names for `turbo_stream_from`.
+    pub key: Option<SecretKey>,
 }
 
 /// Records loaded for this request, by table, and the `current_*` template values.

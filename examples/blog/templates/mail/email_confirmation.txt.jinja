@@ -1,0 +1,7 @@
+Hi {{ name }},
+
+Confirm your email address by following this link:
+
+{{ url(path("confirmations::show", token=token)) }}
+
+If you didn't sign up, you can ignore this email.

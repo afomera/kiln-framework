@@ -21,7 +21,11 @@ use crate::{Error, Result, Value};
 pub struct Db {
     conn: Conn,
     queries: Arc<AtomicU64>,
+    /// Inside a transaction: work to run once it commits (e.g. waking stream listeners).
+    after_commit: Option<Arc<std::sync::Mutex<Vec<AfterCommit>>>>,
 }
+
+type AfterCommit = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
 enum Conn {
@@ -34,7 +38,7 @@ impl Db {
     pub async fn connect(url: &str) -> Result<Self> {
         let options = SqliteConnectOptions::from_str(url)?.create_if_missing(true).foreign_keys(true);
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
-        Ok(Self::from_pool(pool))
+        Self::from_pool(pool).with_kiln_tables().await
     }
 
     /// A private in-memory database, kept alive for the lifetime of this handle.
@@ -50,11 +54,11 @@ impl Db {
             .max_lifetime(None)
             .connect_with(options)
             .await?;
-        Ok(Self::from_pool(pool))
+        Self::from_pool(pool).with_kiln_tables().await
     }
 
     fn from_pool(pool: SqlitePool) -> Self {
-        Self { conn: Conn::Pool(pool), queries: Arc::new(AtomicU64::new(0)) }
+        Self { conn: Conn::Pool(pool), queries: Arc::new(AtomicU64::new(0)), after_commit: None }
     }
 
     /// Runs `f` in a transaction: committed when it returns `Ok`, rolled back on `Err` or
@@ -78,17 +82,33 @@ impl Db {
             Conn::Pool(pool) => pool,
         };
         let handle = Arc::new(Mutex::new(Some(pool.begin().await?)));
-        let result = f(Db { conn: Conn::Tx(handle.clone()), queries: self.queries.clone() }).await;
+        let hooks: Arc<std::sync::Mutex<Vec<AfterCommit>>> = Arc::default();
+        let tx_db =
+            Db { conn: Conn::Tx(handle.clone()), queries: self.queries.clone(), after_commit: Some(hooks.clone()) };
+        let result = f(tx_db).await;
         let tx = handle.lock().await.take().ok_or_else(|| Error::Integrity("transaction already finished".into()))?;
         match result {
             Ok(value) => {
                 tx.commit().await?;
+                let hooks = std::mem::take(&mut *hooks.lock().unwrap_or_else(|e| e.into_inner()));
+                for hook in hooks {
+                    hook();
+                }
                 Ok(value)
             }
             Err(e) => {
                 tx.rollback().await?;
                 Err(e)
             }
+        }
+    }
+
+    /// Runs `f` after the surrounding transaction commits, or now outside one. Dropped if
+    /// the transaction rolls back.
+    pub(crate) fn after_commit(&self, f: impl FnOnce() + Send + 'static) {
+        match &self.after_commit {
+            Some(hooks) => hooks.lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(f)),
+            None => f(),
         }
     }
 

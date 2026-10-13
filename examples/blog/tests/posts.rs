@@ -1,7 +1,7 @@
 //! Post CRUD, sign-in, policies, CSRF and forms.
 
 use blog::{
-    actions::{posts, sessions},
+    actions::{home, posts, sessions},
     records::*,
 };
 use kiln::{prelude::*, testing::TestApp};
@@ -141,11 +141,11 @@ async fn show_offers_edit_only_to_the_author(app: TestApp) -> Result {
 async fn sign_in_and_out(app: TestApp) -> Result {
     let user = app.create::<User>().await?;
     let client = app.client();
-    client.get_html(sessions::new::path()).await.assert_status(200).assert_contains(&user.email);
+    client.get_html(sessions::new::path()).await.assert_status(200).assert_contains("Forgot your password?");
     client
-        .post_form(sessions::create::path(), &[("email", &user.email)])
+        .post_form(sessions::create::path(), &[("email", &user.email), ("password", "password")])
         .await
-        .assert_redirect(&posts::index::path())
+        .assert_redirect(&home::index::path())
         .assert_flash(&format!("Signed in as {}.", user.name));
     client.get_html(posts::new::path()).await.assert_status(200).assert_contains("New post");
     client.delete(sessions::destroy::path()).await.assert_flash("Signed out.");
@@ -156,10 +156,10 @@ async fn sign_in_and_out(app: TestApp) -> Result {
 #[kiln::test]
 async fn unknown_email_rerenders_sign_in(app: TestApp) -> Result {
     app.client()
-        .post_form(sessions::create::path(), &[("email", "nobody@example.com")])
+        .post_form(sessions::create::path(), &[("email", "nobody@example.com"), ("password", "password")])
         .await
         .assert_status(422)
-        .assert_contains("Email doesn&#x27;t match any user");
+        .assert_contains("Email or password is incorrect");
     Ok(())
 }
 
@@ -176,7 +176,7 @@ async fn signed_out_browsers_are_sent_to_sign_in(app: TestApp) -> Result {
 #[kiln::test]
 async fn layouts_show_the_signed_in_user(app: TestApp) -> Result {
     let user = app.create_with::<User>(|u| u.name = "Ada Lovelace".into()).await?;
-    app.sign_in_as(&user).get_html(posts::index::path()).await.assert_contains("<span>Ada Lovelace</span>");
+    app.sign_in_as(&user).get_html(posts::index::path()).await.assert_contains(">Ada Lovelace</a>");
     app.client()
         .get_html(posts::index::path())
         .await
@@ -190,6 +190,7 @@ async fn layouts_show_the_signed_in_user(app: TestApp) -> Result {
 async fn current_user_is_loaded_once_per_page(app: TestApp) -> Result {
     let user = app.create::<User>().await?;
     let client = app.sign_in_as(&user);
+    client.get(posts::index::path()).await; // stores the sign-in
 
     // posts::new takes Current<User>; the layout reads current_user: one user query total.
     let before = app.db.query_count();
@@ -204,12 +205,14 @@ async fn current_user_is_loaded_once_per_page(app: TestApp) -> Result {
     Ok(())
 }
 
-/// Redirects render nothing, so they don't load `current_user`.
+/// Redirects render nothing, so they don't load `current_user`: signing out is one delete.
 #[kiln::test]
 async fn redirects_skip_loading_current_user(app: TestApp) -> Result {
     let user = app.create::<User>().await?;
+    let client = app.sign_in_as(&user);
+    client.get(posts::index::path()).await; // stores the sign-in
     let before = app.db.query_count();
-    app.sign_in_as(&user).delete(sessions::destroy::path()).await.assert_status(303);
-    assert_eq!(app.db.query_count() - before, 0);
+    client.delete(sessions::destroy::path()).await.assert_status(303);
+    assert_eq!(app.db.query_count() - before, 1);
     Ok(())
 }

@@ -55,6 +55,28 @@ pub enum Generate {
         #[arg(long)]
         force: bool,
     },
+    /// A background job in src/jobs, with a test: `kiln g job send_digest`.
+    Job {
+        name: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// An email in src/mail, its HTML and text templates, and a test: `kiln g mail welcome_email`.
+    Mail {
+        name: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Password authentication for `User`: sign up, sign in and out, password resets,
+    /// email confirmation, and a page listing where you're signed in. Adds
+    /// `password_digest` and `confirmed_at` to the User record (with a migration) and
+    /// replaces the starter's demo sign-in.
+    Auth {
+        #[arg(long)]
+        no_migration: bool,
+        #[arg(long)]
+        force: bool,
+    },
     /// A `#[part]` block for a record, and the record's `parts` opt-in: `kiln g part Post`.
     Part {
         record: String,
@@ -86,6 +108,11 @@ impl Generate {
             }
             Generate::Op { name, force } => (op(&name)?, force, None),
             Generate::Part { record, force } => (part(app, &record)?, force, None),
+            Generate::Job { name, force } => (job(app, &name)?, force, None),
+            Generate::Mail { name, force } => (mail(app, &name)?, force, None),
+            Generate::Auth { no_migration, force } => {
+                (auth(app, force)?, force, (!no_migration).then(|| "add_passwords_to_users".to_owned()))
+            }
         };
         for line in plan.apply(&app.root, force)? {
             println!("{line}");
@@ -913,6 +940,261 @@ fn op(name: &str) -> Result<Plan, String> {
     plan.module("src/ops/mod.rs", format!("pub use {name}::{name};"));
     plan.module("src/lib.rs", "pub mod ops;");
     Ok(plan)
+}
+
+/// `kiln g job send_digest`
+fn job(app: &App, name: &str) -> Result<Plan, String> {
+    if !is_snake(name) || !name.contains('_') {
+        return Err("jobs are named `verb_noun`, e.g. `send_digest`".into());
+    }
+    let pascal = pascal(name);
+    let mut plan = Plan::default();
+    plan.file(
+        format!("src/jobs/{name}.rs"),
+        fill(
+            "use kiln::prelude::*;\nuse serde::{Deserialize, Serialize};\n\n/// Enqueue it with `@@Name@@ { .. }.enqueue(&ctx.db).await?` (inside the write's\n/// transaction, so it runs only if the write commits). Fields are stored as JSON: pass ids,\n/// not records, and load fresh data in `perform`. It may run more than once, so make it\n/// safe to repeat.\n#[derive(Job, Serialize, Deserialize, Debug)]\n#[job(queue = \"default\", attempts = 5)]\npub struct @@Name@@ {}\n\nimpl Perform for @@Name@@ {\n    async fn perform(self, ctx: &Ctx) -> Result {\n        let _ = ctx;\n        todo!(\"implement @@Name@@\")\n    }\n}\n",
+            &[("Name", &pascal)],
+        ),
+    );
+    plan.module("src/jobs/mod.rs", format!("mod {name};"));
+    plan.module("src/jobs/mod.rs", format!("pub use {name}::{pascal};"));
+    plan.module("src/lib.rs", "pub mod jobs;");
+    plan.file(
+        format!("tests/{name}.rs"),
+        fill(
+            "use @@krate@@::jobs::@@Name@@;\nuse kiln::{prelude::*, testing::TestApp};\n\n#[kiln::test]\nasync fn @@name@@_runs(app: TestApp) -> Result {\n    @@Name@@ {}.enqueue(&app.db).await?;\n    app.assert_enqueued::<@@Name@@>(1).await?;\n    assert_eq!(app.perform_enqueued_jobs().await?, 1);\n    app.assert_enqueued::<@@Name@@>(0).await?;\n    Ok(())\n}\n",
+            &[("Name", &pascal), ("name", name), ("krate", &app.crate_name())],
+        ),
+    );
+    Ok(plan)
+}
+
+/// `kiln g mail welcome_email`
+fn mail(app: &App, name: &str) -> Result<Plan, String> {
+    if !is_snake(name) {
+        return Err("mail is named in snake_case, e.g. `welcome_email`".into());
+    }
+    let pascal = pascal(name);
+    let values = [("Name", pascal.as_str()), ("name", name), ("krate", &app.crate_name()), ("human", &human(name))];
+    let mut plan = Plan::default();
+    plan.file(
+        format!("src/mail/{name}.rs"),
+        fill(
+            "use kiln::prelude::*;\nuse serde::Serialize;\n\n/// Send it with `@@Name@@ { .. }.deliver_later(&tx).await?` inside the write's transaction.\n/// Every field is available to the templates and the subject.\n#[derive(Mail, Serialize, Debug)]\n#[mail(template = \"mail/@@name@@\", subject = \"@@human@@ for {{ name }}\")]\npub struct @@Name@@ {\n    pub to: String,\n    pub name: String,\n}\n",
+            &values,
+        ),
+    );
+    plan.file(
+        format!("templates/mail/{name}.html.jinja"),
+        "<p>Hi {{ name }},</p>\n<p>Write the message here. Link with absolute URLs: <a href=\"{{ url(\"/\") }}\">{{ url(\"/\") }}</a></p>\n".to_owned(),
+    );
+    plan.file(format!("templates/mail/{name}.txt.jinja"), "Hi {{ name }},\n\nWrite the message here.\n\n{{ url(\"/\") }}\n".to_owned());
+    if !app.path("templates/layouts/mail.html.jinja").exists() {
+        plan.file(
+            "templates/layouts/mail.html.jinja",
+            "<!doctype html>\n<html>\n  <body style=\"font:15px/1.5 system-ui,sans-serif;color:#1c1917\">\n    {{ content }}\n  </body>\n</html>\n".to_owned(),
+        );
+    }
+    plan.module("src/mail/mod.rs", format!("mod {name};"));
+    plan.module("src/mail/mod.rs", format!("pub use {name}::{pascal};"));
+    plan.module("src/lib.rs", "pub mod mail;");
+    plan.file(
+        format!("tests/mail_{name}.rs"),
+        fill(
+            "use @@krate@@::mail::@@Name@@;\nuse kiln::{prelude::*, testing::TestApp};\n\n#[kiln::test]\nasync fn @@name@@_is_delivered(app: TestApp) -> Result {\n    @@Name@@ { to: \"ada@example.com\".into(), name: \"Ada\".into() }.deliver_later(&app.db).await?;\n    app.perform_enqueued_jobs().await?;\n    let mail = app.assert_mailed(\"ada@example.com\", \"Hi Ada\").await?;\n    assert!(mail.text.is_some());\n    Ok(())\n}\n",
+            &values,
+        ),
+    );
+    Ok(plan)
+}
+
+macro_rules! auth_files {
+    ($($path:literal),* $(,)?) => {
+        &[$(($path, include_str!(concat!("../templates/auth/", $path)))),*]
+    };
+}
+
+const AUTH_FILES: &[(&str, &str)] = auth_files![
+    "src/actions/confirmations/show.rs",
+    "src/actions/passwords/create.rs",
+    "src/actions/passwords/edit.rs",
+    "src/actions/passwords/new.rs",
+    "src/actions/passwords/update.rs",
+    "src/actions/registrations/create.rs",
+    "src/actions/registrations/new.rs",
+    "src/actions/sessions/create.rs",
+    "src/actions/sessions/destroy.rs",
+    "src/actions/sessions/new.rs",
+    "src/actions/sign_ins/destroy.rs",
+    "src/actions/sign_ins/destroy_others.rs",
+    "src/actions/sign_ins/index.rs",
+    "src/forms/new_password_form.rs",
+    "src/forms/password_reset_request_form.rs",
+    "src/forms/sign_in_form.rs",
+    "src/forms/sign_up_form.rs",
+    "src/mail/email_confirmation.rs",
+    "src/mail/password_reset.rs",
+    "src/ops/confirm_email.rs",
+    "src/ops/request_password_reset.rs",
+    "src/ops/reset_password.rs",
+    "src/ops/sign_up.rs",
+    "src/views/passwords/edit.rs",
+    "src/views/passwords/new.rs",
+    "src/views/registrations/new.rs",
+    "src/views/sessions/new.rs",
+    "src/views/sign_ins/index.rs",
+    "templates/layouts/mail.html.jinja",
+    "templates/mail/email_confirmation.html.jinja",
+    "templates/mail/email_confirmation.txt.jinja",
+    "templates/mail/password_reset.html.jinja",
+    "templates/mail/password_reset.txt.jinja",
+    "templates/passwords/edit.html.jinja",
+    "templates/passwords/new.html.jinja",
+    "templates/registrations/new.html.jinja",
+    "templates/sessions/new.html.jinja",
+    "templates/sign_ins/index.html.jinja",
+    "tests/auth.rs",
+    "tests/sessions.rs",
+];
+
+/// `kiln g auth`
+fn auth(app: &App, force: bool) -> Result<Plan, String> {
+    let read = |path: &str| std::fs::read_to_string(app.path(path)).ok();
+    let user = read("src/records/user.rs").ok_or("`kiln g auth` adds passwords to the `User` record, but src/records/user.rs is missing")?;
+    if !app.path("src/actions/home/index.rs").exists() {
+        return Err("`kiln g auth` sends people to `home::index` after signing in; add it first (`kiln g action home index GET /`)".into());
+    }
+    if user.contains("password_digest") && !force {
+        return Err("User already has a `password_digest`; auth looks set up (pass --force to regenerate)".into());
+    }
+    let mut plan = Plan::default();
+    if !user.contains("password_digest") {
+        let anchor = "    pub email: String,\n";
+        let fields = "    /// Argon2 hash from `kiln::auth::hash_password`. `#[hidden]`: never serialized.\n    #[hidden]\n    pub password_digest: String,\n    pub confirmed_at: Option<Timestamp>,\n";
+        if !user.contains(anchor) {
+            return Err("couldn't find `pub email: String,` in src/records/user.rs; auth needs an email field".into());
+        }
+        plan.replace("src/records/user.rs", user.replacen(anchor, &format!("{anchor}{fields}"), 1));
+        for (path, value) in [
+            ("src/factories.rs", "password_digest: kiln::auth::hash_password(\"password\")?, confirmed_at: Some(Timestamp::now())"),
+            ("src/seed.rs", "password_digest: kiln::auth::hash_password(\"password\")?, confirmed_at: Some(Timestamp::now())"),
+        ] {
+            if let Some(source) = read(path) {
+                plan.replace(path, add_to_struct_literals(&source, "NewUser {", value));
+            }
+        }
+    }
+    let krate = app.crate_name();
+    for (path, contents) in AUTH_FILES {
+        if *path == "templates/layouts/mail.html.jinja" && app.path(path).exists() {
+            continue;
+        }
+        let contents = fill(contents, &[("krate", &krate)]);
+        if app.path(path).exists() { plan.replace(*path, contents) } else { plan.file(*path, contents) }
+    }
+    if let Some(layout) = read("templates/layouts/app.html.jinja") {
+        let updated = layout
+            .replacen(
+                "<span>{{ current_user.name }}</span>",
+                "<a href=\"{{ path(\"sign_ins::index\") }}\">{{ current_user.name }}</a>",
+                1,
+            )
+            .replacen(
+                "<a href=\"{{ path(\"sessions::new\") }}\">Sign in</a>",
+                "<a href=\"{{ path(\"sessions::new\") }}\">Sign in</a>\n      <a href=\"{{ path(\"registrations::new\") }}\">Sign up</a>",
+                1,
+            );
+        if updated != layout {
+            plan.replace("templates/layouts/app.html.jinja", updated);
+        }
+    }
+    for (module, items) in [
+        ("forms", &["sign_in_form:SignInForm", "sign_up_form:SignUpForm", "password_reset_request_form:PasswordResetRequestForm", "new_password_form:NewPasswordForm"][..]),
+        ("mail", &["email_confirmation:EmailConfirmation", "password_reset:PasswordReset"][..]),
+        ("ops", &["sign_up:sign_up", "confirm_email:confirm_email", "request_password_reset:request_password_reset", "reset_password:reset_password", "reset_password:user_for_reset"][..]),
+    ] {
+        for item in items {
+            let (file, name) = item.split_once(':').expect("file:name");
+            plan.module(format!("src/{module}/mod.rs"), format!("mod {file};"));
+            plan.module(format!("src/{module}/mod.rs"), format!("pub use {file}::{name};"));
+        }
+    }
+    plan.module("src/lib.rs", "pub mod mail;");
+    plan.module("src/lib.rs", "pub mod ops;");
+    for (resource, verbs) in [
+        ("sessions", &["new", "create", "destroy"][..]),
+        ("registrations", &["new", "create"][..]),
+        ("confirmations", &["show"][..]),
+        ("passwords", &["new", "create", "edit", "update"][..]),
+        ("sign_ins", &["index", "destroy", "destroy_others"][..]),
+    ] {
+        plan.module("src/actions/mod.rs", format!("pub mod {resource};"));
+        for verb in verbs {
+            plan.module(format!("src/actions/{resource}/mod.rs"), format!("pub mod {verb};"));
+        }
+    }
+    for (resource, views) in [
+        ("sessions", &["new:New"][..]),
+        ("registrations", &["new:New"][..]),
+        ("passwords", &["new:New", "edit:Edit"][..]),
+        ("sign_ins", &["index:Index"][..]),
+    ] {
+        plan.module("src/views/mod.rs", format!("pub mod {resource};"));
+        for view in views {
+            let (file, name) = view.split_once(':').expect("file:name");
+            plan.module(format!("src/views/{resource}/mod.rs"), format!("mod {file};"));
+            plan.module(format!("src/views/{resource}/mod.rs"), format!("pub use {file}::{name};"));
+        }
+    }
+    // Argon2 is slow unoptimized; a standalone app can speed it up in dev builds.
+    if let Some(manifest) = read("Cargo.toml")
+        && manifest.contains("[workspace]")
+        && !manifest.contains("[profile.dev.package.argon2]")
+    {
+        plan.replace(
+            "Cargo.toml",
+            format!("{}\n# Password hashing is slow without optimizations.\n[profile.dev.package.argon2]\nopt-level = 3\n", manifest.trim_end()),
+        );
+    }
+    Ok(plan)
+}
+
+/// Adds `fields` to every `Name { .. }` struct literal starting with `open` in `source`.
+fn add_to_struct_literals(source: &str, open: &str, fields: &str) -> String {
+    let mut out = String::new();
+    let mut rest = source;
+    while let Some(start) = rest.find(open) {
+        let body_start = start + open.len();
+        let Some(close) = closing_brace(&rest[body_start..]) else { break };
+        let body = rest[body_start..body_start + close].trim_end();
+        let separator = if body.trim().is_empty() || body.ends_with(',') { " " } else { ", " };
+        out.push_str(&rest[..body_start]);
+        out.push_str(body);
+        out.push_str(separator);
+        out.push_str(fields);
+        out.push(' ');
+        rest = &rest[body_start + close..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The offset of the `}` closing a block that's already open, skipping string literals
+/// (`format!("User {n}")`) and nested braces.
+fn closing_brace(text: &str) -> Option<usize> {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for (i, c) in text.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string && depth == 0 => return Some(i),
+            '}' if !in_string => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `kiln g part Post`: a part block, plus `parts` in the record's `#[record(..)]`.

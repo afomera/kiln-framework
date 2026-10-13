@@ -1,0 +1,4 @@
+# `kiln dev` runs these. $APP is the app binary, rebuilt and restarted when src/ changes;
+# other processes (asset watchers) keep running. The web process also runs jobs; to run
+# them separately, use `web: WORKERS=0 $APP serve` and `worker: $APP work`.
+web: $APP serve

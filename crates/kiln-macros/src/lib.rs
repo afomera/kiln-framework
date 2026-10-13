@@ -5,8 +5,11 @@ use proc_macro::TokenStream;
 use syn::{DeriveInput, parse_macro_input};
 
 mod action;
+mod config;
 mod db_enum;
 mod form;
+mod job;
+mod mail;
 mod part;
 mod record;
 mod test;
@@ -21,9 +24,12 @@ mod view;
 /// - a `{Name}Relations` trait with named accessors (`loaded_post.author()`),
 /// - a `New{Name}` insert struct and `impl kiln::Record`.
 ///
+/// `#[hidden]` on a field (a password digest) keeps it out of serialization: templates,
+/// JSON and broadcasts never see it.
+///
 /// Because columns and relations are emitted as module items, each record lives in its own
 /// file named after it (`records/post.rs`).
-#[proc_macro_derive(Record, attributes(record, index))]
+#[proc_macro_derive(Record, attributes(record, index, hidden))]
 pub fn derive_record(input: TokenStream) -> TokenStream {
     record::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
 }
@@ -46,11 +52,36 @@ pub fn derive_db_enum(input: TokenStream) -> TokenStream {
     db_enum::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
+/// Derives `kiln::config::Config`: each field read from its environment variable
+/// (`smtp_url` → `SMTP_URL`), then the encrypted secrets file, then `default`, then (outside
+/// production) `dev_default`. `Option<T>` fields are optional.
+#[proc_macro_derive(Config, attributes(config))]
+pub fn derive_config(input: TokenStream) -> TokenStream {
+    config::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Derives `kiln::jobs::JobInfo` and registers the job with workers:
+/// `#[derive(Job, Serialize, Deserialize)] #[job(queue = "mail", attempts = 5)]`.
+/// Pair it with `impl Perform for MyJob`.
+#[proc_macro_derive(Job, attributes(job))]
+pub fn derive_job(input: TokenStream) -> TokenStream {
+    job::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Derives `kiln::Mail` for an email:
+/// `#[derive(Mail, Serialize)] #[mail(template = "mail/welcome", subject = "Welcome, {{ user.name }}")]`.
+/// Needs a `to: String` field. The body is `templates/mail/welcome.html.jinja` (checked at
+/// compile time); `welcome.txt.jinja` beside it adds a plain-text part.
+#[proc_macro_derive(Mail, attributes(mail))]
+pub fn derive_mail(input: TokenStream) -> TokenStream {
+    mail::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
 /// Derives `kiln::form::FormInput`: parsing and validation of submitted forms.
 ///
 /// Field rules: `#[validate(length(min = 1, max = 200))]`, `range(min = 0, max = 10)`,
 /// `email`, `required` (for `Option` fields). Optional fields are `Option<T>`; checkboxes
-/// are `bool`. Rendering: `#[form(textarea)]`, `#[form(label = "Starts")]`,
+/// are `bool`. Rendering: `#[form(textarea)]`, `#[form(password)]` (never re-rendered), `#[form(label = "Starts")]`,
 /// `#[form(hint = "Shown under the input")]`, `#[form(placeholder = "..")]`.
 #[proc_macro_derive(Form, attributes(validate, form))]
 pub fn derive_form(input: TokenStream) -> TokenStream {

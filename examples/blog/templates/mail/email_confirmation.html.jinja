@@ -1,0 +1,4 @@
+<p>Hi {{ name }},</p>
+<p>Confirm your email address by following this link:</p>
+<p><a href="{{ url(path("confirmations::show", token=token)) }}">Confirm my email</a></p>
+<p>If you didn't sign up, you can ignore this email.</p>

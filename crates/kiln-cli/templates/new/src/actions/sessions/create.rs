@@ -9,6 +9,6 @@ pub async fn create(ctx: Ctx, session: Session, form: Form<SignInForm>) -> Resul
         let form = FormState::from_input(&*input).with_error("email", "doesn't match any user");
         return Err(Error::unprocessable(&New { form }));
     };
-    session.sign_in(&user);
+    session.sign_in(&ctx.db, &user).await?;
     Ok(Redirect::to(home::index::path()).notice(format!("Signed in as {}.", user.name)))
 }

@@ -10,7 +10,12 @@ use crate::records::*;
 
 impl Factory for User {
     async fn build(_app: &TestApp, n: u64) -> Result<NewUser> {
-        Ok(NewUser { name: format!("User {n}"), email: format!("user{n}@example.com") })
+        Ok(NewUser {
+            name: format!("User {n}"),
+            email: format!("user{n}@example.com"),
+            password_digest: kiln::auth::hash_password("password")?,
+            confirmed_at: Some(Timestamp::now()),
+        })
     }
 }
 

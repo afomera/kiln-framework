@@ -1,0 +1,7 @@
+{% set title = "Sign in" %}
+<h1>Sign in</h1>
+{{ form_start(path("sessions::create")) }}
+  {{ fields(form) }}
+  <button>Sign in</button>
+{{ form_end() }}
+<p><a href="{{ path("passwords::new") }}">Forgot your password?</a> · <a href="{{ path("registrations::new") }}">Create an account</a></p>

@@ -19,7 +19,7 @@ use crate::{
 };
 
 type Seed = Box<dyn FnOnce(Db) -> Pin<Box<dyn Future<Output = Result>>>>;
-type Configure = Box<dyn FnOnce(App) -> App>;
+type Configure = Box<dyn FnOnce(App) -> Result<App>>;
 
 pub struct Cli {
     root: PathBuf,
@@ -31,12 +31,17 @@ const HELP: &str = "\
 Usage: <app> [command]
 
 Commands:
-  serve               Run the web server (default). PORT sets the port.
+  serve               Run the web server and a job worker (default). PORT sets the port;
+                      WORKERS=0 leaves jobs to a separate `work` process.
+  work                Run background jobs only (no web server). WORKERS sets concurrency.
+  jobs                Job counts and recent failures
+  jobs retry [id]     Queue failed jobs (one, or all) to run again
   db migrate          Apply pending migrations
   db diff <name>      Write a migration for changes to the record structs
   db status [--json]  Pending migrations and schema drift
   db seed             Run the app's seed function
   db reset            Recreate the development database, migrate and seed
+  secrets ...         Encrypted secrets: init | show | set KEY VALUE | unset KEY | edit
   routes [--json]     The route table
   manifest            Routes and records as JSON
 ";
@@ -44,6 +49,7 @@ Commands:
 impl Cli {
     /// `root` is the app crate's directory: pass `env!("CARGO_MANIFEST_DIR")`.
     pub fn new(root: &str) -> Self {
+        crate::config::set_root(std::path::Path::new(root));
         Self { root: PathBuf::from(root), seed: None, configure: None }
     }
 
@@ -58,7 +64,7 @@ impl Cli {
     }
 
     /// App settings, e.g. `|app| app.sign_in_path("/session/new")`.
-    pub fn configure(mut self, configure: impl FnOnce(App) -> App + 'static) -> Self {
+    pub fn configure(mut self, configure: impl FnOnce(App) -> Result<App> + 'static) -> Self {
         self.configure = Some(Box::new(configure));
         self
     }
@@ -115,6 +121,37 @@ impl Cli {
                 println!("{}", serde_json::to_string_pretty(&manifest()).expect("manifest serializes"));
                 Ok(())
             }
+            ["secrets", rest @ ..] => self.secrets(rest),
+            ["work"] => {
+                let app = self.app().await?;
+                tracing::info!(target: "kiln::jobs", workers = workers(), "working");
+                crate::jobs::work(app.ctx().clone(), workers().max(1)).await;
+                Ok(())
+            }
+            ["jobs"] => {
+                let db = self.db().await?;
+                let counts = db.job_counts().await?;
+                if counts.is_empty() {
+                    println!("No jobs.");
+                }
+                for (status, count) in counts {
+                    println!("{status:>8}  {count}");
+                }
+                for (id, name, attempts, error) in db.failed_jobs().await? {
+                    println!("\nfailed #{id} {name} after {attempts} attempt(s):\n  {error}");
+                }
+                Ok(())
+            }
+            ["jobs", "retry", rest @ ..] => {
+                let id = match rest {
+                    [] => None,
+                    [id] => Some(id.parse().map_err(|_| Error::BadRequest(format!("`{id}` isn't a job id")))?),
+                    _ => return Err(Error::BadRequest("usage: jobs retry [id]".into())),
+                };
+                let queued = self.db().await?.retry_jobs(id).await?;
+                println!("Queued {queued} failed job(s) to run again.");
+                Ok(())
+            }
             ["help" | "--help" | "-h"] => {
                 print!("{HELP}");
                 Ok(())
@@ -124,6 +161,16 @@ impl Cli {
     }
 
     async fn serve(self) -> Result {
+        let app = self.app().await?;
+        if workers() > 0 {
+            tokio::spawn(crate::jobs::work(app.ctx().clone(), workers()));
+        }
+        let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
+        app.serve(&format!("127.0.0.1:{port}")).await
+    }
+
+    /// The configured app, refusing to start with pending migrations.
+    async fn app(self) -> Result<App> {
         let db = self.db().await?;
         let pending = db.pending_migrations(&self.migrations_dir()).await?;
         if !pending.is_empty() {
@@ -134,12 +181,11 @@ impl Cli {
                 names.join("\n")
             )));
         }
-        let mut app = App::new(db).secret_key(self.secret_key()?);
+        let mut app = App::new(db).secret_key(self.secret_key()?).root(&self.root);
         if let Some(configure) = self.configure {
-            app = configure(app);
+            app = configure(app)?;
         }
-        let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
-        app.serve(&format!("127.0.0.1:{port}")).await
+        Ok(app)
     }
 
     /// `KILN_SECRET_KEY`, or in debug builds a key kept in `tmp/development_secret`.
@@ -186,6 +232,54 @@ impl Cli {
             println!("  review: {note}");
         }
         println!("next: review the SQL, then `kiln db migrate`");
+        Ok(())
+    }
+
+    fn secrets(&self, args: &[&str]) -> Result {
+        use crate::config::Secrets;
+        let open = || {
+            Secrets::open(&self.root)?.ok_or_else(|| {
+                Error::Config("no master key: run `kiln secrets init`, or set KILN_MASTER_KEY".into())
+            })
+        };
+        match args {
+            ["init"] => {
+                Secrets::init(&self.root)?;
+                println!("config/secrets.enc is ready; config/master.key holds its key (keep it out of git)");
+            }
+            ["show"] => print!("{}", open()?.to_text()),
+            ["set", key, value] => {
+                let mut secrets = match Secrets::open(&self.root)? {
+                    Some(secrets) => secrets,
+                    None => Secrets::init(&self.root)?,
+                };
+                secrets.values.insert((*key).to_owned(), (*value).to_owned());
+                secrets.save()?;
+                println!("set {key}");
+            }
+            ["unset", key] => {
+                let mut secrets = open()?;
+                secrets.values.remove(*key);
+                secrets.save()?;
+                println!("removed {key}");
+            }
+            ["edit"] => {
+                let mut secrets = open()?;
+                let scratch = std::env::temp_dir().join(format!("kiln-secrets-{}.env", std::process::id()));
+                std::fs::write(&scratch, secrets.to_text())?;
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+                let status = std::process::Command::new(editor).arg(&scratch).status()?;
+                let text = std::fs::read_to_string(&scratch)?;
+                let _ = std::fs::remove_file(&scratch);
+                if !status.success() {
+                    return Err(Error::Config("the editor exited with an error; secrets unchanged".into()));
+                }
+                secrets.replace_from_text(&text);
+                secrets.save()?;
+                println!("saved config/secrets.enc");
+            }
+            _ => return Err(Error::BadRequest("usage: secrets init | show | set KEY VALUE | unset KEY | edit".into())),
+        }
         Ok(())
     }
 
@@ -249,4 +343,9 @@ fn manifest() -> serde_json::Value {
         .collect();
     let records: Vec<_> = records().iter().map(|r| serde_json::json!({ "name": r.name, "table": r.table })).collect();
     serde_json::json!({ "routes": routes, "records": records })
+}
+
+/// Job workers per process: `WORKERS`, default 2.
+fn workers() -> usize {
+    std::env::var("WORKERS").ok().and_then(|w| w.parse().ok()).unwrap_or(2)
 }

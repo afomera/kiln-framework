@@ -1,0 +1,7 @@
+{% set title = "Reset your password" %}
+<h1>Reset your password</h1>
+<p>We'll email you a link to choose a new one.</p>
+{{ form_start(path("passwords::create")) }}
+  {{ fields(form) }}
+  <button>Send the link</button>
+{{ form_end() }}

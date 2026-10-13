@@ -1,0 +1,7 @@
+{% set title = "Create an account" %}
+<h1>Create an account</h1>
+{{ form_start(path("registrations::create")) }}
+  {{ fields(form) }}
+  <button>Sign up</button>
+{{ form_end() }}
+<p>Already have an account? <a href="{{ path("sessions::new") }}">Sign in</a></p>

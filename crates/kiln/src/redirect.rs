@@ -47,3 +47,26 @@ impl IntoResponse for Redirect {
         response
     }
 }
+
+/// A page, or a redirect instead: for actions that can't show their page, such as a reset
+/// link that has expired.
+///
+/// ```ignore
+/// pub async fn edit(..) -> Result<ViewOrRedirect<Edit>> {
+///     let Some(user) = .. else { return Ok(ViewOrRedirect::Redirect(Redirect::to(..).alert(".."))) };
+///     Ok(ViewOrRedirect::View(Edit { .. }))
+/// }
+/// ```
+pub enum ViewOrRedirect<V> {
+    View(V),
+    Redirect(Redirect),
+}
+
+impl<V: IntoResponse> IntoResponse for ViewOrRedirect<V> {
+    fn into_response(self) -> Response {
+        match self {
+            ViewOrRedirect::View(view) => view.into_response(),
+            ViewOrRedirect::Redirect(redirect) => redirect.into_response(),
+        }
+    }
+}

@@ -29,6 +29,10 @@ pub enum Error {
     Forbidden { action: String, record: String },
     #[error("invalid input: {0}")]
     Invalid(crate::form::Errors),
+    #[error("{0}")]
+    Config(String),
+    #[error("{0}")]
+    Job(String),
     #[error("invalid or missing CSRF token")]
     Csrf,
     /// A page rendered in place of the action's normal response, e.g. a form re-rendered
@@ -67,6 +71,8 @@ impl Error {
             Error::Forbidden { .. } => "K1008",
             Error::Rendered { .. } => "K1009",
             Error::Invalid(_) => "K1010",
+            Error::Config(_) => "K1401",
+            Error::Job(_) => "K1501",
             Error::Template(_) => "K1101",
             Error::Database(_) => "K1201",
             Error::Integrity(_) => "K1202",
@@ -132,6 +138,14 @@ impl Error {
                 report.hint("The token rotates on sign-in and sign-out, so reload the form after either.");
             }
             Error::Rendered { .. } => {}
+            Error::Config(message) => {
+                report.message = message.clone();
+                report.hint("Values come from environment variables, then `config/secrets.enc` (`kiln secrets set KEY value`), then the field's `default`.");
+            }
+            Error::Job(message) => {
+                report.message = message.clone();
+                report.hint("Failed jobs stay in `kiln_jobs`: `kiln jobs` lists them and `kiln jobs retry` queues them again.");
+            }
             Error::Invalid(errors) => {
                 report.message = format!("The submitted input is invalid: {errors}.");
                 report.fields = Some(errors.clone());
@@ -155,6 +169,8 @@ impl Error {
             Error::Csrf => "Invalid CSRF token",
             Error::Rendered { .. } => "Rendered",
             Error::Invalid(_) => "Invalid input",
+            Error::Config(_) => "Config error",
+            Error::Job(_) => "Job failed",
         }
     }
 }

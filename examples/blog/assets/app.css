@@ -1,0 +1,15 @@
+/* The blog's styles, served fingerprinted: {{ asset("app.css") }} in the layout. */
+body { font: 16px/1.6 system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1rem; color: #1b1e22; }
+a { color: #a3401b; }
+header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+nav { display: flex; gap: 1rem; align-items: center; }
+form.inline { display: inline; }
+.meta { color: #5a6370; font-size: .9rem; }
+.flash { padding: .5rem .75rem; border-radius: 6px; background: #eef6ee; }
+.flash.alert { background: #fdf0e6; }
+.field { margin: 0 0 1rem; }
+.field label { display: block; font-weight: 600; }
+.field-error, .form-errors { color: #a3401b; font-size: .9rem; margin: .25rem 0 0; }
+.field-with-errors input, .field-with-errors textarea { border-color: #a3401b; }
+input:not([type=checkbox]), textarea, select { width: 100%; font: inherit; padding: .4rem; box-sizing: border-box; }
+li { margin-bottom: .75rem; }

@@ -15,10 +15,15 @@ Run them from the app directory.
 | One more action | `kiln g action posts publish POST /posts/{slug}/publish` |
 | Domain operation | `kiln g op publish_post` |
 | Presentation methods | `kiln g part Post` |
+| Background job | `kiln g job send_digest` |
+| Email | `kiln g mail welcome_email` |
+| Passwords, sign-up, resets, sign-in list | `kiln g auth` (once; replaces the demo sign-in) |
 | Schema change | edit the record struct → `kiln db diff <snake_case_name>` → review the SQL → `kiln db migrate` |
 | Verify | `kiln check` (must end `0 errors`), then `kiln test` |
 | Routes | `kiln routes` |
-| Run | `kiln dev` (port 3000; `kiln dev --port 4000` for another) |
+| Run | `kiln dev` (port 3000; `--port 4000` for another): runs `Procfile.dev`, rebuilds and restarts on src/ changes |
+| Jobs | `kiln jobs` (counts, failures), `kiln jobs retry [id]` |
+| Secrets | `kiln secrets set SMTP_URL smtp://..`, `kiln secrets show` (key in `config/master.key`, never committed) |
 | Fresh database | `kiln db reset` (migrate + seed); sign in at /session/new as ada@example.com |
 
 Field types: `string`, `text`, `integer`, `float`, `bool`, `timestamp`, `ref:<Record>`. A
@@ -47,10 +52,17 @@ generated tests passing.
 | User input | `src/forms/{name}_form.rs` | `#[derive(Form)]` |
 | Permission rule | `src/policies/{record}.rs` | `impl Allows<Update, Post> for User` |
 | Domain logic | `src/ops/{verb}_{noun}.rs` | `pub async fn`, takes `Authorized<_, _>` proofs |
-| App settings | `src/app.rs` | `pub fn configure(app: App) -> App`; used by the server and by `#[kiln::test]` |
+| App settings | `src/app.rs` | `pub fn configure(app: App) -> Result<App>`; used by the server and by `#[kiln::test]` |
+| Config and secrets | `src/config.rs` | `#[derive(Config)] pub struct Config { .. }`, loaded in `configure` with `app.config(Config::load()?)`, read with `ctx.config::<Config>()` |
+| Background job | `src/jobs/{verb}_{noun}.rs` | `#[derive(Job, Serialize, Deserialize)]` + `impl Perform` |
+| Email | `src/mail/{name}.rs` + `templates/mail/{name}.html.jinja` (+ `.txt.jinja`) | `#[derive(Mail, Serialize)] #[mail(template = "mail/{name}", subject = "..")]` with a `to: String` field; wrapped in `layouts/mail.html.jinja` |
+| Dev processes | `Procfile.dev` | `name: command`; `$APP` is the app binary |
 | What templates see of a signed-in record | `src/views/current_user.rs` | `#[derive(Serialize)] struct CurrentUser` + `fn of(&User) -> Self` |
 | Page | `src/views/{resource}/{verb}.rs` + `templates/{resource}/{verb}.html.jinja` | `#[derive(View)]` |
 | JSON shape | `src/views/api/` | `#[derive(Serialize)]` struct; don't serialize records directly |
+| Partial (a fragment for Turbo Streams, broadcasts, includes) | `src/views/{resource}/{name}.rs` + `templates/{resource}/_{name}.html.jinja` | `#[derive(View)] #[view(template = "comments/_comment", layout = none)]` |
+| CSS, JS, images | `assets/` (JS entry point: `assets/application.js`) | linked with `{{ asset("app.css") }}`; JS modules load through the import map |
+| Files served as-is | `public/` (`robots.txt`, `favicon.svg`) | served at the site root when no route matches |
 | Presentation methods | `src/parts/{record}.rs` | `#[part] impl Record` + `#[record(.., parts)]` |
 | Test data | `src/factories.rs` | `impl Factory for Record`; defaults are placeholders, override per test with `app.create_with::<T>(\|n\| n.field = ..)` |
 | Tests | `tests/{resource}.rs` | `#[kiln::test] async fn ..(app: TestApp) -> Result` |
@@ -106,6 +118,53 @@ generated tests passing.
 - **API routes** (`pipeline = Api`) take JSON or form bodies through the same `Form<T>`, return
   JSON problem reports on errors, and never use the session cookie. API auth (tokens) isn't
   available yet.
+- **Turbo is on.** Links and forms navigate without full reloads (Turbo Drive), and kiln's
+  303 redirects and 422 re-renders are what Turbo expects, so normal actions need nothing
+  special. For in-place updates, take `turbo: Turbo` and return
+  `turbo.stream_or_redirect(TurboStream::new().append("comments", Item { comment }), Redirect::to(..))`:
+  Turbo requests get the stream, plain forms the redirect. Stream actions: `append`,
+  `prepend`, `replace`, `update`, `before`, `after`, `remove`, `refresh`. Give list items
+  stable ids (`id="comment_{{ comment.id }}"`) so appends don't duplicate. Frame requests
+  (`<turbo-frame id="new_comment">`) render pages without the layout.
+- **Realtime:** in an op, `tx.broadcast(&post::stream_name(post.id), TurboStream::new().append(..))`
+  inside the same `ctx.db.transaction` as the write (a rolled-back write never
+  broadcasts); in the page, `{{ turbo_stream_from("post:" ~ post.id) }}`. Keep the stream
+  name in one helper (`post::stream_name`) so Rust and templates agree. Broadcasts go to
+  everyone, so their views can't use `current_user`. Reconnecting pages get what they
+  missed; older gaps refresh the page.
+- **Testing Turbo and realtime:** `client.turbo_post_form(..)` submits like Turbo;
+  `app.assert_broadcast("post:1", "text").await?`; `client.read_stream(url, None, |t| ..)`
+  reads a page's stream.
+- **Jobs:** enqueue inside the write's transaction (`Job { post_id }.enqueue(&tx).await?`)
+  so a rolled-back write never runs its job; `enqueue_in(&db, SignedDuration::from_mins(5))`
+  delays it. Store ids, not records, and reload in `perform`; jobs retry with backoff and
+  may run twice, so make them safe to repeat. The web process runs jobs too; for a
+  separate worker use `web: WORKERS=0 $APP serve` and `worker: $APP work` in `Procfile.dev`.
+- **Testing jobs:** `app.assert_enqueued::<SendDigest>(1).await?`, `app.enqueued::<J>()`, then
+  `app.perform_enqueued_jobs().await?` runs them all now (an error if one fails for good).
+- **Sign-ins are database rows** (`kiln_sessions`); the cookie holds only a token.
+  `session.sign_in(&ctx.db, &user).await?` / `session.sign_out::<User>(&ctx.db).await?`;
+  `session.sign_ins(&ctx.db, &*user)` lists devices, `session.revoke(&ctx.db, &*user, id)`
+  signs one out, `kiln::auth::sign_out_everywhere(&ctx.db, &user)` after a password change.
+- **Passwords:** `kiln::auth::hash_password` / `check_password(password, Some(digest))`
+  (pass `None` when the email has no account, so timing doesn't leak). Mark the digest
+  `#[hidden]` on the record so templates and JSON never see it; use `#[form(password)]`
+  inputs, which are never re-rendered. Emailed links use
+  `ctx.tokens().make("purpose", user.id, bound_to, ttl)` and `tokens.read::<User>(..)` +
+  `tokens.matches(token, bound_to)`; binding to the password digest makes a token single-use.
+  Factories and seeds give users the password `password`.
+- **Mail:** `Welcome { to, .. }.deliver_later(&tx).await?` inside the write's transaction;
+  it renders now and a job delivers it. Links in mail must be absolute:
+  `{{ url(path("posts::show", slug=post.slug)) }}` (base: `APP_URL`). `MAIL_URL` picks the
+  transport (`smtp://user:pass@host:587`, `smtps://..`); in development and tests mail
+  goes to the outbox: browse it at `/kiln/mail`. `MAIL_FROM` sets the sender.
+- **Testing mail:** `app.perform_enqueued_jobs().await?`, then
+  `app.assert_mailed("ada@example.com", "Welcome").await?` (returns the message), or
+  `app.outbox()`; `mail.message()?` renders without sending.
+- **Config:** each field reads its env var (`smtp_url` → `SMTP_URL`), then the encrypted
+  secrets, then `#[config(default = "..")]`, then (outside production) `dev_default`.
+  `Option<T>` fields are optional; wrap credentials in `Secret<T>` (prints `[redacted]`;
+  `.expose()` reads it). Missing values fail at boot, all listed at once.
 - **Templates are strict:** an undefined value is an error, not an empty string. Output is
   HTML-escaped, including `/` inside computed strings (`{{ a ~ "/5" }}` renders `&#x2f;`);
   put literal text outside the braces: `{{ book.rating }}/5`.

@@ -1,10 +1,7 @@
 {% set title = "Sign in" %}
 <h1>Sign in</h1>
-<p class="meta">Demo sign-in by email. Password auth arrives with the M2 auth generator.</p>
 {{ form_start(path("sessions::create")) }}
-  {{ field(form.email) }}
+  {{ fields(form) }}
   <button>Sign in</button>
 {{ form_end() }}
-{% if emails %}
-<p class="meta">Try: {% for email in emails %}<code>{{ email }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
-{% endif %}
+<p><a href="{{ path("passwords::new") }}">Forgot your password?</a> · <a href="{{ path("registrations::new") }}">Create an account</a></p>

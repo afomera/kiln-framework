@@ -13,5 +13,5 @@ pub async fn show(ctx: Ctx, user: Option<Current<User>>, slug: Param<String>) ->
 
     let by_line = format!("{} · {} comments", post.author().name, post.comments().len());
     let can_edit = user.is_some_and(|u| u.can::<Update, _>(&post));
-    Ok(Show { post, by_line, can_edit })
+    Ok(Show { post, by_line, can_edit, comment_form: FormState::new() })
 }

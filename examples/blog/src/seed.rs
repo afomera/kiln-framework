@@ -8,9 +8,22 @@ pub async fn seed(db: Db) -> Result {
     if User::query().exists(db).await? {
         return Ok(());
     }
-    let ada = User::insert(NewUser { name: "Ada Lovelace".into(), email: "ada@example.com".into() }).run(db).await?;
-    let grace =
-        User::insert(NewUser { name: "Grace Hopper".into(), email: "grace@example.com".into() }).run(db).await?;
+    let ada = User::insert(NewUser {
+        name: "Ada Lovelace".into(),
+        email: "ada@example.com".into(),
+        password_digest: kiln::auth::hash_password("password")?,
+        confirmed_at: Some(Timestamp::now()),
+    })
+    .run(db)
+    .await?;
+    let grace = User::insert(NewUser {
+        name: "Grace Hopper".into(),
+        email: "grace@example.com".into(),
+        password_digest: kiln::auth::hash_password("password")?,
+        confirmed_at: Some(Timestamp::now()),
+    })
+    .run(db)
+    .await?;
 
     let posts = [
         ("hello-kiln", "Hello, Kiln", "The compiler is the reviewer.", PostStatus::Published, &ada, None),

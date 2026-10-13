@@ -31,7 +31,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             let krate = format_ident!("{}", package.replace('-', "_"));
             quote! { ::#krate::app::configure }
         })
-        .unwrap_or_else(|| quote! { ::core::convert::identity });
+        .unwrap_or_else(|| quote! { ::core::result::Result::Ok });
 
     Ok(quote! {
         #( #attrs )*

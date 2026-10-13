@@ -109,7 +109,8 @@ impl Display for Errors {
 pub struct FieldSpec {
     pub name: &'static str,
     pub label: &'static str,
-    /// `text`, `textarea`, `email`, `number`, `decimal`, `checkbox`, `datetime-local` or `select`.
+    /// `text`, `textarea`, `email`, `password`, `number`, `decimal`, `checkbox`,
+    /// `datetime-local` or `select`.
     pub input: &'static str,
     pub required: bool,
     pub min_length: Option<usize>,
@@ -561,8 +562,9 @@ impl<T: FormInput> Serialize for FormState<T> {
         }
         let mut map = serializer.serialize_map(Some(T::SPECS.len() + 2))?;
         for spec in T::SPECS {
-            let field =
-                Field { value: self.fields.get(spec.name).unwrap_or(""), errors: self.errors.get(spec.name), spec };
+            // Passwords are never sent back to the browser, even when the form re-renders.
+            let value = if spec.input == "password" { "" } else { self.fields.get(spec.name).unwrap_or("") };
+            let field = Field { value, errors: self.errors.get(spec.name), spec };
             map.serialize_entry(spec.name, &field)?;
         }
         // Field names in order, for `{{ fields(form) }}`.

@@ -43,15 +43,19 @@ pub struct TestApp {
 
 impl TestApp {
     pub async fn new(migrations: &Path) -> Result<Self> {
-        Self::configured(migrations, std::convert::identity).await
+        Self::configured(migrations, Ok).await
     }
 
     /// A test app with the app's own settings applied (`#[kiln::test]` passes the app's
     /// `app::configure` when `src/app.rs` exists).
-    pub async fn configured(migrations: &Path, configure: impl FnOnce(App) -> App) -> Result<Self> {
+    pub async fn configured(migrations: &Path, configure: impl FnOnce(App) -> Result<App>) -> Result<Self> {
+        crate::config::use_test_env();
         let db = Db::memory().await?;
         db.migrate(migrations).await?;
-        Ok(Self { app: configure(App::new(db.clone())), db, sequence: AtomicU64::new(0) })
+        // `db/migrations` lives in the app's root, next to `assets/` and `public/`.
+        let root = migrations.parent().and_then(Path::parent).unwrap_or(Path::new("."));
+        crate::config::set_root(root);
+        Ok(Self { app: configure(App::new(db.clone()).root(root))?, db, sequence: AtomicU64::new(0) })
     }
 
     pub fn app(&self) -> &App {
@@ -66,13 +70,91 @@ impl TestApp {
     /// A client signed in as `record` (a `User`, `Merchant`, ... anything that signs in).
     pub fn sign_in_as<U: Record>(&self, record: &U) -> TestClient {
         let client = self.client();
-        client.session_insert(&format!("current.{}", U::TABLE), Value::from(record.id().get()));
+        // The sign-in row is stored on the client's first request (this stays synchronous).
+        *client.pending_sign_in.lock().unwrap_or_else(|e| e.into_inner()) = Some((U::TABLE, record.id().get()));
         client
     }
 
     /// Signed-out GET, as an agent or script would send it.
     pub async fn get(&self, path: impl AsRef<str>) -> TestResponse {
         self.client().get(path).await
+    }
+
+    /// Signed-out GET, as a browser sends it (`Accept: text/html`).
+    pub async fn get_html(&self, path: impl AsRef<str>) -> TestResponse {
+        self.client().get_html(path).await
+    }
+
+    /// Runs every queued job (and any jobs they enqueue) now, ignoring delays. Returns how
+    /// many runs succeeded. Failures retry as usual; a job that uses up its attempts makes
+    /// this an error naming the job.
+    pub async fn perform_enqueued_jobs(&self) -> Result<usize> {
+        crate::jobs::perform_all(self.app.ctx()).await
+    }
+
+    /// Queued jobs of type `J`, oldest first.
+    pub async fn enqueued<J: crate::jobs::JobInfo>(&self) -> Result<Vec<J>> {
+        self.db
+            .queued_payloads(J::NAME)
+            .await?
+            .iter()
+            .map(|p| serde_json::from_str(p).map_err(|e| crate::Error::BadRequest(e.to_string())))
+            .collect()
+    }
+
+    /// Asserts exactly `count` jobs of type `J` are queued.
+    #[track_caller]
+    pub fn assert_enqueued<J: crate::jobs::JobInfo>(&self, count: usize) -> impl Future<Output = Result> + '_ {
+        let caller = std::panic::Location::caller();
+        async move {
+            let queued = self.db.queued_payloads(J::NAME).await?;
+            assert_eq!(queued.len(), count, "{caller}: expected {count} queued `{}` job(s); queued: {queued:#?}", J::NAME);
+            Ok(())
+        }
+    }
+
+    /// Mail delivered so far, oldest first. `deliver_later` queues a job: run
+    /// `app.perform_enqueued_jobs()` first.
+    pub async fn outbox(&self) -> Result<Vec<crate::mail::Message>> {
+        Ok(self.db.outbox().await?.into_iter().map(|(_, m)| m).collect())
+    }
+
+    /// Asserts mail to `to` was delivered with `needle` in its subject or body. Returns it.
+    #[track_caller]
+    pub fn assert_mailed<'a>(&'a self, to: &'a str, needle: &'a str) -> impl Future<Output = Result<crate::mail::Message>> + 'a {
+        let caller = std::panic::Location::caller();
+        async move {
+            let outbox = self.outbox().await?;
+            if let Some(found) = outbox.iter().find(|m| m.to == to && m.contains(needle)) {
+                return Ok(found.clone());
+            }
+            let queued = self.db.queued_payloads("Deliver").await?.len();
+            let hint = if queued > 0 {
+                format!(" ({queued} queued; run `app.perform_enqueued_jobs().await?` first)")
+            } else {
+                String::new()
+            };
+            panic!("{caller}: expected mail to {to} containing {needle:?}{hint}; the outbox has {outbox:#?}")
+        }
+    }
+
+    /// Payloads broadcast on `stream` so far, oldest first.
+    pub async fn broadcasts(&self, stream: &str) -> Result<Vec<String>> {
+        Ok(self.db.stream_messages(stream, 0).await?.into_iter().map(|(_, payload)| payload).collect())
+    }
+
+    /// Asserts something broadcast on `stream` contains `needle`.
+    #[track_caller]
+    pub fn assert_broadcast<'a>(&'a self, stream: &'a str, needle: &'a str) -> impl Future<Output = Result> + 'a {
+        let caller = std::panic::Location::caller();
+        async move {
+            let sent = self.broadcasts(stream).await?;
+            assert!(
+                sent.iter().any(|p| p.contains(needle)),
+                "{caller}: expected a broadcast on `{stream}` containing {needle:?}; broadcasts were {sent:#?}"
+            );
+            Ok(())
+        }
     }
 
     /// A unique number per call, for unique factory values.
@@ -104,14 +186,22 @@ pub trait Factory: Record {
 pub struct TestClient {
     router: axum::Router,
     key: SecretKey,
+    db: Db,
     session: Mutex<Map<String, Value>>,
+    pending_sign_in: Mutex<Option<(&'static str, i64)>>,
 }
 
 const TEST_CSRF: &str = "test-csrf-token";
 
 impl TestClient {
     pub fn new(app: &App) -> Self {
-        Self { router: app.router(), key: app.key().clone(), session: Mutex::default() }
+        Self {
+            router: app.router(),
+            key: app.key().clone(),
+            db: app.ctx().db.clone(),
+            session: Mutex::default(),
+            pending_sign_in: Mutex::default(),
+        }
     }
 
     fn session_insert(&self, key: &str, value: Value) {
@@ -132,6 +222,11 @@ impl TestClient {
         self.form(Method::POST, path.as_ref(), fields, true).await
     }
 
+    /// Submits a form the way Turbo does: accepting `text/vnd.turbo-stream.html`.
+    pub async fn turbo_post_form(&self, path: impl AsRef<str>, fields: &[(&str, &str)]) -> TestResponse {
+        self.form_with_accept(Method::POST, path.as_ref(), fields, Some("text/vnd.turbo-stream.html, text/html")).await
+    }
+
     pub async fn patch_form(&self, path: impl AsRef<str>, fields: &[(&str, &str)]) -> TestResponse {
         self.form(Method::PATCH, path.as_ref(), fields, true).await
     }
@@ -149,9 +244,57 @@ impl TestClient {
         self.form(Method::POST, path.as_ref(), fields, false).await
     }
 
+    /// Opens a Server-Sent Events stream (e.g. a page's `<turbo-stream-source>` URL) and
+    /// reads it until `until` matches what's arrived, or two seconds pass. Returns the text
+    /// received. `last_event_id` resumes like a reconnecting browser.
+    pub async fn read_stream(&self, path: &str, last_event_id: Option<&str>, until: impl Fn(&str) -> bool) -> String {
+        use futures_util::StreamExt;
+        let mut builder = Request::builder().method(Method::GET).uri(path);
+        if let Some(id) = last_event_id {
+            builder = builder.header("last-event-id", id);
+        }
+        let request = builder.body(Body::empty()).expect("valid test request");
+        let response = self.router.clone().oneshot(request).await.expect("router is infallible");
+        let mut body = response.into_body().into_data_stream();
+        let mut text = String::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !until(&text) {
+            match tokio::time::timeout_at(deadline, body.next()).await {
+                Ok(Some(Ok(chunk))) => text.push_str(&String::from_utf8_lossy(&chunk)),
+                _ => break,
+            }
+        }
+        text
+    }
+
     /// Any method, optionally with an `Accept` header.
     pub async fn request(&self, method: Method, path: &str, accept: Option<&str>) -> TestResponse {
         self.send(method, path, accept, None).await
+    }
+
+    async fn form_with_accept(
+        &self,
+        method: Method,
+        path: &str,
+        fields: &[(&str, &str)],
+        accept: Option<&str>,
+    ) -> TestResponse {
+        let (content_type, body) = self.form_body(fields, true);
+        self.send(method, path, accept, Some((content_type, body))).await
+    }
+
+    /// The urlencoded body for `fields`, with the session's CSRF token when `csrf`.
+    fn form_body(&self, fields: &[(&str, &str)], csrf: bool) -> (&'static str, String) {
+        let mut pairs: Vec<(&str, &str)> = fields.to_vec();
+        let token = csrf.then(|| {
+            let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            let token = session.entry("_csrf").or_insert(Value::from(TEST_CSRF));
+            token.as_str().unwrap_or(TEST_CSRF).to_owned()
+        });
+        if let Some(token) = &token {
+            pairs.push(("_csrf", token));
+        }
+        ("application/x-www-form-urlencoded", serde_urlencoded::to_string(&pairs).expect("form fields encode"))
     }
 
     async fn form(&self, method: Method, path: &str, fields: &[(&str, &str)], csrf: bool) -> TestResponse {
@@ -181,7 +324,15 @@ impl TestClient {
         accept: Option<&str>,
         body: Option<(&str, String)>,
     ) -> TestResponse {
-        let mut builder = Request::builder().method(method).uri(path);
+        let pending = self.pending_sign_in.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some((table, id)) = pending {
+            let token = crate::auth::create_sign_in(&self.db, table, id, "kiln test client", "127.0.0.1")
+                .await
+                .expect("storing the test sign-in");
+            self.session_insert(&format!("current.{table}"), Value::from(token));
+            self.session_insert(&format!("current.{table}.seen"), Value::from(jiff::Timestamp::now().as_second()));
+        }
+        let mut builder = Request::builder().method(method).uri(path).header(header::USER_AGENT, "kiln test client");
         if let Some(accept) = accept {
             builder = builder.header(header::ACCEPT, accept);
         }

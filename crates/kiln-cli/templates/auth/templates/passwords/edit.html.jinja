@@ -1,0 +1,7 @@
+{% set title = "Choose a new password" %}
+<h1>Choose a new password</h1>
+<p>You'll be signed out on every other device.</p>
+{{ form_start(path("passwords::update", token=token), method="patch") }}
+  {{ fields(form) }}
+  <button>Change password</button>
+{{ form_end() }}

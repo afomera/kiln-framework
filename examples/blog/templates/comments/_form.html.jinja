@@ -1,0 +1,6 @@
+<turbo-frame id="new_comment">
+  {{ form_start(path("comments::create", slug=post_slug)) }}
+    {{ fields(form) }}
+    <button>Post comment</button>
+  {{ form_end() }}
+</turbo-frame>

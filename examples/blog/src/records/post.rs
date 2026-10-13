@@ -26,6 +26,11 @@ pub enum PostStatus {
     Archived,
 }
 
+/// The realtime stream for a post's page: `{{ turbo_stream_from("post:" ~ post.id) }}`.
+pub fn stream_name(post_id: Id<Post>) -> String {
+    format!("post:{post_id}")
+}
+
 // Scopes are plain associated functions. Columns are in scope as `status`, `published_at`, ...
 impl Post {
     pub fn published() -> Query<Post> {

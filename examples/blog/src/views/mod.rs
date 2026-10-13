@@ -1,5 +1,9 @@
 pub mod api;
 pub mod bookmarks;
+pub mod comments;
 pub mod current_user;
+pub mod passwords;
 pub mod posts;
+pub mod registrations;
 pub mod sessions;
+pub mod sign_ins;

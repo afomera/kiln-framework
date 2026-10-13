@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 syn = { version = "2", features = ["full"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
@@ -34,3 +34,11 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
+chacha20poly1305 = "0.10"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
+argon2 = "0.5"
+
+# Password hashing is slow without optimizations.
+[profile.dev.package.argon2]
+opt-level = 3

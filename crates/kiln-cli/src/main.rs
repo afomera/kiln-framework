@@ -5,6 +5,7 @@
 
 mod app;
 mod check;
+mod dev;
 mod edit;
 mod generate;
 mod names;
@@ -42,6 +43,17 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Encrypted secrets: `secrets init | show | set KEY VALUE | unset KEY | edit`.
+    Secrets {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Background jobs: `jobs` (counts and failures), `jobs retry [id]`, `jobs work`
+    /// (a worker without the web server).
+    Jobs {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Print the route table.
     Routes {
         #[arg(long)]
@@ -58,7 +70,8 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Run the development server (http://127.0.0.1:3000 unless --port or PORT says otherwise).
+    /// Run the app for development: builds it, runs `Procfile.dev` (default `web: $APP
+    /// serve`), and rebuilds and restarts on changes to src/. Port 3000 unless --port or PORT.
     Dev {
         /// Port to listen on (default 3000, or the PORT environment variable).
         #[arg(long)]
@@ -79,15 +92,19 @@ fn main() -> ExitCode {
             Command::Db { args } => {
                 app.run_binary(&[&["db"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
             }
+            Command::Secrets { args } => {
+                app.run_binary(&[&["secrets"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
+            }
+            Command::Jobs { args } => match args.first().map(String::as_str) {
+                Some("work") => app.exec_cargo(&["run", "--quiet", "--", "work"], &[]),
+                _ => app.run_binary(&[&["jobs"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat()),
+            },
             Command::Routes { json } => app.run_binary(if json { &["routes", "--json"] } else { &["routes"] }),
             Command::Check { format } => check::run(&app, format == "json"),
             Command::Test { args } => {
                 app.cargo(&[&["test", "--quiet"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
             }
-            Command::Dev { port } => {
-                let env: Vec<(&str, String)> = port.map(|p| ("PORT", p.to_string())).into_iter().collect();
-                app.exec_cargo(&["run", "--quiet", "--", "serve"], &env)
-            }
+            Command::Dev { port } => dev::run(&app, port),
         }
     })();
     match result {

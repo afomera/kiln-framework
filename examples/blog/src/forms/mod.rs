@@ -1,9 +1,17 @@
 mod bookmark_form;
+mod comment_form;
+mod new_password_form;
+mod password_reset_request_form;
 mod post_form;
 mod sign_in_form;
+mod sign_up_form;
 mod subscription_form;
 
 pub use bookmark_form::BookmarkForm;
+pub use comment_form::CommentForm;
+pub use new_password_form::NewPasswordForm;
+pub use password_reset_request_form::PasswordResetRequestForm;
 pub use post_form::{PostForm, slugify};
 pub use sign_in_form::SignInForm;
+pub use sign_up_form::SignUpForm;
 pub use subscription_form::SubscriptionForm;

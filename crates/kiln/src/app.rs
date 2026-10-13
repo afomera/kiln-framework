@@ -11,10 +11,12 @@ use serde::Serialize;
 
 use crate::{
     BoxFuture, Db, Error, Record, Result,
+    assets::{self, Assets},
     error_page::{self, ErrorReport, RequestInfo},
-    routes, routes_table,
+    realtime, routes, routes_table,
     routing::route_for,
     session::{self, COOKIE, Flash, REQUEST, RequestScope, SecretKey, Session, tokens_match},
+    turbo::{self, PendingStream, Turbo},
     view::PendingRender,
 };
 
@@ -22,6 +24,31 @@ use crate::{
 #[derive(Clone)]
 pub struct Ctx {
     pub db: Db,
+    key: SecretKey,
+    provided: Arc<std::collections::HashMap<std::any::TypeId, Arc<dyn std::any::Any + Send + Sync>>>,
+}
+
+impl Ctx {
+    /// Signed, expiring tokens for links in email (password resets, confirmations).
+    pub fn tokens(&self) -> crate::auth::Tokens {
+        crate::auth::Tokens::new(self.key.clone())
+    }
+
+    /// The app's config, registered with `App::config` in `src/app.rs`.
+    pub fn config<C: Send + Sync + 'static>(&self) -> &C {
+        self.get::<C>()
+    }
+
+    /// A value registered with `App::provide` (or `App::config`) in `src/app.rs`, e.g. an
+    /// API client. Panics, naming the type, if it was never registered.
+    pub fn get<T: Send + Sync + 'static>(&self) -> &T {
+        self.provided
+            .get(&std::any::TypeId::of::<T>())
+            .and_then(|value| value.downcast_ref::<T>())
+            .unwrap_or_else(|| {
+                panic!("`{}` isn't registered; add `app.provide(..)` in src/app.rs", std::any::type_name::<T>())
+            })
+    }
 }
 
 impl FromRequestParts<Ctx> for Ctx {
@@ -36,6 +63,7 @@ pub struct App {
     ctx: Ctx,
     key: SecretKey,
     sign_ins: Vec<Arc<dyn SignIn>>,
+    assets: Option<Assets>,
 }
 
 /// A record type people sign in as, registered with [`App::signs_in`].
@@ -93,12 +121,15 @@ fn record_variable<T>() -> String {
 
 struct Shared {
     key: SecretKey,
+    db: Db,
     sign_ins: Arc<[Arc<dyn SignIn>]>,
+    assets: Option<Assets>,
 }
 
 #[derive(Clone)]
 struct RouteState {
     ctx: Ctx,
+    key: SecretKey,
     sign_ins: Arc<[Arc<dyn SignIn>]>,
 }
 
@@ -109,10 +140,33 @@ impl App {
     /// An app with a random session key, so sessions don't survive a restart.
     /// `kiln::Cli` sets a persistent key.
     pub fn new(db: Db) -> Self {
-        Self { ctx: Ctx { db }, key: SecretKey::generate(), sign_ins: vec![] }
+        let key = SecretKey::generate();
+        Self { ctx: Ctx { db, key: key.clone(), provided: Arc::default() }, key, sign_ins: vec![], assets: None }
+    }
+
+    /// The app's directory, so `assets/` and `public/` are served. `kiln::Cli` and
+    /// `#[kiln::test]` set it.
+    pub fn root(mut self, root: impl AsRef<std::path::Path>) -> Self {
+        self.assets = Some(Assets::at(root.as_ref()));
+        self
+    }
+
+    /// Registers the app's config so actions read it with `ctx.config::<Config>()`.
+    pub fn config<C: Send + Sync + 'static>(self, config: C) -> Self {
+        self.provide(config)
+    }
+
+    /// Registers a value (an API client, a service) that actions read with `ctx.get::<T>()`.
+    /// One value per type, built once at boot.
+    pub fn provide<T: Send + Sync + 'static>(mut self, value: T) -> Self {
+        let mut provided = (*self.ctx.provided).clone();
+        provided.insert(std::any::TypeId::of::<T>(), Arc::new(value));
+        self.ctx.provided = Arc::new(provided);
+        self
     }
 
     pub fn secret_key(mut self, key: SecretKey) -> Self {
+        self.ctx.key = key.clone();
         self.key = key;
         self
     }
@@ -156,13 +210,14 @@ impl App {
     /// error pages.
     pub fn router(&self) -> axum::Router {
         let sign_ins: Arc<[Arc<dyn SignIn>]> = self.sign_ins.clone().into();
-        let route_state = RouteState { ctx: self.ctx.clone(), sign_ins: sign_ins.clone() };
+        let route_state = RouteState { ctx: self.ctx.clone(), key: self.key.clone(), sign_ins: sign_ins.clone() };
         let routes = routes()
             .into_iter()
             .fold(axum::Router::<Ctx>::new(), |router, route| (route.mount)(router))
             .route_layer(middleware::from_fn_with_state(route_state, route_checks))
             .with_state(self.ctx.clone());
-        let shared = Arc::new(Shared { key: self.key.clone(), sign_ins });
+        let shared =
+            Arc::new(Shared { key: self.key.clone(), db: self.ctx.db.clone(), sign_ins, assets: self.assets.clone() });
         // Method override must happen before routing, so request handling wraps the whole
         // router instead of each route.
         axum::Router::new().fallback_service(routes).layer(middleware::from_fn_with_state(shared, handle_request))
@@ -171,7 +226,7 @@ impl App {
     pub async fn serve(self, addr: &str) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         println!("{}\n\nkiln listening on http://{addr}", routes_table());
-        axum::serve(listener, self.router()).await?;
+        axum::serve(listener, self.router().into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
         Ok(())
     }
 }
@@ -202,7 +257,7 @@ async fn route_checks(State(state): State<RouteState>, mut request: Request, nex
         // API routes ignore the cookie session. CSRF protection relies on it, so an API
         // route authenticated by cookie would be forgeable from other sites.
         request.extensions_mut().insert(Session::default());
-        Some(RequestScope::default())
+        Some(RequestScope { key: Some(state.key.clone()), ..RequestScope::default() })
     } else {
         let session = request.extensions().get::<Session>().cloned().unwrap_or_default();
         let mutating = !matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS);
@@ -211,9 +266,10 @@ async fn route_checks(State(state): State<RouteState>, mut request: Request, nex
                 let sent = request.extensions().get::<SubmittedCsrf>().and_then(|s| s.0.as_deref());
                 matches!((sent, session.existing_csrf_token()), (Some(sent), Some(expected)) if tokens_match(sent, &expected))
             };
+        let frame = Turbo::from_parts_of(&request).frame().is_some();
         csrf_ok.then(|| {
             let flash = session.take_flash();
-            RequestScope { session, flash, cache: Default::default() }
+            RequestScope { session, flash, cache: Default::default(), frame, key: Some(state.key.clone()) }
         })
     };
 
@@ -236,11 +292,18 @@ async fn route_checks(State(state): State<RouteState>, mut request: Request, nex
 /// Views are rendered here, after the action, so the `current_*` values their templates
 /// use can be loaded first (and reused if the action already loaded them).
 async fn render_page(mut response: Response, state: &RouteState, scope: &RequestScope) -> Response {
-    let Some(page) = response.extensions_mut().remove::<PendingRender>() else { return response };
-    let used = match page.variables() {
-        Ok(used) => used,
-        Err(e) => return e.into_response(),
-    };
+    let page = response.extensions_mut().remove::<PendingRender>();
+    let stream = response.extensions_mut().remove::<PendingStream>();
+    if page.is_none() && stream.is_none() {
+        return response;
+    }
+    let mut used = std::collections::HashSet::new();
+    for render in page.iter().chain(stream.iter().flat_map(|s| s.0.contents())) {
+        match render.variables() {
+            Ok(vars) => used.extend(vars),
+            Err(e) => return e.into_response(),
+        }
+    }
     for sign_in in state.sign_ins.iter() {
         let value = if used.contains(sign_in.variable()) {
             match sign_in.load(&scope.session, &state.ctx.db).await {
@@ -252,11 +315,17 @@ async fn render_page(mut response: Response, state: &RouteState, scope: &Request
         };
         scope.cache.templates.lock().unwrap_or_else(|e| e.into_inner()).insert(sign_in.variable().to_owned(), value);
     }
-    match page.render() {
+    let (rendered, content_type) = match (page, stream) {
+        (Some(page), _) if scope.frame => (page.render_without_layout(), "text/html; charset=utf-8"),
+        (Some(page), _) => (page.render(), "text/html; charset=utf-8"),
+        (None, Some(stream)) => (stream.0.render(), turbo::STREAM_MIME),
+        (None, None) => unreachable!("checked above"),
+    };
+    match rendered {
         Ok(html) => {
             let (mut parts, _) = response.into_parts();
             parts.headers.remove(header::CONTENT_LENGTH);
-            parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+            parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
             Response::from_parts(parts, Body::from(html))
         }
         Err(e) => e.into_response(),
@@ -277,6 +346,25 @@ fn cookie<'a>(parts: &'a Parts, name: &str) -> Option<&'a str> {
 /// pipeline: session, flash, CSRF, `_method` override, and error pages (HTML for
 /// browsers, Markdown otherwise).
 async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, next: Next) -> Response {
+    // Static files skip sessions and logging: they never set cookies.
+    if matches!(*request.method(), Method::GET | Method::HEAD) {
+        let path = request.uri().path();
+        let file = if let Some(name) = path.strip_prefix("/assets/") {
+            shared.assets.as_ref().and_then(|a| a.serve_asset(name))
+        } else if path.starts_with("/kiln/streams/") {
+            let last_event_id = request.headers().get("last-event-id").and_then(|v| v.to_str().ok());
+            realtime::serve(shared.db.clone(), &shared.key, path, last_event_id).await
+        } else if path.starts_with("/kiln/mail") {
+            crate::mail::serve_outbox(&shared.db, path).await
+        } else if path.starts_with("/kiln/") {
+            assets::serve_kiln(path)
+        } else {
+            None
+        };
+        if let Some(file) = file {
+            return file;
+        }
+    }
     let started = Instant::now();
     let (mut parts, body) = request.into_parts();
     let path = parts.uri.path().to_owned();
@@ -288,6 +376,7 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
         .is_some_and(|accept| accept.contains("text/html"));
 
     let session = cookie(&parts, COOKIE).and_then(|c| shared.key.verify(c)).map(Session::from_data).unwrap_or_default();
+    session.set_client(header_str(&parts, header::USER_AGENT).to_owned(), client_ip(&parts));
 
     // Form bodies are buffered so `_method` and `_csrf` can be read before routing.
     let mutating = !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS);
@@ -330,6 +419,14 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
         session.set_flash(&flash);
     }
     let action = response.extensions().get::<ActionName>().map(|a| a.0);
+    // No route matched a GET: try `public/`.
+    if action.is_none()
+        && response.status() == StatusCode::NOT_FOUND
+        && matches!(method, Method::GET | Method::HEAD)
+        && let Some(file) = shared.assets.as_ref().and_then(|a| a.serve_public(&path))
+    {
+        return file;
+    }
     let status = response.status().as_u16();
     let elapsed = started.elapsed();
     let report = response
@@ -385,4 +482,21 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
         }
     }
     response
+}
+
+fn header_str<'a>(parts: &'a axum::http::request::Parts, name: header::HeaderName) -> &'a str {
+    parts.headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("")
+}
+
+/// The client's address: the first `X-Forwarded-For` hop (set by a proxy in production),
+/// else the connection's peer.
+fn client_ip(parts: &axum::http::request::Parts) -> String {
+    if let Some(forwarded) = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        return forwarded.split(',').next().unwrap_or("").trim().to_owned();
+    }
+    parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0.ip().to_string())
+        .unwrap_or_default()
 }

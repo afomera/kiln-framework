@@ -80,6 +80,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             attr.parse_nested_meta(|meta| parse_rules(meta, &mut rules))?;
         }
         let mut textarea = false;
+        let mut password = false;
         let mut label = humanize(&field_name);
         let mut hint: Option<String> = None;
         let mut placeholder: Option<String> = None;
@@ -87,6 +88,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("textarea") {
                     textarea = true;
+                } else if meta.path.is_ident("password") {
+                    password = true;
                 } else if meta.path.is_ident("label") {
                     label = meta.value()?.parse::<syn::LitStr>()?.value();
                 } else if meta.path.is_ident("hint") {
@@ -95,7 +98,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                     placeholder = Some(meta.value()?.parse::<syn::LitStr>()?.value());
                 } else {
                     return Err(
-                        meta.error("expected `textarea`, `label = \"..\"`, `hint = \"..\"` or `placeholder = \"..\"`")
+                        meta.error("expected `textarea`, `password`, `label = \"..\"`, `hint = \"..\"` or `placeholder = \"..\"`")
                     );
                 }
                 Ok(())
@@ -104,6 +107,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         let email = rules.iter().any(|r| matches!(r, Rule::Email));
         let input = if textarea {
             quote!("textarea")
+        } else if password {
+            quote!("password")
         } else if email {
             quote!("email")
         } else {

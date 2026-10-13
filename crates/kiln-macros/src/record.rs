@@ -53,6 +53,8 @@ struct Field<'a> {
     ident: &'a Ident,
     ty: &'a Type,
     index: Index,
+    /// `#[hidden]`: stored, but never serialized (templates, JSON, broadcasts).
+    hidden: bool,
 }
 
 impl Field<'_> {
@@ -125,7 +127,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 })?;
             }
         }
-        fields.push(Field { ident, ty: &f.ty, index });
+        let hidden = f.attrs.iter().any(|a| a.path().is_ident("hidden"));
+        fields.push(Field { ident, ty: &f.ty, index, hidden });
     }
 
     if !fields.iter().any(|f| f.ident == "id") {
@@ -213,11 +216,11 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
     });
 
-    let serialize_fields = fields.iter().map(|f| {
+    let serialize_fields = fields.iter().filter(|f| !f.hidden).map(|f| {
         let ident = f.ident;
         quote! { ::kiln::__private::serde::ser::SerializeStruct::serialize_field(&mut __kiln_state, stringify!(#ident), &self.#ident)?; }
     });
-    let field_count = fields.len();
+    let field_count = fields.iter().filter(|f| !f.hidden).count();
     let (part_count, serialize_parts, parts_enabled) = if parts {
         (
             quote! { + <Self as ::kiln::Part>::NAMES.len() },

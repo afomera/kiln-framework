@@ -53,6 +53,11 @@ impl PendingRender {
         render_value(self.root, self.template, self.layout, self.context.clone())
     }
 
+    /// Just the page: for Turbo Frame requests and stream content.
+    pub fn render_without_layout(&self) -> Result<String> {
+        render_value(self.root, self.template, None, self.context.clone())
+    }
+
     /// Variables read by the page, its layout, and everything they include or extend.
     pub(crate) fn variables(&self) -> Result<HashSet<String>> {
         let env = environment(self.root);
@@ -97,6 +102,11 @@ pub fn render<S: Serialize + ?Sized>(
     context: &S,
 ) -> Result<String> {
     render_value(root, template, layout, Value::from_serialize(context))
+}
+
+/// Renders a template string (a mail subject) with `context`.
+pub(crate) fn render_str<S: Serialize + ?Sized>(root: &'static str, source: &str, context: &S) -> Result<String> {
+    Ok(environment(root).render_str(source, context)?)
 }
 
 fn render_value(root: &'static str, template: &str, layout: Option<&str>, context: Value) -> Result<String> {
@@ -197,8 +207,25 @@ fn build_environment(root: &'static str) -> Environment<'static> {
     env.set_lstrip_blocks(true);
     env.set_auto_escape_callback(|name| if name.contains(".html") { AutoEscape::Html } else { AutoEscape::None });
     env.add_function("path", path);
+    // Absolute links, for emails: `{{ url(path("posts::show", post.slug)) }}`.
+    env.add_function("url", |path: String| {
+        let url = crate::mail::absolute_url(&path);
+        Value::from_safe_string(url.replace('"', "%22").replace('<', "%3C").replace('>', "%3E"))
+    });
     env.add_function("csrf_field", csrf_field);
     env.add_function("csrf_token", csrf_token);
+    env.add_function("csrf_meta", csrf_meta);
+    env.add_function("turbo_stream_from", turbo_stream_from);
+    let assets = crate::assets::Assets::beside_templates(root);
+    let lookup = assets.clone();
+    // Asset URLs are safe to emit unescaped (like `path()`), so `/` isn't turned into `&#x2f;`.
+    env.add_function("asset", move |name: String| -> std::result::Result<Value, minijinja::Error> {
+        let url = lookup.url(&name).ok_or_else(|| {
+            minijinja::Error::new(ErrorKind::InvalidOperation, format!("asset `{name}` not found in assets/"))
+        })?;
+        Ok(Value::from_safe_string(url.replace('"', "%22").replace('<', "%3C").replace('>', "%3E")))
+    });
+    env.add_function("javascript_importmap", move || javascript_importmap(&assets));
     env.add_filter("datetime", datetime);
     env.add_function("form_start", forms::form_start);
     env.add_function("form_end", forms::form_end);
@@ -227,6 +254,47 @@ fn datetime(value: Value, format: Option<String>) -> std::result::Result<String,
         minijinja::Error::new(ErrorKind::InvalidOperation, format!("datetime: `{value}` isn't a timestamp ({e})"))
     })?;
     Ok(ts.strftime(format.as_deref().unwrap_or("%b %-d, %Y %H:%M UTC")).to_string())
+}
+
+/// Escapes text for an HTML attribute value.
+pub(crate) fn escape_attribute(s: &str) -> String {
+    s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// `{{ turbo_stream_from("post:" ~ post.id) }}`: subscribes the page to broadcasts on a
+/// stream. The name is signed, so pages can only listen to streams they were rendered with.
+fn turbo_stream_from(stream: String) -> std::result::Result<Value, minijinja::Error> {
+    let key = session::current_scope().and_then(|scope| scope.key).ok_or_else(|| {
+        minijinja::Error::new(
+            ErrorKind::InvalidOperation,
+            "turbo_stream_from() needs a request; render the view from an action",
+        )
+    })?;
+    Ok(Value::from_safe_string(crate::realtime::source_tag(&key, &stream)))
+}
+
+/// `{{ csrf_meta() }}`: in the layout's `<head>`, so Turbo and other JS send the token as
+/// an `X-CSRF-Token` header.
+fn csrf_meta() -> std::result::Result<Value, minijinja::Error> {
+    let token = csrf_token()?;
+    Ok(Value::from_safe_string(format!(
+        "<meta name=\"csrf-param\" content=\"_csrf\">\n<meta name=\"csrf-token\" content=\"{token}\">"
+    )))
+}
+
+/// `{{ javascript_importmap() }}`: in the layout's `<head>`. Maps `@hotwired/turbo` and
+/// every `assets/**/*.js` file, then loads Turbo and `assets/application.js`.
+fn javascript_importmap(assets: &crate::assets::Assets) -> Value {
+    let imports = assets.importmap();
+    let json = serde_json::json!({ "imports": imports }).to_string().replace("</", "<\\/");
+    let mut html = format!("<script type=\"importmap\">{json}</script>\n");
+    html.push_str(&format!("<link rel=\"modulepreload\" href=\"{}\">\n", crate::assets::turbo_url()));
+    html.push_str("<script type=\"module\">import \"@hotwired/turbo\";");
+    if assets.has_application_js() {
+        html.push_str(" import \"application\";");
+    }
+    html.push_str("</script>");
+    Value::from_safe_string(html)
 }
 
 /// `{{ csrf_field() }}`: the hidden input every POST form needs.
