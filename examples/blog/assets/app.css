@@ -1,15 +1,78 @@
-/* The blog's styles, served fingerprinted: {{ asset("app.css") }} in the layout. */
-body { font: 16px/1.6 system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1rem; color: #1b1e22; }
-a { color: #a3401b; }
-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
-nav { display: flex; gap: 1rem; align-items: center; }
+/* The blog's styles, served fingerprinted: {{ asset("app.css") }} in the layout.
+   Colors are tokens; the dark palette applies when the OS prefers dark (unless the reader
+   chose light) or when they choose dark with the switcher in the header. */
+:root {
+  color-scheme: light;
+  --bg: oklch(98.8% 0.004 80);
+  --surface: oklch(100% 0 0);
+  --ink: oklch(23% 0.012 60);
+  --muted: oklch(50% 0.012 60);
+  --line: oklch(89% 0.008 70);
+  --accent: oklch(50% 0.15 40);
+  --accent-soft: oklch(94% 0.035 48);
+  --notice-bg: oklch(95% 0.04 150);
+  --alert-bg: oklch(95% 0.04 60);
+  --danger: oklch(52% 0.17 28);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: oklch(17% 0.006 60);
+    --surface: oklch(21% 0.007 60);
+    --ink: oklch(92% 0.008 70);
+    --muted: oklch(70% 0.01 70);
+    --line: oklch(32% 0.008 60);
+    --accent: oklch(73% 0.13 48);
+    --accent-soft: oklch(31% 0.05 45);
+    --notice-bg: oklch(29% 0.04 150);
+    --alert-bg: oklch(30% 0.05 60);
+    --danger: oklch(70% 0.15 28);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: oklch(17% 0.006 60);
+  --surface: oklch(21% 0.007 60);
+  --ink: oklch(92% 0.008 70);
+  --muted: oklch(70% 0.01 70);
+  --line: oklch(32% 0.008 60);
+  --accent: oklch(73% 0.13 48);
+  --accent-soft: oklch(31% 0.05 45);
+  --notice-bg: oklch(29% 0.04 150);
+  --alert-bg: oklch(30% 0.05 60);
+  --danger: oklch(70% 0.15 28);
+}
+
+body { font: 16px/1.6 system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1rem; color: var(--ink); background: var(--bg); }
+a { color: var(--accent); }
+header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+nav { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
 form.inline { display: inline; }
-.meta { color: #5a6370; font-size: .9rem; }
-.flash { padding: .5rem .75rem; border-radius: 6px; background: #eef6ee; }
-.flash.alert { background: #fdf0e6; }
+.meta { color: var(--muted); font-size: .9rem; }
+.flash { padding: .5rem .75rem; border-radius: 6px; background: var(--notice-bg); }
+.flash.alert { background: var(--alert-bg); }
 .field { margin: 0 0 1rem; }
-.field label { display: block; font-weight: 600; }
-.field-error, .form-errors { color: #a3401b; font-size: .9rem; margin: .25rem 0 0; }
-.field-with-errors input, .field-with-errors textarea { border-color: #a3401b; }
-input:not([type=checkbox]), textarea, select { width: 100%; font: inherit; padding: .4rem; box-sizing: border-box; }
+.field label { display: block; font-weight: 600; margin-bottom: .25rem; }
+.field-hint { color: var(--muted); font-size: .9rem; margin: .25rem 0 0; }
+.field-error, .form-errors { color: var(--danger); font-size: .9rem; margin: .25rem 0 0; }
+.field-with-errors :is(input, textarea, select) { border-color: var(--danger); }
+input:not([type=checkbox]), textarea, select {
+  width: 100%; font: inherit; padding: .45rem .6rem; box-sizing: border-box;
+  color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+}
+:is(input, textarea, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button {
+  font: inherit; font-size: .95rem; padding: .35rem .8rem; border-radius: 6px; cursor: pointer;
+  color: var(--ink); background: var(--surface); border: 1px solid var(--line);
+}
+button:hover { border-color: var(--accent); }
 li { margin-bottom: .75rem; }
+
+/* Theme switcher */
+.theme-switcher { display: inline-flex; padding: 2px; gap: 2px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }
+.theme-switcher button { display: grid; place-items: center; width: 1.9rem; height: 1.9rem; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--muted); }
+.theme-switcher button:hover { color: var(--ink); }
+.theme-switcher button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.theme-switcher svg { width: 1rem; height: 1rem; }

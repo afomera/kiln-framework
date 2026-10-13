@@ -10,6 +10,7 @@ use crate::{actions::posts, records::*};
 pub struct PostJson {
     pub slug: String,
     pub title: String,
+    /// Sanitized HTML from the rich text editor.
     pub body: String,
     pub author: String,
     pub published_at: Option<Timestamp>,
@@ -21,7 +22,7 @@ impl From<&Loaded<Post, (post::author,)>> for PostJson {
         Self {
             slug: post.slug.clone(),
             title: post.title.clone(),
-            body: post.body.clone(),
+            body: post.body.as_html().to_owned(),
             author: post.author().name.clone(),
             published_at: post.published_at,
             url: posts::show::path(&post.slug),

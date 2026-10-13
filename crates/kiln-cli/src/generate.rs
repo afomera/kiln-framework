@@ -186,6 +186,8 @@ const RUST_KEYWORDS: &[&str] = &[
 enum Kind {
     String,
     Text,
+    /// Formatted text in the rich text editor (`kiln::RichText`).
+    RichText,
     Integer,
     Float,
     Bool,
@@ -202,6 +204,8 @@ struct Field {
     target: Option<String>,
     /// For refs: the related record's `name` or `title` column, shown instead of the id.
     target_label: Option<String>,
+    /// `rich_text?`: the editor may be left empty (no `length` rule).
+    may_be_empty: bool,
 }
 
 impl Field {
@@ -236,6 +240,7 @@ impl Field {
         let kind = match ty {
             "string" => Kind::String,
             "text" => Kind::Text,
+            "rich_text" | "richtext" => Kind::RichText,
             "integer" | "int" => Kind::Integer,
             "float" => Kind::Float,
             "bool" | "boolean" => Kind::Bool,
@@ -243,14 +248,23 @@ impl Field {
             "ref" => Kind::Ref,
             other => {
                 return Err(format!(
-                    "`{spec}`: unknown type `{other}`; use string, text, integer, float, bool, timestamp or ref:<Record>"
+                    "`{spec}`: unknown type `{other}`; use string, text, rich_text, integer, float, bool, timestamp or ref:<Record>"
                 ));
             }
         };
         if kind == Kind::Bool && optional {
             return Err(format!("`{spec}`: bool fields can't be optional; an unchecked box is false"));
         }
-        Ok(Self { name, kind, optional, target, target_label: None })
+        // An empty editor is an empty RichText, so `?` means "may be left empty", not Option.
+        let rich_optional = kind == Kind::RichText && optional;
+        Ok(Self {
+            name,
+            kind,
+            optional: optional && !rich_optional,
+            target,
+            target_label: None,
+            may_be_empty: rich_optional,
+        })
     }
 
     fn column(&self) -> String {
@@ -260,6 +274,7 @@ impl Field {
     fn base_type(&self) -> String {
         match self.kind {
             Kind::String | Kind::Text => "String".into(),
+            Kind::RichText => "RichText".into(),
             Kind::Integer => "i64".into(),
             Kind::Float => "f64".into(),
             Kind::Bool => "bool".into(),
@@ -283,7 +298,7 @@ impl Field {
     /// A value a test submits in a form.
     fn sample(&self, prefix: &str) -> String {
         match self.kind {
-            Kind::String | Kind::Text => format!("{prefix} {}", self.name.replace('_', " ")),
+            Kind::String | Kind::Text | Kind::RichText => format!("{prefix} {}", self.name.replace('_', " ")),
             // Small values, so adding a `range(..)` rule later doesn't break the tests.
             Kind::Integer => "3".into(),
             Kind::Float => "2.5".into(),
@@ -474,6 +489,7 @@ impl Resource {
                 (_, true) => "None".to_owned(),
                 (Kind::String, _) => format!("format!(\"{} {{n}}\")", human(&f.name)),
                 (Kind::Text, _) => format!("\"{} text.\".into()", human(&f.name)),
+                (Kind::RichText, _) => format!("\"<p>{} text.</p>\".into()", human(&f.name)),
                 (Kind::Integer, _) => "n as i64".into(),
                 (Kind::Float, _) => "1.5".into(),
                 (Kind::Bool, _) => "false".into(),
@@ -522,6 +538,9 @@ impl Resource {
                 (Kind::String, true) => body.push_str("    #[validate(length(max = 200))]\n"),
                 (Kind::Text, false) => body.push_str("    #[validate(length(min = 1))]\n    #[form(textarea)]\n"),
                 (Kind::Text, true) => body.push_str("    #[form(textarea)]\n"),
+                (Kind::RichText, _) if !f.may_be_empty => {
+                    body.push_str("    /// The rich text editor; `length` counts words people see, not markup.\n    #[validate(length(min = 1))]\n")
+                }
                 _ => {}
             }
             body.push_str(&format!("    pub {}: {},\n", f.column(), f.rust_type()));
@@ -529,7 +548,7 @@ impl Resource {
         let from_record: String = fields
             .iter()
             .map(|f| {
-                let clone = if f.is_text() { ".clone()" } else { "" };
+                let clone = if f.is_text() || f.kind == Kind::RichText { ".clone()" } else { "" };
                 format!("            {}: {}.{}{clone},\n", f.column(), self.snake, f.column())
             })
             .collect();
@@ -779,6 +798,7 @@ impl Resource {
                 }
                 let value = match (f.kind, f.optional) {
                     (Kind::Timestamp, _) => format!("{{{{ @@name@@.{} | datetime }}}}", f.column()),
+                    (Kind::RichText, _) => format!("{{{{ @@name@@.{} | rich_text }}}}", f.column()),
                     (Kind::Bool, _) => format!("{{{{ \"Yes\" if @@name@@.{} else \"No\" }}}}", f.column()),
                     (_, true) => {
                         format!("{{{{ @@name@@.{} if @@name@@.{} is not none else \"—\" }}}}", f.column(), f.column())
@@ -789,7 +809,7 @@ impl Resource {
             })
             .collect();
         let show = format!(
-            "{{% set title = {title_expr} %}}\n<h1>{{{{ title }}}}</h1>\n<dl>\n{rows}</dl>\n{{% if can_edit %}}\n<p>\n  <a href=\"{{{{ path(\"@@names@@::edit\", id=@@name@@.id) }}}}\">Edit</a>\n  {{{{ form_start(path(\"@@names@@::destroy\", id=@@name@@.id), method=\"delete\", class=\"inline\") }}}}<button>Delete</button>{{{{ form_end() }}}}\n</p>\n{{% endif %}}\n<p><a href=\"{{{{ path(\"@@names@@::index\") }}}}\">All {lower_many}</a></p>\n",
+            "{{% set title = {title_expr} %}}\n<h1>{{{{ title }}}}</h1>\n<dl>\n{rows}</dl>\n{{% if can_edit %}}\n<p>\n  <a href=\"{{{{ path(\"@@names@@::edit\", id=@@name@@.id) }}}}\">Edit</a>\n  {{{{ button_to(\"Delete\", path(\"@@names@@::destroy\", id=@@name@@.id), method=\"delete\", class=\"inline\", confirm=\"Delete this {lower_one}? This can't be undone.\", confirm_button=\"Delete\", tone=\"danger\") }}}}\n</p>\n{{% endif %}}\n<p><a href=\"{{{{ path(\"@@names@@::index\") }}}}\">All {lower_many}</a></p>\n",
             lower_many = human_many.to_lowercase(),
         );
         let new = format!(

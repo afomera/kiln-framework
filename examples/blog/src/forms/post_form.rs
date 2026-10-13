@@ -9,9 +9,9 @@ use crate::records::{NewPost, Post, PostStatus, User, post};
 pub struct PostForm {
     #[validate(length(min = 3, max = 200))]
     pub title: String,
+    /// The rich text editor. `length` counts the words people see, not the markup.
     #[validate(length(min = 1))]
-    #[form(textarea)]
-    pub body: String,
+    pub body: RichText,
     pub publish: bool,
 }
 

@@ -29,7 +29,7 @@ Run them from the app directory.
 | Secrets | `kiln secrets set SMTP_URL smtp://..`, `kiln secrets show` (key in `config/master.key`, never committed) |
 | Fresh database | `kiln db reset` (migrate + seed); sign in at /session/new as ada@example.com |
 
-Field types: `string`, `text`, `integer`, `float`, `bool`, `timestamp`, `ref:<Record>`. A
+Field types: `string`, `text`, `rich_text` (the editor; `?` means it may be left empty), `integer`, `float`, `bool`, `timestamp`, `ref:<Record>`. A
 trailing `?` makes a field optional; quote it in zsh (`'notes:text?'`).
 
 The first required ref to a record people sign in as (`owner:ref:User`, or
@@ -180,6 +180,17 @@ generated tests passing.
   `{{ url(path("posts::show", slug=post.slug)) }}` (base: `APP_URL`). `MAIL_URL` picks the
   transport (`smtp://user:pass@host:587`, `smtps://..`); in development and tests mail
   goes to the outbox: browse it at `/kiln/mail`. `MAIL_FROM` sets the sender.
+- **Confirmations:** `{{ button_to("Delete", path("posts::destroy", slug=post.slug), method="delete",
+  confirm="Delete this post?", confirm_button="Delete", tone="danger") }}`, or `confirm=` on
+  `form_start(..)`. Kiln shows its own dialog; restyle `.kiln-confirm` (its defaults are in
+  `@layer kiln`), supply `<template id="kiln-confirm">` in the layout, or replace it with
+  `import { setConfirm } from "kiln/confirm"`.
+- **Live reload (development):** pages update as you save. CSS swaps in place, template edits
+  refresh the page (scroll kept), JS edits reload, and Rust edits reload once `kiln dev` restarts.
+- **Rich text:** a `RichText` field (records and forms) renders the editor with `{{ field(form.body) }}`
+  and is stored as sanitized HTML in a TEXT column; show it with `{{ post.body | rich_text }}`
+  (never `| safe`). `#[validate(length(min = 1))]` counts words, not markup. `post.body.to_plain_text()`
+  for excerpts. Attachments are off until file storage exists.
 - **Mail previews:** add `preview` to `#[mail(..)]` and `impl Preview for X { async fn preview(ctx: &Ctx) -> Result<Self> { .. } }`;
   test them all with `app.render_mail_previews().await?`.
 - **Notifications:** `CommentPosted { comment_id }.notify(&tx, &author).await?`. In `deliver`,

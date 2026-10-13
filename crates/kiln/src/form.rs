@@ -403,7 +403,9 @@ impl<T: FormInput, S: Send + Sync> FromRequest<S> for Form<T> {
         };
         let mut fields = Fields::default();
         for (name, value) in pairs {
-            if name.starts_with('_') {
+            // `_csrf`, `_method`: Kiln's own. `lexxy-*`: controls inside the rich text editor
+            // (its code-language picker), never data. Anything else undeclared is refused.
+            if name.starts_with('_') || name.starts_with("lexxy-") {
                 continue;
             }
             if !T::FIELDS.contains(&name.as_str()) {

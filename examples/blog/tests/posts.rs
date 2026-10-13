@@ -216,3 +216,67 @@ async fn redirects_skip_loading_current_user(app: TestApp) -> Result {
     assert_eq!(app.db.query_count() - before, 1);
     Ok(())
 }
+
+/// What the rich text editor submits: its HTML, plus its own `lexxy-*` controls.
+#[kiln::test]
+async fn posts_take_rich_text_from_the_editor(app: TestApp) -> Result {
+    let user = app.create::<User>().await?;
+    let body =
+        r#"<h2>Big news</h2><p>It's <strong>here</strong>.</p><script>alert(1)</script><p onclick="x()">Click</p>"#;
+    app.sign_in_as(&user)
+        .post_form(
+            posts::create::path(),
+            &[("title", "Rich"), ("body", body), ("lexxy-code-language", "plain"), ("publish", "true")],
+        )
+        .await
+        .assert_status(303);
+    let post = Post::query().one(&app.db).await?.expect("created");
+    assert_eq!(post.body.as_html(), "<h2>Big news</h2><p>It's <strong>here</strong>.</p><p>Click</p>");
+    app.get_html(posts::show::path(&post.slug))
+        .await
+        .assert_contains("<div class=\"lexxy-content kiln-rich-text-content\"><h2>Big news</h2>")
+        .assert_not_contains("alert(1)");
+    // The edit form loads the editor with the stored HTML.
+    app.sign_in_as(&user)
+        .get_html(posts::edit::path(&post.slug))
+        .await
+        .assert_contains("<lexxy-editor id=\"body\" name=\"body\"")
+        .assert_contains("import \"kiln/rich-text\"");
+    Ok(())
+}
+
+#[kiln::test]
+async fn an_empty_editor_is_a_blank_body(app: TestApp) -> Result {
+    let user = app.create::<User>().await?;
+    app.sign_in_as(&user)
+        .post_form(posts::create::path(), &[("title", "Empty"), ("body", "<p><br></p>")])
+        .await
+        .assert_status(422)
+        .assert_contains("Body can&#x27;t be blank");
+    Ok(())
+}
+
+#[kiln::test]
+async fn other_unknown_fields_are_still_refused(app: TestApp) -> Result {
+    let user = app.create::<User>().await?;
+    app.sign_in_as(&user)
+        .post_form(posts::create::path(), &[("title", "Sneaky"), ("body", "x"), ("lexxy", "x"), ("author_id", "1")])
+        .await
+        .assert_status(400);
+    Ok(())
+}
+
+#[kiln::test]
+async fn deleting_a_post_asks_first(app: TestApp) -> Result {
+    let post = app.create_with::<Post>(|p| p.title = "Engines".into()).await?;
+    let author = User::find(post.author_id).one_or_404(&app.db).await?;
+    app.sign_in_as(&author)
+        .get_html(posts::show::path(&post.slug))
+        .await
+        .assert_contains(
+            "class=\"button-to inline\" data-turbo-confirm=\"Delete “Engines”? This can&#x27;t be undone.\"",
+        )
+        .assert_contains("data-confirm-tone=\"danger\"")
+        .assert_contains("import \"kiln/confirm\"");
+    Ok(())
+}

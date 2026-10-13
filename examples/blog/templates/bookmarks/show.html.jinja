@@ -9,7 +9,7 @@
 {% if can_edit %}
 <p>
   <a href="{{ path("bookmarks::edit", id=bookmark.id) }}">Edit</a>
-  {{ form_start(path("bookmarks::destroy", id=bookmark.id), method="delete", class="inline") }}<button>Delete</button>{{ form_end() }}
+  {{ button_to("Delete", path("bookmarks::destroy", id=bookmark.id), method="delete", class="inline", confirm="Delete this bookmark?", confirm_button="Delete", tone="danger") }}
 </p>
 {% endif %}
 <p><a href="{{ path("bookmarks::index") }}">All bookmarks</a></p>

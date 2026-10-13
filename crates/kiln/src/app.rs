@@ -449,6 +449,8 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
         let path = request.uri().path();
         let file = if let Some(name) = path.strip_prefix("/assets/") {
             shared.assets.as_ref().and_then(|a| a.serve_asset(name))
+        } else if path == crate::dev_reload::PATH && crate::dev_reload::enabled() {
+            shared.assets.as_ref().map(crate::dev_reload::serve)
         } else if path.starts_with("/kiln/streams/") {
             let last_event_id = request.headers().get("last-event-id").and_then(|v| v.to_str().ok());
             realtime::serve(shared.db.clone(), &shared.key, path, last_event_id).await

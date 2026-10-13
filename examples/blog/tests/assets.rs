@@ -55,7 +55,7 @@ async fn turbo_ships_with_kiln_through_the_import_map(app: TestApp) -> Result {
     page.assert_contains(r#"<script type="importmap">"#)
         .assert_contains(r#""@hotwired/turbo":"/kiln/turbo-8.0.12-"#)
         .assert_contains(r#""application":"/assets/application-"#)
-        .assert_contains(r#"import "@hotwired/turbo"; import "application";"#)
+        .assert_contains(r#"import "@hotwired/turbo"; import "kiln/confirm"; import "application";"#)
         .assert_contains(r#"<meta name="csrf-token""#);
     let turbo = linked(&page.text, "/kiln/turbo-");
     let res = app.get(turbo).await;

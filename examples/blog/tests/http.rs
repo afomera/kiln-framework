@@ -183,7 +183,7 @@ fn parts_are_plain_methods_too() {
         id: Id::new(1),
         slug: "s".into(),
         title: "t".into(),
-        body: "word ".repeat(500),
+        body: "word ".repeat(500).into(),
         status: PostStatus::Draft,
         author_id: Id::new(1),
         editor_id: None,

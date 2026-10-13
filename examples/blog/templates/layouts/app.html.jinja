@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="/favicon.svg">
   <title>{% if title is defined %}{{ title }} · {% endif %}Kiln blog</title>
+  {# Apply the saved theme before first paint (no flash); assets/application.js does the rest. #}
+  <script>try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t } catch {}</script>
   <link rel="stylesheet" href="{{ asset("app.css") }}">
   {{ csrf_meta() }}
   {{ javascript_importmap() }}
@@ -21,6 +23,7 @@
       <a href="{{ path("sessions::new") }}">Sign in</a>
       <a href="{{ path("registrations::new") }}">Sign up</a>
       {% endif %}
+      {% include "layouts/_theme_switcher.html.jinja" %}
     </nav>
   </header>
   {% for kind, message in flash | items %}

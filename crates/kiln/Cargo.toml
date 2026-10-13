@@ -29,3 +29,4 @@ futures-util.workspace = true
 chacha20poly1305.workspace = true
 lettre.workspace = true
 argon2.workspace = true
+ammonia.workspace = true

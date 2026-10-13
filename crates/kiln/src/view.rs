@@ -227,8 +227,27 @@ fn build_environment(root: &'static str) -> Environment<'static> {
     });
     env.add_function("javascript_importmap", move || javascript_importmap(&assets));
     env.add_filter("datetime", datetime);
+    // `{{ post.body | rich_text }}`: rich text as HTML, sanitized again on the way out.
+    env.add_filter("rich_text", |html: String| -> Value {
+        let clean = crate::RichText::new(&html);
+        if clean.is_empty() {
+            return Value::from_safe_string(String::new());
+        }
+        // Code blocks are highlighted in the browser, so only pages with one load the script.
+        let highlight = if clean.contains("<pre") {
+            "<script type=\"module\">import \"kiln/rich-text-display\"</script>"
+        } else {
+            ""
+        };
+        Value::from_safe_string(format!(
+            "<link rel=\"stylesheet\" href=\"{}\"><div class=\"lexxy-content kiln-rich-text-content\">{}</div>{highlight}",
+            crate::assets::rich_text_css_url(),
+            clean.as_html()
+        ))
+    });
     env.add_function("form_start", forms::form_start);
     env.add_function("form_end", forms::form_end);
+    env.add_function("button_to", forms::button_to);
     env.add_function("fields", forms::fields);
     env.add_function("field", forms::field);
     env
@@ -289,7 +308,11 @@ fn javascript_importmap(assets: &crate::assets::Assets) -> Value {
     let json = serde_json::json!({ "imports": imports }).to_string().replace("</", "<\\/");
     let mut html = format!("<script type=\"importmap\">{json}</script>\n");
     html.push_str(&format!("<link rel=\"modulepreload\" href=\"{}\">\n", crate::assets::turbo_url()));
-    html.push_str("<script type=\"module\">import \"@hotwired/turbo\";");
+    html.push_str(&format!("<link rel=\"modulepreload\" href=\"{}\">\n", crate::assets::confirm_url()));
+    html.push_str("<script type=\"module\">import \"@hotwired/turbo\"; import \"kiln/confirm\";");
+    if crate::dev_reload::enabled() {
+        html.push_str(" import \"kiln/dev-reload\";");
+    }
     if assets.has_application_js() {
         html.push_str(" import \"application\";");
     }
@@ -357,28 +380,72 @@ mod forms {
 
     /// `{{ form_start(path("posts::update", slug=post.slug), method="patch") }}`: the
     /// `<form>` tag, its CSRF token, and the `_method` override for PATCH/PUT/DELETE.
+    /// `confirm="Delete this post?"` asks first (Kiln's dialog, or yours: `kiln/confirm`);
+    /// `confirm_button="Delete"` labels its button and `tone="danger"` marks it destructive.
     pub fn form_start(action: String, kwargs: Kwargs) -> Result<Value, Error> {
         let method: Option<String> = kwargs.get("method")?;
         let class: Option<String> = kwargs.get("class")?;
+        let confirm = confirm_attributes(&kwargs)?;
         kwargs.assert_all_used()?;
-        let method = method.unwrap_or_else(|| "post".into()).to_ascii_lowercase();
-        let class = class.map(|c| format!(" class=\"{}\"", esc(&c))).unwrap_or_default();
+        Ok(Value::from_safe_string(form_open(&action, method.as_deref(), class.as_deref(), &confirm)?))
+    }
+
+    /// `<form ..>` with the CSRF token and method override.
+    fn form_open(action: &str, method: Option<&str>, class: Option<&str>, extra: &str) -> Result<String, Error> {
+        let method = method.unwrap_or("post").to_ascii_lowercase();
+        let class = class.map(|c| format!(" class=\"{}\"", esc(c))).unwrap_or_default();
         if method == "get" {
-            return Ok(Value::from_safe_string(format!("<form method=\"get\" action=\"{}\"{class}>", esc(&action))));
+            return Ok(format!("<form method=\"get\" action=\"{}\"{class}{extra}>", esc(action)));
         }
         if !matches!(method.as_str(), "post" | "patch" | "put" | "delete") {
             return Err(Error::new(ErrorKind::InvalidOperation, format!("form_start: unknown method `{method}`")));
         }
         let mut html = format!(
-            "<form method=\"post\" action=\"{}\"{class}>\n<input type=\"hidden\" name=\"_csrf\" value=\"{}\">",
-            esc(&action),
+            "<form method=\"post\" action=\"{}\"{class}{extra}>\n<input type=\"hidden\" name=\"_csrf\" value=\"{}\">",
+            esc(action),
             esc(&csrf_token()?)
         );
         if method != "post" {
             let _ =
                 write!(html, "\n<input type=\"hidden\" name=\"_method\" value=\"{}\">", method.to_ascii_uppercase());
         }
-        Ok(Value::from_safe_string(html))
+        Ok(html)
+    }
+
+    /// `data-turbo-confirm` and friends from `confirm=`, `confirm_button=`, `tone=`.
+    fn confirm_attributes(kwargs: &Kwargs) -> Result<String, Error> {
+        let mut attrs = String::new();
+        if let Some(message) = kwargs.get::<Option<String>>("confirm")? {
+            let _ = write!(attrs, " data-turbo-confirm=\"{}\"", esc(&message));
+        }
+        if let Some(label) = kwargs.get::<Option<String>>("confirm_button")? {
+            let _ = write!(attrs, " data-confirm-button=\"{}\"", esc(&label));
+        }
+        if let Some(tone) = kwargs.get::<Option<String>>("tone")? {
+            let _ = write!(attrs, " data-confirm-tone=\"{}\"", esc(&tone));
+        }
+        Ok(attrs)
+    }
+
+    /// `{{ button_to("Delete", path("posts::destroy", slug=post.slug), method="delete",
+    /// confirm="Delete this post?", tone="danger") }}`: a one-button form, CSRF included.
+    /// `class=` goes on the form (always also `button-to`), `button_class=` on the button.
+    pub fn button_to(label: String, action: String, kwargs: Kwargs) -> Result<Value, Error> {
+        let method: Option<String> = kwargs.get("method")?;
+        let class: Option<String> = kwargs.get("class")?;
+        let button_class: Option<String> = kwargs.get("button_class")?;
+        let confirm = confirm_attributes(&kwargs)?;
+        kwargs.assert_all_used()?;
+        let class = match class {
+            Some(class) => format!("button-to {class}"),
+            None => "button-to".to_owned(),
+        };
+        let open = form_open(&action, Some(method.as_deref().unwrap_or("post")), Some(&class), &confirm)?;
+        let button_class = button_class.map(|c| format!(" class=\"{}\"", esc(&c))).unwrap_or_default();
+        Ok(Value::from_safe_string(format!(
+            "{open}\n<button type=\"submit\"{button_class}>{}</button></form>",
+            esc(&label)
+        )))
     }
 
     pub fn form_end() -> Value {
@@ -528,6 +595,17 @@ mod forms {
                     html,
                     "  <label for=\"{id}\">{}</label>\n  <textarea {attrs} rows=\"6\">{}</textarea>\n",
                     esc(&label),
+                    esc(&value)
+                );
+            }
+            "rich_text" => {
+                // The editor (Lexxy) reads its starting HTML from `value` and submits under
+                // `name`; Kiln's module configures it and the stylesheet skins it.
+                let _ = write!(
+                    html,
+                    "  <label for=\"{id}\">{}</label>\n  <link rel=\"stylesheet\" href=\"{}\">\n  <lexxy-editor {attrs} class=\"kiln-rich-text lexxy-content\" value=\"{}\"></lexxy-editor>\n  <script type=\"module\">import \"kiln/rich-text\"</script>\n",
+                    esc(&label),
+                    crate::assets::rich_text_css_url(),
                     esc(&value)
                 );
             }

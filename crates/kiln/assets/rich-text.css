@@ -1,0 +1,305 @@
+/* Kiln's skin for the rich text editor (Lexxy). Lexxy's own rules use :where(), so these
+   win without !important, and any app stylesheet can override them in turn. The palette
+   is set as Lexxy's variables; the rest is layout and states. */
+
+.kiln-rich-text,
+.kiln-rich-text-content {
+  --kiln-rt-ink: oklch(23% 0.012 60);
+  --kiln-rt-ink-muted: oklch(48% 0.012 60);
+  --kiln-rt-ink-faint: oklch(68% 0.01 60);
+  --kiln-rt-line: oklch(90% 0.008 70);
+  --kiln-rt-line-strong: oklch(84% 0.01 70);
+  --kiln-rt-canvas: oklch(99.4% 0.003 80);
+  --kiln-rt-wash: oklch(97% 0.006 75);
+  --kiln-rt-hover: oklch(94.5% 0.008 70);
+  --kiln-rt-accent: oklch(52% 0.15 42);
+  --kiln-rt-accent-soft: oklch(94% 0.035 48);
+  --kiln-rt-accent-ring: oklch(52% 0.15 42 / 0.22);
+  --kiln-rt-danger: oklch(55% 0.17 25);
+
+  --lexxy-color-ink: var(--kiln-rt-ink);
+  --lexxy-color-ink-medium: var(--kiln-rt-ink-muted);
+  --lexxy-color-ink-light: var(--kiln-rt-ink-faint);
+  --lexxy-color-ink-lighter: var(--kiln-rt-line);
+  --lexxy-color-ink-lightest: var(--kiln-rt-wash);
+  --lexxy-color-ink-inverted: var(--kiln-rt-canvas);
+  --lexxy-color-canvas: var(--kiln-rt-canvas);
+  --lexxy-color-text: var(--kiln-rt-ink);
+  --lexxy-color-text-subtle: var(--kiln-rt-ink-muted);
+  --lexxy-color-link: var(--kiln-rt-accent);
+  --lexxy-color-accent-dark: var(--kiln-rt-accent);
+  --lexxy-color-accent-medium: oklch(68% 0.12 45);
+  --lexxy-color-accent-light: oklch(90% 0.04 48);
+  --lexxy-color-accent-lightest: var(--kiln-rt-accent-soft);
+  --lexxy-color-selected: var(--kiln-rt-accent-soft);
+  --lexxy-color-selected-hover: oklch(91% 0.045 48);
+  --lexxy-color-selected-dark: var(--kiln-rt-accent);
+  --lexxy-color-code-bg: var(--kiln-rt-wash);
+  --lexxy-focus-ring-color: var(--kiln-rt-accent);
+  --lexxy-font-base: inherit;
+  --lexxy-radius: 6px;
+  --lexxy-shadow: 0 8px 24px oklch(23% 0.02 60 / 0.12), 0 1px 3px oklch(23% 0.02 60 / 0.08);
+}
+
+/* Dark: when the OS prefers it (unless the page chose light), or when the page sets
+   data-theme="dark" on <html>. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) :is(.kiln-rich-text, .kiln-rich-text-content) {
+    --kiln-rt-ink: oklch(92% 0.008 70);
+    --kiln-rt-ink-muted: oklch(72% 0.01 70);
+    --kiln-rt-ink-faint: oklch(56% 0.01 70);
+    --kiln-rt-line: oklch(32% 0.008 60);
+    --kiln-rt-line-strong: oklch(40% 0.01 60);
+    --kiln-rt-canvas: oklch(20% 0.006 60);
+    --kiln-rt-wash: oklch(24% 0.008 60);
+    --kiln-rt-hover: oklch(28% 0.01 60);
+    --kiln-rt-accent: oklch(72% 0.13 48);
+    --kiln-rt-accent-soft: oklch(32% 0.05 45);
+    --kiln-rt-accent-ring: oklch(72% 0.13 48 / 0.28);
+    --lexxy-color-accent-medium: oklch(62% 0.12 45);
+    --lexxy-color-accent-light: oklch(38% 0.06 45);
+    --lexxy-color-selected-hover: oklch(36% 0.06 45);
+    --lexxy-color-code-token-att: oklch(74% 0.14 20);
+    --lexxy-color-code-token-comment: oklch(64% 0.01 70);
+    --lexxy-color-code-token-function: oklch(78% 0.11 300);
+    --lexxy-color-code-token-operator: oklch(74% 0.14 20);
+    --lexxy-color-code-token-property: oklch(78% 0.1 240);
+    --lexxy-color-code-token-punctuation: oklch(82% 0.01 70);
+    --lexxy-color-code-token-selector: oklch(78% 0.13 150);
+    --lexxy-color-code-token-variable: oklch(80% 0.12 65);
+  }
+}
+
+:root[data-theme="dark"] :is(.kiln-rich-text, .kiln-rich-text-content) {
+  --kiln-rt-ink: oklch(92% 0.008 70);
+  --kiln-rt-ink-muted: oklch(72% 0.01 70);
+  --kiln-rt-ink-faint: oklch(56% 0.01 70);
+  --kiln-rt-line: oklch(32% 0.008 60);
+  --kiln-rt-line-strong: oklch(40% 0.01 60);
+  --kiln-rt-canvas: oklch(20% 0.006 60);
+  --kiln-rt-wash: oklch(24% 0.008 60);
+  --kiln-rt-hover: oklch(28% 0.01 60);
+  --kiln-rt-accent: oklch(72% 0.13 48);
+  --kiln-rt-accent-soft: oklch(32% 0.05 45);
+  --kiln-rt-accent-ring: oklch(72% 0.13 48 / 0.28);
+  --lexxy-color-accent-medium: oklch(62% 0.12 45);
+  --lexxy-color-accent-light: oklch(38% 0.06 45);
+  --lexxy-color-selected-hover: oklch(36% 0.06 45);
+  --lexxy-color-code-token-att: oklch(74% 0.14 20);
+  --lexxy-color-code-token-comment: oklch(64% 0.01 70);
+  --lexxy-color-code-token-function: oklch(78% 0.11 300);
+  --lexxy-color-code-token-operator: oklch(74% 0.14 20);
+  --lexxy-color-code-token-property: oklch(78% 0.1 240);
+  --lexxy-color-code-token-punctuation: oklch(82% 0.01 70);
+  --lexxy-color-code-token-selector: oklch(78% 0.13 150);
+  --lexxy-color-code-token-variable: oklch(80% 0.12 65);
+}
+
+/* The editor */
+lexxy-editor.kiln-rich-text {
+  border: 1px solid var(--kiln-rt-line-strong);
+  border-radius: 10px;
+  background: var(--kiln-rt-canvas);
+  color: var(--kiln-rt-ink);
+  box-shadow: 0 1px 2px oklch(23% 0.02 60 / 0.05);
+  transition: border-color 140ms, box-shadow 140ms;
+}
+
+lexxy-editor.kiln-rich-text:hover {
+  border-color: var(--kiln-rt-ink-faint);
+}
+
+lexxy-editor.kiln-rich-text:focus-within {
+  border-color: var(--kiln-rt-accent);
+  box-shadow: 0 0 0 3px var(--kiln-rt-accent-ring);
+}
+
+lexxy-editor.kiln-rich-text[aria-invalid="true"] {
+  border-color: var(--kiln-rt-danger);
+}
+
+/* Toolbar: a quiet strip that stays in reach while writing something long. */
+lexxy-editor.kiln-rich-text lexxy-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  gap: 2px;
+  padding: 5px 6px;
+  border-block-end: 1px solid var(--kiln-rt-line);
+  border-start-start-radius: 10px;
+  border-start-end-radius: 10px;
+  background: var(--kiln-rt-wash);
+}
+
+lexxy-editor.kiln-rich-text .lexxy-editor__toolbar-button {
+  border-radius: 6px;
+  background: transparent;
+  color: var(--kiln-rt-ink-muted);
+  transition: background-color 100ms, color 100ms;
+}
+
+lexxy-editor.kiln-rich-text .lexxy-editor__toolbar-button:hover:not([aria-disabled="true"]) {
+  background: var(--kiln-rt-hover);
+  color: var(--kiln-rt-ink);
+}
+
+lexxy-editor.kiln-rich-text .lexxy-editor__toolbar-button[aria-pressed="true"] {
+  background: var(--kiln-rt-accent-soft);
+  color: var(--kiln-rt-accent);
+}
+
+lexxy-editor.kiln-rich-text .lexxy-editor__toolbar-button.lexxy-editor__toolbar-group-end::after {
+  background-color: var(--kiln-rt-line-strong);
+}
+
+/* Writing area */
+lexxy-editor.kiln-rich-text .lexxy-editor__content {
+  padding: 14px 16px 18px;
+  font-size: 1rem;
+  line-height: 1.65;
+}
+
+lexxy-editor.kiln-rich-text .lexxy-editor__content::before {
+  color: var(--kiln-rt-ink-faint);
+  opacity: 1;
+}
+
+/* Text, in the editor and where it's shown ({{ post.body | rich_text }}). Scoped under
+   the editor or the content wrapper, so a page's own `h1` or `li` styles don't leak in. */
+:is(.kiln-rich-text .lexxy-editor__content, .kiln-rich-text-content) {
+  color: var(--kiln-rt-ink);
+  font-size: 1rem;
+  line-height: 1.7;
+  overflow-wrap: break-word;
+
+  :where(p) {
+    margin: 0 0 1em;
+  }
+
+  :where(h1, h2, h3, h4, h5, h6) {
+    color: var(--kiln-rt-ink);
+    font-weight: 700;
+    line-height: 1.25;
+    letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+
+  /* Top margins in rem, so bigger headings don't push themselves further down. */
+  :where(h1) { font-size: 1.95em; letter-spacing: -0.025em; margin: 1.6rem 0 0.6rem; }
+  :where(h2) { font-size: 1.5em; margin: 1.5rem 0 0.5rem; }
+  :where(h3) { font-size: 1.25em; margin: 1.35rem 0 0.45rem; }
+  :where(h4) { font-size: 1.05em; margin: 1.25rem 0 0.4rem; }
+  :where(h5) { font-size: 0.85em; letter-spacing: 0.06em; text-transform: uppercase; margin: 1.25rem 0 0.4rem; }
+  :where(h6) { font-size: 0.85em; color: var(--kiln-rt-ink-muted); margin: 1.25rem 0 0.4rem; }
+
+  /* Lexxy may keep a hidden placeholder paragraph before the first block. */
+  :where(p.provisional-paragraph.hidden:first-child + :is(h1, h2, h3, h4, h5, h6)) { margin-top: 0; }
+
+  :where(strong, b) { font-weight: 650; }
+  :where(s, del) { color: var(--kiln-rt-ink-muted); }
+  :where(sub, sup) { font-size: 0.75em; line-height: 0; }
+
+  :where(a) {
+    color: var(--kiln-rt-accent);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+  }
+
+  :where(a:hover) { text-decoration-thickness: 2px; }
+
+  :where(mark) {
+    padding: 0.05em 0.15em;
+    border-radius: 3px;
+    background: var(--kiln-rt-accent-soft);
+    color: inherit;
+  }
+
+  :where(ul, ol) {
+    margin: 0 0 1em;
+    padding-inline-start: 1.6em;
+  }
+
+  :where(ul) { list-style: disc; }
+  :where(ul ul) { list-style: circle; }
+  :where(ul ul ul) { list-style: square; }
+
+  :where(li) {
+    margin: 0.3em 0;
+    padding-inline-start: 0.2em;
+  }
+
+  :where(li::marker) { color: var(--kiln-rt-ink-faint); }
+  :where(ol > li::marker) { color: var(--kiln-rt-ink-muted); font-variant-numeric: tabular-nums; }
+  :where(li > ul, li > ol) { margin: 0.3em 0 0; }
+
+  :where(blockquote) {
+    margin: 0 0 1em;
+    padding: 0.15em 0 0.15em 1.1em;
+    border-inline-start: 3px solid var(--kiln-rt-accent);
+    color: var(--kiln-rt-ink-muted);
+    font-style: italic;
+  }
+
+  :where(blockquote > :last-child) { margin-bottom: 0; }
+
+  :where(code) {
+    padding: 0.12em 0.38em;
+    border-radius: 4px;
+    background: var(--kiln-rt-wash);
+    border: 1px solid var(--kiln-rt-line);
+    font-family: var(--lexxy-font-mono);
+    font-size: 0.88em;
+  }
+
+  :where(pre) {
+    margin: 0 0 1em;
+    padding: 14px 16px;
+    overflow-x: auto;
+    border: 1px solid var(--kiln-rt-line);
+    border-radius: 8px;
+    background: var(--kiln-rt-wash);
+    font-family: var(--lexxy-font-mono);
+    font-size: 0.875em;
+    line-height: 1.6;
+    tab-size: 2;
+    white-space: pre;
+  }
+
+  :where(pre code) {
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: inherit;
+  }
+
+  :where(hr) {
+    border: 0;
+    border-block-start: 1px solid var(--kiln-rt-line-strong);
+    margin: 2em 0;
+  }
+
+  :where(figure) { margin: 0 0 1em; }
+
+  :where(table) {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95em;
+  }
+
+  :where(th, td) {
+    border: 1px solid var(--kiln-rt-line);
+    padding: 7px 10px;
+    text-align: start;
+    vertical-align: top;
+  }
+
+  :where(th) {
+    background: var(--kiln-rt-wash);
+    font-weight: 650;
+  }
+
+  :where(th > p, td > p) { margin: 0; }
+
+  > :where(:first-child) { margin-top: 0; }
+  > :where(:last-child) { margin-bottom: 0; }
+}

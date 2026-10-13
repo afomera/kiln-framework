@@ -2,11 +2,11 @@
 <article>
   <h1>{{ post.title }}{% if post.is_draft %} <small>(draft)</small>{% endif %}</h1>
   <p class="meta">{{ by_line }} · {{ post.reading_time }}{% if post.editor %} · edited by {{ post.editor.name }}{% endif %}</p>
-  <p>{{ post.body }}</p>
+  {{ post.body | rich_text }}
   {% if can_edit %}
   <p>
     <a href="{{ path("posts::edit", slug=post.slug) }}">Edit</a>
-    {{ form_start(path("posts::destroy", slug=post.slug), method="delete", class="inline") }}<button>Delete</button>{{ form_end() }}
+    {{ button_to("Delete", path("posts::destroy", slug=post.slug), method="delete", class="inline", confirm="Delete “" ~ post.title ~ "”? This can't be undone.", confirm_button="Delete post", tone="danger") }}
   </p>
   {% endif %}
 </article>

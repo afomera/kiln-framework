@@ -7,11 +7,11 @@
     <strong>{{ sign_in.device }}</strong>{% if sign_in.current %} · this browser{% endif %}
     <br><small>{{ sign_in.ip or "Unknown address" }} · signed in {{ sign_in.created_at | datetime }} · last active {{ sign_in.last_seen_at | datetime }}</small>
     {% if not sign_in.current %}
-    {{ form_start(path("sign_ins::destroy", id=sign_in.id), method="delete", class="inline") }}<button>Sign out</button>{{ form_end() }}
+    {{ button_to("Sign out", path("sign_ins::destroy", id=sign_in.id), method="delete", class="inline", confirm="Sign out " ~ sign_in.device ~ "?", confirm_button="Sign out") }}
     {% endif %}
   </li>
   {% endfor %}
 </ul>
 {% if sign_ins | length > 1 %}
-{{ form_start(path("sign_ins::destroy_others"), method="delete") }}<button>Sign out everywhere else</button>{{ form_end() }}
+{{ button_to("Sign out everywhere else", path("sign_ins::destroy_others"), method="delete", confirm="Sign out every other device? You'll stay signed in here.", confirm_button="Sign them out", tone="danger") }}
 {% endif %}

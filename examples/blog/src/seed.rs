@@ -26,9 +26,30 @@ pub async fn seed(db: Db) -> Result {
     .await?;
 
     let posts = [
-        ("hello-kiln", "Hello, Kiln", "The compiler is the reviewer.", PostStatus::Published, &ada, None),
-        ("typed-paths", "Typed paths", "Broken links don't compile.", PostStatus::Published, &grace, Some(ada.id)),
-        ("no-n-plus-one", "No N+1", "Relations exist only when preloaded.", PostStatus::Published, &ada, None),
+        (
+            "hello-kiln",
+            "Hello, Kiln",
+            "<h2>The compiler is the reviewer</h2><p>Kiln turns conventions into <strong>types</strong>, so mistakes fail to compile:</p><ul><li>N+1 queries</li><li>Unauthorized writes</li><li>Broken links</li></ul><blockquote><p>If it compiles, it follows the rules.</p></blockquote>",
+            PostStatus::Published,
+            &ada,
+            None,
+        ),
+        (
+            "typed-paths",
+            "Typed paths",
+            "<p>Every action gets a typed path helper, like <code>posts::show::path(&amp;slug)</code>. Rename a route and every caller stops compiling.</p>",
+            PostStatus::Published,
+            &grace,
+            Some(ada.id),
+        ),
+        (
+            "no-n-plus-one",
+            "No N+1",
+            "<p>Relations exist only when <em>preloaded</em>. Preloading changes the type, so <code>post.comments()</code> on a post without them is a compile error.</p>",
+            PostStatus::Published,
+            &ada,
+            None,
+        ),
         ("draft-post", "Draft post", "Not ready yet.", PostStatus::Draft, &grace, None),
     ];
     for (slug, title, body, status, author, editor_id) in posts {

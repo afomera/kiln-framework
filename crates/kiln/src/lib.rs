@@ -12,6 +12,7 @@ pub mod batch;
 mod cli;
 pub mod config;
 mod db;
+mod dev_reload;
 mod devtools;
 mod error;
 mod error_page;
@@ -25,6 +26,7 @@ mod query;
 mod realtime;
 mod redirect;
 pub mod rel;
+pub mod rich_text;
 mod routing;
 pub mod schedule;
 mod schema;
@@ -46,6 +48,7 @@ pub use migrate::{
 pub use query::{Column, Delete, Expr, Insert, Order, Query, Update};
 pub use redirect::{Redirect, ViewOrRedirect};
 pub use rel::{Append, BoxFuture, HasRel, HasRelation, Loaded, RelSet, Relation};
+pub use rich_text::RichText;
 pub use routing::{Param, PathArg, RouteDef, routes, routes_table};
 pub use schema::{ColumnSchema, TableSchema};
 pub use session::{Current, Flash, SecretKey, Session};
@@ -110,8 +113,8 @@ pub mod prelude {
 
     pub use crate::{
         App, Batch, BatchId, Ctx, Current, Db, DbEnum, Enqueue, Error, Id, Json, Loaded, Mail, Notify, Param, Perform,
-        Preview, Query, Record, Redirect, Result, Schedule, Secret, Session, Timestamp, Turbo, TurboStream, Via, View,
-        ViewOrRedirect, action,
+        Preview, Query, Record, Redirect, Result, RichText, Schedule, Secret, Session, Timestamp, Turbo, TurboStream,
+        Via, View, ViewOrRedirect, action,
         form::{Form, FormState, OrRender, Valid},
         part,
         policy::{Allows, Authorize, Authorized},

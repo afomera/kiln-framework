@@ -9,7 +9,8 @@ pub struct Post {
     #[index(unique)]
     pub slug: String,
     pub title: String,
-    pub body: String,
+    /// Written in the rich text editor; always sanitized HTML.
+    pub body: RichText,
     pub status: PostStatus,
     pub author_id: Id<User>,
     /// Last editor, if anyone other than the author has edited the post.

@@ -2,12 +2,13 @@
 #
 #   make install   build the CLI and link it onto your PATH as `kiln-dev`
 #   make           rebuild (the installed link picks it up)
+#   make vendor-lexxy VERSION=1.0.2   update the vendored rich text editor
 
 BIN_DIR ?= $(HOME)/.local/bin
 BIN_NAME ?= kiln-dev
 TARGET := $(CURDIR)/target/debug/kiln
 
-.PHONY: build install uninstall test lint fmt
+.PHONY: build install uninstall test lint fmt vendor-lexxy
 
 build:
 	cargo build -p kiln-cli
@@ -30,3 +31,7 @@ lint:
 
 fmt:
 	cargo fmt --all
+
+vendor-lexxy:
+	@test -n "$(VERSION)" || (echo "usage: make vendor-lexxy VERSION=1.0.2" && exit 1)
+	scripts/vendor-lexxy.sh $(VERSION)

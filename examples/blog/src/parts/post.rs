@@ -6,7 +6,7 @@ use crate::records::{Post, PostStatus};
 #[part]
 impl Post {
     pub fn reading_time(&self) -> String {
-        let minutes = self.body.split_whitespace().count() / 230 + 1;
+        let minutes = self.body.to_plain_text().split_whitespace().count() / 230 + 1;
         format!("{minutes} min read")
     }
 

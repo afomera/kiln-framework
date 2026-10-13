@@ -38,6 +38,7 @@ chacha20poly1305 = "0.10"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
 argon2 = "0.5"
+ammonia = "4"
 
 # Password hashing is slow without optimizations.
 [profile.dev.package.argon2]
