@@ -24,7 +24,7 @@ use std::{
 
 use axum::{
     body::Body,
-    http::{HeaderMap, Method, Request, StatusCode, header},
+    http::{HeaderMap, Request, StatusCode, header},
 };
 use serde_json::{Map, Value};
 use tower::ServiceExt;
@@ -33,6 +33,9 @@ use crate::{App, Ctx, Db, Record, Result, SecretKey, Timestamp, session::COOKIE}
 
 /// `json!({ "email": ".." })` for API tests, without a `serde_json` dependency.
 pub use serde_json::json;
+
+/// For `client.request(Method::PUT, ..)`.
+pub use axum::http::Method;
 
 /// A file for `post_multipart` / `patch_multipart`.
 #[derive(Debug, Clone)]
@@ -91,7 +94,14 @@ impl TestApp {
         crate::config::use_test_env();
         // `db/migrations` lives in the app's root, next to `assets/` and `public/`.
         let root = migrations.parent().and_then(Path::parent).unwrap_or(Path::new("."));
-        let db = test_database(root, migrations).await?;
+        let mut db = test_database(root, migrations).await?;
+        // `KILN_TEST_SPLIT_DATABASES=1`: the queue, cache and broadcasts each in a database of
+        // their own, as an app with `QUEUE_DATABASE_URL` (and friends) runs.
+        if std::env::var("KILN_TEST_SPLIT_DATABASES").as_deref() == Ok("1") && db.dialect().name() == "sqlite" {
+            for role in [crate::db::Role::Queue, crate::db::Role::Cache, crate::db::Role::Streams] {
+                db = db.with_role(role, Db::memory().await?);
+            }
+        }
         crate::config::set_root(root);
         // Files go to a store of the test's own, gone when it ends.
         let app = configure(App::new(db.clone()).root(root).provide(crate::Storage::memory()))?;
@@ -499,6 +509,67 @@ impl TestClient {
     }
 
     async fn send(&self, method: Method, path: &str, accept: Option<&str>, body: Option<(&str, Body)>) -> TestResponse {
+        self.send_with(method, path, accept, body, &[]).await
+    }
+
+    /// Uploads `file` the way Kiln's JavaScript does (and Lexxy's attachments): the details to
+    /// `/kiln/direct_uploads`, then the bytes to the `PUT` URL it answers with. Returns the
+    /// blob (`upload_token` is what a form field submits to keep it).
+    pub async fn direct_upload(&self, file: Upload) -> serde_json::Value {
+        let token = self.csrf_token();
+        let start = serde_json::json!({
+            "blob": { "filename": file.filename, "content_type": file.content_type, "byte_size": file.bytes.len() }
+        });
+        let created = self
+            .send_with(
+                Method::POST,
+                "/kiln/direct_uploads",
+                Some("application/json"),
+                Some(("application/json", Body::from(start.to_string()))),
+                &[("x-csrf-token", &token)],
+            )
+            .await;
+        assert_eq!(created.status.as_u16(), 200, "starting the direct upload failed: {}", created.text);
+        let blob = created.json();
+        let put = blob["direct_upload"]["url"].as_str().expect("a PUT URL").to_owned();
+        let stored =
+            self.send_with(Method::PUT, &put, None, Some((&file.content_type, Body::from(file.bytes))), &[]).await;
+        assert_eq!(stored.status.as_u16(), 204, "storing the direct upload failed: {}", stored.text);
+        blob
+    }
+
+    /// A JSON body sent as a page's JavaScript does: with the `X-CSRF-Token` header.
+    pub async fn post_json_with_csrf(
+        &self,
+        path: impl AsRef<str>,
+        body: &serde_json::Value,
+        token: &str,
+    ) -> TestResponse {
+        self.send_with(
+            Method::POST,
+            path.as_ref(),
+            Some("application/json"),
+            Some(("application/json", Body::from(body.to_string()))),
+            &[("x-csrf-token", token)],
+        )
+        .await
+    }
+
+    /// The CSRF token the session holds (what a page's `<meta name="csrf-token">` carries).
+    pub fn csrf_token(&self) -> String {
+        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        let token = session.entry("_csrf").or_insert(Value::from(TEST_CSRF));
+        token.as_str().unwrap_or(TEST_CSRF).to_owned()
+    }
+
+    async fn send_with(
+        &self,
+        method: Method,
+        path: &str,
+        accept: Option<&str>,
+        body: Option<(&str, Body)>,
+        headers: &[(&str, &str)],
+    ) -> TestResponse {
         let pending = self.pending_sign_in.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some((table, id)) = pending {
             let token = crate::auth::create_sign_in(&self.db, table, id, "kiln test client", "127.0.0.1")
@@ -510,6 +581,9 @@ impl TestClient {
         let mut builder = Request::builder().method(method).uri(path).header(header::USER_AGENT, "kiln test client");
         if let Some(accept) = accept {
             builder = builder.header(header::ACCEPT, accept);
+        }
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
         }
         let session = self.session.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if !session.is_empty() {
@@ -625,6 +699,7 @@ impl TestResponse {
 /// Ids of jobs named `name` that haven't finished, oldest first.
 pub async fn job_ids(db: &Db, name: &str) -> Result<Vec<i64>> {
     let rows = db
+        .role(crate::db::Role::Queue)
         .fetch_all(
             "SELECT \"id\" FROM \"kiln_jobs\" WHERE \"name\" = ? ORDER BY \"id\"",
             vec![crate::Value::Text(name.to_owned())],
@@ -636,6 +711,7 @@ pub async fn job_ids(db: &Db, name: &str) -> Result<Vec<i64>> {
 /// Attempts used by unfinished jobs named `name`, oldest first.
 pub async fn job_attempts(db: &Db, name: &str) -> Result<Vec<i64>> {
     let rows = db
+        .role(crate::db::Role::Queue)
         .fetch_all(
             "SELECT \"attempts\" FROM \"kiln_jobs\" WHERE \"name\" = ? ORDER BY \"id\"",
             vec![crate::Value::Text(name.to_owned())],

@@ -28,6 +28,7 @@ mod icon {
         r#"<path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/>"#;
     pub const MAIL: &str =
         r#"<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>"#;
+    pub const ZAP: &str = r#"<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>"#;
     pub const RADIO: &str = r#"<path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19"/>"#;
     pub const KEY: &str = r#"<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>"#;
     pub const TERMINAL: &str = r#"<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>"#;
@@ -54,6 +55,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     ("batches", "Batches", icon::LAYERS),
     ("mail", "Mail", icon::MAIL),
     ("broadcasts", "Broadcasts", icon::RADIO),
+    ("cache", "Cache", icon::ZAP),
     ("notifications", "Notifications", icon::BELL),
     ("sign_ins", "Sign-ins", icon::KEY),
 ];
@@ -146,6 +148,7 @@ async fn serve_page(ctx: &crate::Ctx, path: &str, query: Option<&str>) -> Option
         "/kiln/schedules" => schedules_page(db, &query, notice).await,
         "/kiln/batches" => batches_page(db, &query, notice).await,
         "/kiln/broadcasts" => broadcasts_page(db, &query).await,
+        "/kiln/cache" => cache_page(db, &query, notice).await,
         "/kiln/sign_ins" => sign_ins_page(db, &query).await,
         "/kiln/notifications" => notifications_page(db, &query).await,
         "/kiln/live" => return Some(live(db.clone(), param(&query, "page").to_owned())),
@@ -238,12 +241,15 @@ async fn dashboard(db: &Db) -> crate::Result<Response> {
     let jobs = db.job_counts().await?;
     let job_count = |status: &str| jobs.iter().find(|(s, _)| s == status).map_or(0, |(_, n)| *n);
     let mail = count(db, "SELECT COUNT(*) FROM \"kiln_mail\"").await?;
-    let broadcasts = count(db, "SELECT COUNT(*) FROM \"kiln_stream_messages\"").await?;
-    let streams = count(db, "SELECT COUNT(DISTINCT \"stream\") FROM \"kiln_stream_messages\"").await?;
+    let streams_db = db.role(crate::db::Role::Streams);
+    let broadcasts = count(&streams_db, "SELECT COUNT(*) FROM \"kiln_stream_messages\"").await?;
+    let streams = count(&streams_db, "SELECT COUNT(DISTINCT \"stream\") FROM \"kiln_stream_messages\"").await?;
     let sign_ins = count(db, "SELECT COUNT(*) FROM \"kiln_sessions\"").await?;
     let unread = count(db, "SELECT COUNT(*) FROM \"kiln_notifications\" WHERE \"read_at\" IS NULL").await?;
     let schedules = db.schedules().await?;
-    let running_batches = count(db, "SELECT COUNT(*) FROM \"kiln_batches\" WHERE \"status\" = 'running'").await?;
+    let running_batches =
+        count(&db.role(crate::db::Role::Queue), "SELECT COUNT(*) FROM \"kiln_batches\" WHERE \"status\" = 'running'")
+            .await?;
     let card = |slug: &str, icon: &str, title: &str, n: String, detail: String| {
         format!(
             "<a class=card href=\"/kiln/{slug}\"><div class=t>{}{title}</div><div class=n>{n}</div><p>{detail}</p></a>",
@@ -462,6 +468,7 @@ async fn jobs_page(db: &Db, query: &HashMap<String, String>, notice: Option<&str
 
     // Queues, with pause controls.
     let limits: HashMap<String, i64> = db
+        .role(crate::db::Role::Queue)
         .fetch_all("SELECT \"queue\", \"max_running\" FROM \"kiln_queue_limits\"", vec![])
         .await?
         .iter()
@@ -544,7 +551,7 @@ async fn jobs_page(db: &Db, query: &HashMap<String, String>, notice: Option<&str
         ]);
     }
     let filter = if conditions.is_empty() { String::new() } else { format!("WHERE {}", conditions.join(" AND ")) };
-    let rows = db
+    let rows = db.role(crate::db::Role::Queue)
         .fetch_all(
             &format!(
                 "SELECT \"id\", \"name\", \"queue\", \"status\", \"attempts\", \"max_attempts\", \"run_at\", COALESCE(\"last_error\", ''), \"payload\", \"batch_id\", \"priority\", \"cancel_requested\" \
@@ -771,6 +778,7 @@ async fn batch_page(db: &Db, id: i64, notice: Option<&str>) -> crate::Result<Res
     };
     let back = format!("/kiln/batches/{id}");
     let jobs = db
+        .role(crate::db::Role::Queue)
         .fetch_all(
             "SELECT \"id\", \"name\", \"status\", \"attempts\", \"max_attempts\", COALESCE(\"last_error\", ''), \"batch_hook\" FROM \"kiln_jobs\" WHERE \"batch_id\" = ? ORDER BY \"id\"",
             vec![crate::Value::Integer(id)],
@@ -900,6 +908,17 @@ async fn act_on(db: &Db, request: Request) -> Response {
                 Some(job) => format!("Enqueued {name} as job #{job}."),
                 None => format!("No schedule named {name}."),
             },
+            ["cache", "clear"] => {
+                format!("Cleared the cache ({} entries).", crate::cache::Cache::for_db(db).clear().await?)
+            }
+            ["cache", "delete"] => {
+                let key = form.get("key").cloned().unwrap_or_default();
+                if crate::cache::Cache::for_db(db).delete(&key).await? {
+                    format!("Deleted {key}.")
+                } else {
+                    format!("{key} was already gone.")
+                }
+            }
             ["batches", id, "cancel"] => {
                 let id: i64 = id.parse().map_err(|_| crate::Error::BadRequest("bad batch id".into()))?;
                 if crate::batch::BatchId(id).cancel(db).await? {
@@ -944,8 +963,66 @@ async fn act_on(db: &Db, request: Request) -> Response {
     }
 }
 
+async fn cache_page(db: &Db, query: &Query, notice: Option<&str>) -> crate::Result<Response> {
+    let search = param(query, "q");
+    let entries = db.cache_entries(search, 200).await?;
+    let cache_db = db.role(crate::db::Role::Cache);
+    let live =
+        count(&cache_db, &format!("SELECT COUNT(*) FROM \"kiln_cache\" WHERE \"expires_at\" > {}", now_micros()))
+            .await?;
+    let bytes =
+        count(&cache_db, "SELECT CAST(COALESCE(SUM(LENGTH(\"value\")), 0) AS BIGINT) FROM \"kiln_cache\"").await?;
+    let place = if db.is_split(crate::db::Role::Cache) { "its own database" } else { "the app's database" };
+    let rows: String = entries
+        .iter()
+        .map(|e| {
+            format!(
+                "<tr><td><code>{}</code></td><td>{}</td><td class=muted>{}</td><td class=muted>{}</td><td>\
+                 <form class=inline method=post action=\"/kiln/cache/delete\"><input type=hidden name=_kiln value=\"{}\">\
+                 <input type=hidden name=back value=\"/kiln/cache\"><input type=hidden name=key value=\"{}\"><button>Delete</button></form></td></tr>",
+                esc(&e.key),
+                size(e.bytes),
+                esc(&e.created_at.as_jiff().strftime("%Y-%m-%d %H:%M:%S").to_string()),
+                esc(&e.expires_at.as_jiff().strftime("%Y-%m-%d %H:%M:%S").to_string()),
+                token(),
+                esc(&e.key),
+            )
+        })
+        .collect();
+    let summary = format!(
+        "<p class=muted>{live} live entr{} · {} stored, in {place} (<code>kiln_cache</code>). Expired entries are removed by workers.</p>",
+        if live == 1 { "y" } else { "ies" },
+        size(bytes)
+    );
+    let clear = if live > 0 { button("/kiln/cache/clear", "Clear cache", "/kiln/cache", true) } else { String::new() };
+    let body = if entries.is_empty() && search.is_empty() {
+        format!(
+            "{summary}<p class=empty>Nothing cached. <code>ctx.cache().fetch(key, ttl, || async {{ .. }})</code> adds entries.</p>"
+        )
+    } else {
+        format!(
+            "{}{summary}<p>{clear}</p><div class=tbl><table><thead><tr><th>Key</th><th>Size</th><th>Stored (UTC)</th><th>Expires (UTC)</th><th></th></tr></thead><tbody>{rows}</tbody></table></div>",
+            search_bar("/kiln/cache", query, "Key", &[]),
+        )
+    };
+    Ok(page_with_notice("cache", "Cache", &body, notice))
+}
+
+fn now_micros() -> i64 {
+    jiff::Timestamp::now().as_microsecond()
+}
+
+/// `1.2 KB`.
+fn size(bytes: i64) -> String {
+    match bytes {
+        b if b >= 1024 * 1024 => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+        b if b >= 1024 => format!("{:.1} KB", b as f64 / 1024.0),
+        b => format!("{b} B"),
+    }
+}
+
 async fn broadcasts_page(db: &Db, query: &Query) -> crate::Result<Response> {
-    let rows = db
+    let rows = db.role(crate::db::Role::Streams)
         .fetch_all(
             "SELECT \"id\", \"stream\", \"payload\", \"created_at\" FROM \"kiln_stream_messages\" ORDER BY \"id\" DESC LIMIT 500",
             vec![],
@@ -1093,7 +1170,7 @@ async fn notifications_page(db: &Db, query: &Query) -> crate::Result<Response> {
 }
 
 /// What a page shows, cheaply: when it changes, the page refreshes.
-fn signature_sql(page: &str) -> &'static str {
+fn signature_parts(page: &str) -> Vec<(Option<crate::db::Role>, &'static str)> {
     const JOBS: &str = "(SELECT COUNT(*) || ':' || COALESCE(MAX(\"id\"), 0) || ':' || COALESCE(SUM(\"attempts\"), 0) || ':' || \
         COALESCE(SUM(CASE WHEN \"status\" = 'running' THEN 1 ELSE 0 END), 0) || ':' || COALESCE(SUM(\"cancel_requested\"), 0) || ':' || COALESCE(SUM(CASE WHEN \"status\" = 'failed' THEN 1 ELSE 0 END), 0) || ':' || \
         COALESCE(SUM(\"run_at\"), 0) FROM \"kiln_jobs\") || '|' || (SELECT COUNT(*) FROM \"kiln_queue_pauses\")";
@@ -1104,30 +1181,42 @@ fn signature_sql(page: &str) -> &'static str {
     const BROADCASTS: &str = "(SELECT COALESCE(MAX(\"id\"), 0) FROM \"kiln_stream_messages\")";
     const SIGN_INS: &str = "(SELECT COUNT(*) || ':' || COALESCE(MAX(\"id\"), 0) FROM \"kiln_sessions\")";
     const NOTIFICATIONS: &str = "(SELECT COUNT(*) || ':' || COALESCE(SUM(CASE WHEN \"read_at\" IS NULL THEN 1 ELSE 0 END), 0) FROM \"kiln_notifications\")";
+    const CACHE: &str = "(SELECT COUNT(*) || ':' || COALESCE(MAX(\"created_at\"), 0) FROM \"kiln_cache\")";
+    use crate::db::Role::{Cache, Queue, Streams};
+    let (queue, cache, streams) = (Some(Queue), Some(Cache), Some(Streams));
     match page {
-        "jobs" => concat_sql(&[JOBS]),
-        "batches" => concat_sql(&[BATCHES, JOBS]),
-        "schedules" => concat_sql(&[SCHEDULES]),
-        "mail" => concat_sql(&[MAIL]),
-        "broadcasts" => concat_sql(&[BROADCASTS]),
-        "sign_ins" => concat_sql(&[SIGN_INS]),
-        "notifications" => concat_sql(&[NOTIFICATIONS]),
-        "routes" | "records" => "SELECT ''",
-        _ => concat_sql(&[JOBS, BATCHES, SCHEDULES, MAIL, BROADCASTS, SIGN_INS, NOTIFICATIONS]),
+        "jobs" => vec![(queue, JOBS)],
+        "batches" => vec![(queue, BATCHES), (queue, JOBS)],
+        "schedules" => vec![(queue, SCHEDULES)],
+        "mail" => vec![(None, MAIL)],
+        "broadcasts" => vec![(streams, BROADCASTS)],
+        "cache" => vec![(cache, CACHE)],
+        "sign_ins" => vec![(None, SIGN_INS)],
+        "notifications" => vec![(None, NOTIFICATIONS)],
+        "routes" | "records" => vec![],
+        _ => vec![
+            (queue, JOBS),
+            (queue, BATCHES),
+            (queue, SCHEDULES),
+            (None, MAIL),
+            (streams, BROADCASTS),
+            (None, SIGN_INS),
+            (None, NOTIFICATIONS),
+        ],
     }
 }
 
-/// `SELECT a || '|' || b ...`, built once per page kind.
-fn concat_sql(parts: &[&str]) -> &'static str {
-    static CACHE: std::sync::Mutex<Vec<(String, &'static str)>> = std::sync::Mutex::new(Vec::new());
-    let key = parts.join("#");
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, sql)) = cache.iter().find(|(k, _)| *k == key) {
-        return sql;
+/// The page's signature: each part read from the database that holds its table (the
+/// queue, cache and broadcasts can each live in their own).
+async fn signature(db: &Db, parts: &[(Option<crate::db::Role>, &str)]) -> Option<String> {
+    let mut out = String::new();
+    for (role, sql) in parts {
+        let db = role.map_or_else(|| db.clone(), |role| db.role(role));
+        let rows = db.fetch_all(&format!("SELECT {sql}"), vec![]).await.ok()?;
+        out.push_str(&rows.first().and_then(|r| r.try_get::<String, _>(0).ok()).unwrap_or_default());
+        out.push('|');
     }
-    let sql: &'static str = Box::leak(format!("SELECT {}", parts.join(" || '|' || ")).into_boxed_str());
-    cache.push((key, sql));
-    sql
+    Some(out)
 }
 
 /// `/kiln/live?page=jobs`: Server-Sent Events that tell the page to refresh (Turbo morphs
@@ -1135,7 +1224,7 @@ fn concat_sql(parts: &[&str]) -> &'static str {
 fn live(db: Db, page: String) -> Response {
     struct State {
         db: Db,
-        sql: &'static str,
+        parts: Vec<(Option<crate::db::Role>, &'static str)>,
         last: Option<String>,
         idle: u32,
     }
@@ -1147,8 +1236,7 @@ fn live(db: Db, page: String) -> Response {
                 () = crate::jobs::shutdown_requested() => return None,
                 () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
             }
-            let now: Option<String> =
-                state.db.fetch_all(state.sql, vec![]).await.ok().and_then(|rows| rows.first().map(|r| r.get(0)));
+            let now = signature(&state.db, &state.parts).await;
             let changed = match (&state.last, &now) {
                 (Some(before), Some(now)) => before != now,
                 _ => false,
@@ -1168,7 +1256,7 @@ fn live(db: Db, page: String) -> Response {
             }
         }
     }
-    let state = State { db, sql: signature_sql(&page), last: None, idle: 0 };
+    let state = State { db, parts: signature_parts(&page), last: None, idle: 0 };
     let first = futures_util::stream::once(async {
         Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(b"retry: 2000\n\n"))
     });

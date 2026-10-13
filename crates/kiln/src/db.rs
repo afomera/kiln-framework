@@ -23,11 +23,41 @@ pub struct Db {
     conn: Conn,
     dialect: &'static dyn Dialect,
     queries: Arc<AtomicU64>,
-    /// Inside a transaction: work to run once it commits (e.g. waking stream listeners).
-    after_commit: Option<Arc<std::sync::Mutex<Vec<AfterCommit>>>>,
+    /// Inside a transaction: work to run once it commits (e.g. waking stream listeners) or
+    /// rolls back.
+    after_commit: Option<Arc<std::sync::Mutex<Hooks>>>,
+    /// Separate databases for Kiln's job queue, cache and broadcasts, when the app has them.
+    roles: Arc<Roles>,
 }
 
 type AfterCommit = Box<dyn FnOnce() + Send>;
+type AsyncHook = Box<dyn FnOnce() -> crate::BoxFuture<'static, ()> + Send>;
+
+#[derive(Default)]
+struct Hooks {
+    commit: Vec<AfterCommit>,
+    commit_async: Vec<AsyncHook>,
+    rollback: Vec<AsyncHook>,
+}
+
+/// Where Kiln's own heavy tables live. `None`: in the app's database.
+#[derive(Clone, Default)]
+struct Roles {
+    queue: Option<Db>,
+    cache: Option<Db>,
+    streams: Option<Db>,
+}
+
+/// One of Kiln's tables that can live in a database of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Jobs, batches, schedules, queue pauses and limits (`QUEUE_DATABASE_URL`).
+    Queue,
+    /// `ctx.cache()` (`CACHE_DATABASE_URL`).
+    Cache,
+    /// The broadcast log realtime pages read (`STREAMS_DATABASE_URL`).
+    Streams,
+}
 
 #[derive(Clone)]
 enum Conn {
@@ -116,7 +146,64 @@ impl Db {
     }
 
     fn from_pool(pool: AnyPool, dialect: &'static dyn Dialect) -> Self {
-        Self { conn: Conn::Pool(pool), dialect, queries: Arc::new(AtomicU64::new(0)), after_commit: None }
+        Self {
+            conn: Conn::Pool(pool),
+            dialect,
+            queries: Arc::new(AtomicU64::new(0)),
+            after_commit: None,
+            roles: Arc::default(),
+        }
+    }
+
+    /// Keeps `role`'s tables (jobs, cache or broadcasts) in `db` instead of this database,
+    /// so each can be sized and scaled on its own. `kiln::Cli` sets these from
+    /// `QUEUE_DATABASE_URL`, `CACHE_DATABASE_URL` and `STREAMS_DATABASE_URL`.
+    ///
+    /// Jobs enqueued and broadcasts sent inside a transaction on this database are then
+    /// handed over when it commits rather than in the same transaction: a rolled-back write
+    /// still never enqueues or broadcasts, but a crash in the instant after the commit can
+    /// lose them (the same trade-off as Rails with a separate Solid Queue database).
+    pub fn with_role(mut self, role: Role, db: Db) -> Self {
+        let mut roles = (*self.roles).clone();
+        // The role's own handle has no roles, so its queries stay on it.
+        let db = Db { roles: Arc::default(), ..db };
+        match role {
+            Role::Queue => roles.queue = Some(db),
+            Role::Cache => roles.cache = Some(db),
+            Role::Streams => roles.streams = Some(db),
+        }
+        self.roles = Arc::new(roles);
+        self
+    }
+
+    /// The database holding `role`'s tables: this one unless the app split it out.
+    pub fn role(&self, role: Role) -> Db {
+        let split = match role {
+            Role::Queue => &self.roles.queue,
+            Role::Cache => &self.roles.cache,
+            Role::Streams => &self.roles.streams,
+        };
+        split.clone().unwrap_or_else(|| self.clone())
+    }
+
+    /// Whether `role` lives in another database while this handle is inside a
+    /// transaction: work for it must be handed over when the transaction commits.
+    pub(crate) fn hands_over(&self, role: Role) -> bool {
+        self.after_commit.is_some()
+            && match role {
+                Role::Queue => self.roles.queue.is_some(),
+                Role::Cache => self.roles.cache.is_some(),
+                Role::Streams => self.roles.streams.is_some(),
+            }
+    }
+
+    /// Whether `role`'s tables are in a database of their own.
+    pub fn is_split(&self, role: Role) -> bool {
+        match role {
+            Role::Queue => self.roles.queue.is_some(),
+            Role::Cache => self.roles.cache.is_some(),
+            Role::Streams => self.roles.streams.is_some(),
+        }
     }
 
     /// The backend this database runs on.
@@ -145,26 +232,40 @@ impl Db {
             Conn::Pool(pool) => pool,
         };
         let handle = Arc::new(Mutex::new(Some(pool.begin().await?)));
-        let hooks: Arc<std::sync::Mutex<Vec<AfterCommit>>> = Arc::default();
+        let hooks: Arc<std::sync::Mutex<Hooks>> = Arc::default();
         let tx_db = Db {
             conn: Conn::Tx(handle.clone()),
             dialect: self.dialect,
             queries: self.queries.clone(),
             after_commit: Some(hooks.clone()),
+            roles: self.roles.clone(),
         };
         let result = f(tx_db).await;
         let tx = handle.lock().await.take().ok_or_else(|| Error::Integrity("transaction already finished".into()))?;
         match result {
             Ok(value) => {
-                tx.commit().await?;
+                let committed = tx.commit().await;
                 let hooks = std::mem::take(&mut *hooks.lock().unwrap_or_else(|e| e.into_inner()));
-                for hook in hooks {
+                if let Err(e) = committed {
+                    for hook in hooks.rollback {
+                        hook().await;
+                    }
+                    return Err(e.into());
+                }
+                for hook in hooks.commit_async {
+                    hook().await;
+                }
+                for hook in hooks.commit {
                     hook();
                 }
                 Ok(value)
             }
             Err(e) => {
                 tx.rollback().await?;
+                let hooks = std::mem::take(&mut *hooks.lock().unwrap_or_else(|e| e.into_inner()));
+                for hook in hooks.rollback {
+                    hook().await;
+                }
                 Err(e)
             }
         }
@@ -174,8 +275,38 @@ impl Db {
     /// the transaction rolls back.
     pub(crate) fn after_commit(&self, f: impl FnOnce() + Send + 'static) {
         match &self.after_commit {
-            Some(hooks) => hooks.lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(f)),
+            Some(hooks) => hooks.lock().unwrap_or_else(|e| e.into_inner()).commit.push(Box::new(f)),
             None => f(),
+        }
+    }
+
+    /// Async work for once the surrounding transaction commits (finished before
+    /// `transaction` returns), or now outside one.
+    pub(crate) async fn after_commit_async<F>(&self, f: impl FnOnce() -> F + Send + 'static)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        match &self.after_commit {
+            Some(hooks) => hooks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .commit_async
+                .push(Box::new(move || Box::pin(f()) as crate::BoxFuture<'static, ()>)),
+            None => f().await,
+        }
+    }
+
+    /// Async work for if the surrounding transaction rolls back (nothing outside one).
+    pub(crate) fn after_rollback<F>(&self, f: impl FnOnce() -> F + Send + 'static)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if let Some(hooks) = &self.after_commit {
+            hooks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .rollback
+                .push(Box::new(move || Box::pin(f()) as crate::BoxFuture<'static, ()>));
         }
     }
 

@@ -9,6 +9,7 @@ mod app;
 mod assets;
 pub mod auth;
 pub mod batch;
+pub mod cache;
 mod cli;
 pub mod config;
 mod db;
@@ -42,7 +43,7 @@ mod welcome;
 pub use app::{App, Ctx};
 pub use axum::Json;
 pub use cli::Cli;
-pub use db::{Db, Row};
+pub use db::{Db, Role, Row};
 pub use error::{Error, Result};
 pub use migrate::{
     ColumnSnapshot, Diff, Migration, RecordDef, Snapshot, TableSnapshot, diff, diff_for, load_migrations, records,

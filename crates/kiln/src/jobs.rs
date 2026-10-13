@@ -78,10 +78,13 @@ pub(crate) async fn sync_app(ctx: &Ctx) -> Result<()> {
     }
     let limits = ctx.try_get::<QueueLimits>().cloned().unwrap_or_default();
     ctx.db
+        .role(crate::db::Role::Queue)
         .transaction(|tx| async move {
-            tx.fetch_all("DELETE FROM \"kiln_queue_limits\" RETURNING \"queue\"", vec![]).await?;
+            tx.role(crate::db::Role::Queue)
+                .fetch_all("DELETE FROM \"kiln_queue_limits\" RETURNING \"queue\"", vec![])
+                .await?;
             for (queue, max) in limits.0 {
-                tx.fetch_all(
+                tx.role(crate::db::Role::Queue).fetch_all(
                     "INSERT INTO \"kiln_queue_limits\" (\"queue\", \"max_running\") VALUES (?, ?) RETURNING \"queue\"",
                     vec![Value::Text(queue.to_owned()), Value::Integer(max.max(1))],
                 )
@@ -137,6 +140,7 @@ pub trait Enqueue: JobInfo {
             if let Some(window) = Self::UNIQUE_FOR {
                 let since = micros(Timestamp::now()) - window * 1_000_000;
                 let existing = db
+                    .role(crate::db::Role::Queue)
                     .fetch_all(
                         "SELECT \"id\" FROM \"kiln_jobs\" WHERE \"name\" = ? AND \"payload\" = ? \
                          AND \"status\" IN ('queued', 'running') AND \"created_at\" >= ? LIMIT 1",
@@ -199,10 +203,18 @@ async fn insert_row(
     batch: Option<BatchId>,
     hook: bool,
 ) -> Result<i64> {
-    let rows = db
+    // A queue in its own database can't join the caller's transaction: the job waits as
+    // `pending` (never claimed) until the transaction commits, and goes if it rolls back.
+    let handing_over = db.hands_over(crate::db::Role::Queue);
+    let held = handing_over || HOLD_JOBS.try_with(|hold| *hold).unwrap_or(false);
+    let status = if held { "pending" } else { "queued" };
+    let queue_db = db.role(crate::db::Role::Queue);
+    let rows = queue_db
         .fetch_all(
-            "INSERT INTO \"kiln_jobs\" (\"name\", \"queue\", \"payload\", \"run_at\", \"attempts\", \"max_attempts\", \"status\", \"created_at\", \"batch_id\", \"batch_hook\", \"priority\") \
-             VALUES (?, ?, ?, ?, 0, ?, 'queued', ?, ?, ?, ?) RETURNING \"id\"",
+            &format!(
+                "INSERT INTO \"kiln_jobs\" (\"name\", \"queue\", \"payload\", \"run_at\", \"attempts\", \"max_attempts\", \"status\", \"created_at\", \"batch_id\", \"batch_hook\", \"priority\") \
+                 VALUES (?, ?, ?, ?, 0, ?, '{status}', ?, ?, ?, ?) RETURNING \"id\""
+            ),
             vec![
                 Value::Text(name.to_owned()),
                 Value::Text(queue.to_owned()),
@@ -216,8 +228,57 @@ async fn insert_row(
             ],
         )
         .await?;
-    db.after_commit(wake_workers);
-    Ok(rows.first().map(|r| r.get(0)).unwrap_or_default())
+    let id: i64 = rows.first().map(|r| r.get(0)).unwrap_or_default();
+    if handing_over {
+        let (release, discard) = (queue_db.clone(), queue_db);
+        db.after_commit_async(move || async move {
+            let released = release
+                .fetch_all(
+                    "UPDATE \"kiln_jobs\" SET \"status\" = 'queued' WHERE \"id\" = ? AND \"status\" = 'pending' RETURNING \"id\"",
+                    vec![Value::Integer(id)],
+                )
+                .await;
+            if let Err(e) = released {
+                tracing::error!(target: "kiln::jobs", job = id, error = %e, "releasing a job after its transaction committed failed");
+            }
+            wake_workers();
+        })
+        .await;
+        db.after_rollback(move || async move {
+            let _ = discard
+                .fetch_all("DELETE FROM \"kiln_jobs\" WHERE \"id\" = ? RETURNING \"id\"", vec![Value::Integer(id)])
+                .await;
+        });
+    } else {
+        db.after_commit(wake_workers);
+    }
+    Ok(id)
+}
+
+tokio::task_local! {
+    /// Set while a batch is created for a transaction in another database: its jobs wait
+    /// as `pending` until the batch is released.
+    pub(crate) static HOLD_JOBS: bool;
+}
+
+/// Jobs held as `pending` whose transaction never committed (a crash in between), cleared
+/// after an hour.
+pub(crate) async fn clear_stale_pending(db: &Db) -> Result<u64> {
+    let cutoff = micros(Timestamp::now() - jiff::SignedDuration::from_hours(1));
+    let queue = db.role(crate::db::Role::Queue);
+    let rows = queue
+        .fetch_all(
+            "DELETE FROM \"kiln_jobs\" WHERE \"status\" = 'pending' AND \"created_at\" < ? RETURNING \"id\"",
+            vec![Value::Integer(cutoff)],
+        )
+        .await?;
+    queue
+        .fetch_all(
+            "DELETE FROM \"kiln_batches\" WHERE \"status\" = 'pending' AND \"created_at\" < ? RETURNING \"id\"",
+            vec![Value::Integer(cutoff)],
+        )
+        .await?;
+    Ok(rows.len() as u64)
 }
 
 impl<J: JobInfo> Enqueue for J {}
@@ -232,7 +293,7 @@ fn hub() -> &'static watch::Sender<u64> {
     HUB.get_or_init(|| watch::channel(0).0)
 }
 
-fn wake_workers() {
+pub(crate) fn wake_workers() {
     hub().send_modify(|n| *n = n.wrapping_add(1));
 }
 
@@ -261,7 +322,7 @@ const STALE: Duration = Duration::from_secs(5 * 60);
 
 impl Db {
     pub(crate) async fn with_job_table(self) -> Result<Self> {
-        self.execute(
+        self.role(crate::db::Role::Queue).execute(
             "CREATE TABLE IF NOT EXISTS \"kiln_jobs\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \"name\" TEXT NOT NULL, \
              \"queue\" TEXT NOT NULL, \"payload\" TEXT NOT NULL, \"run_at\" INTEGER NOT NULL, \"attempts\" INTEGER NOT NULL, \
              \"max_attempts\" INTEGER NOT NULL, \"status\" TEXT NOT NULL, \"locked_at\" INTEGER, \"last_error\" TEXT, \
@@ -279,12 +340,14 @@ impl Db {
             ],
         )
         .await?;
-        self.execute("CREATE INDEX IF NOT EXISTS \"kiln_jobs_due\" ON \"kiln_jobs\" (\"status\", \"run_at\")").await?;
-        self.execute(
+        self.role(crate::db::Role::Queue)
+            .execute("CREATE INDEX IF NOT EXISTS \"kiln_jobs_due\" ON \"kiln_jobs\" (\"status\", \"run_at\")")
+            .await?;
+        self.role(crate::db::Role::Queue).execute(
             "CREATE TABLE IF NOT EXISTS \"kiln_queue_pauses\" (\"queue\" TEXT PRIMARY KEY, \"paused_at\" INTEGER NOT NULL)",
         )
         .await?;
-        self.execute(
+        self.role(crate::db::Role::Queue).execute(
             "CREATE TABLE IF NOT EXISTS \"kiln_queue_limits\" (\"queue\" TEXT PRIMARY KEY, \"max_running\" INTEGER NOT NULL)",
         )
         .await?;
@@ -300,11 +363,18 @@ impl Db {
 
     /// Adds `columns` to a Kiln table made before they existed.
     pub(crate) async fn ensure_columns(&self, table: &str, columns: &[(&str, &str)]) -> Result<()> {
-        let existing: Vec<String> =
-            self.fetch_all(&self.dialect().columns_query(table), vec![]).await?.iter().map(|r| r.get(0)).collect();
+        let existing: Vec<String> = self
+            .role(crate::db::Role::Queue)
+            .fetch_all(&self.dialect().columns_query(table), vec![])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
         for (name, definition) in columns {
             if !existing.iter().any(|e| e == name) {
-                self.execute(&format!("ALTER TABLE \"{table}\" ADD COLUMN \"{name}\" {definition}")).await?;
+                self.role(crate::db::Role::Queue)
+                    .execute(&format!("ALTER TABLE \"{table}\" ADD COLUMN \"{name}\" {definition}"))
+                    .await?;
             }
         }
         Ok(())
@@ -336,13 +406,14 @@ impl Db {
         // per-queue running counts they check can't race.
         let rows = match self.dialect().serialize_claims() {
             Some(lock) => {
-                self.transaction(|tx| async move {
-                    tx.fetch_all(lock, vec![]).await?;
-                    tx.fetch_all(&sql, binds).await
-                })
-                .await?
+                self.role(crate::db::Role::Queue)
+                    .transaction(|tx| async move {
+                        tx.role(crate::db::Role::Queue).fetch_all(lock, vec![]).await?;
+                        tx.role(crate::db::Role::Queue).fetch_all(&sql, binds).await
+                    })
+                    .await?
             }
-            None => self.fetch_all(&sql, binds).await?,
+            None => self.role(crate::db::Role::Queue).fetch_all(&sql, binds).await?,
         };
         Ok(rows.first().map(|r| Claimed {
             id: r.get(0),
@@ -359,7 +430,7 @@ impl Db {
         let (id, batch) = (job.id, job.counted_batch());
         let outcome = match outcome {
             Outcome::Released => {
-                self.fetch_all(
+                self.role(crate::db::Role::Queue).fetch_all(
                     "UPDATE \"kiln_jobs\" SET \"status\" = 'queued', \"locked_at\" = NULL, \"attempts\" = CASE WHEN \"attempts\" > 0 THEN \"attempts\" - 1 ELSE 0 END \
                      WHERE \"id\" = ? RETURNING \"id\"",
                     vec![Value::Integer(id)],
@@ -368,18 +439,20 @@ impl Db {
                 return Ok(());
             }
             Outcome::Cancelled => {
-                self.transaction(|tx| async move {
-                    tx.fetch_all(
-                        "DELETE FROM \"kiln_jobs\" WHERE \"id\" = ? RETURNING \"id\"",
-                        vec![Value::Integer(id)],
-                    )
+                self.role(crate::db::Role::Queue)
+                    .transaction(|tx| async move {
+                        tx.role(crate::db::Role::Queue)
+                            .fetch_all(
+                                "DELETE FROM \"kiln_jobs\" WHERE \"id\" = ? RETURNING \"id\"",
+                                vec![Value::Integer(id)],
+                            )
+                            .await?;
+                        if let Some(batch) = batch {
+                            batch::job_ended(&tx, batch, "cancelled").await?;
+                        }
+                        Ok(())
+                    })
                     .await?;
-                    if let Some(batch) = batch {
-                        batch::job_ended(&tx, batch, "cancelled").await?;
-                    }
-                    Ok(())
-                })
-                .await?;
                 return Ok(());
             }
             Outcome::Done => Ok(()),
@@ -387,23 +460,25 @@ impl Db {
         };
         match outcome {
             Ok(()) => {
-                self.transaction(|tx| async move {
-                    tx.fetch_all(
-                        "DELETE FROM \"kiln_jobs\" WHERE \"id\" = ? RETURNING \"id\"",
-                        vec![Value::Integer(id)],
-                    )
+                self.role(crate::db::Role::Queue)
+                    .transaction(|tx| async move {
+                        tx.role(crate::db::Role::Queue)
+                            .fetch_all(
+                                "DELETE FROM \"kiln_jobs\" WHERE \"id\" = ? RETURNING \"id\"",
+                                vec![Value::Integer(id)],
+                            )
+                            .await?;
+                        if let Some(batch) = batch {
+                            batch::job_ended(&tx, batch, "succeeded").await?;
+                        }
+                        Ok(())
+                    })
                     .await?;
-                    if let Some(batch) = batch {
-                        batch::job_ended(&tx, batch, "succeeded").await?;
-                    }
-                    Ok(())
-                })
-                .await?;
             }
             Err(error) if job.attempts >= job.max_attempts => {
                 tracing::error!(target: "kiln::jobs", id = job.id, name = %job.name, attempts = job.attempts, error = %error, "job failed for good");
-                self.transaction(|tx| async move {
-                    tx.fetch_all(
+                self.role(crate::db::Role::Queue).transaction(|tx| async move {
+                    tx.role(crate::db::Role::Queue).fetch_all(
                         "UPDATE \"kiln_jobs\" SET \"status\" = 'failed', \"locked_at\" = NULL, \"last_error\" = ? WHERE \"id\" = ? RETURNING \"id\"",
                         vec![Value::Text(error), Value::Integer(id)],
                     )
@@ -420,7 +495,7 @@ impl Db {
                 let delay = Duration::from_secs(2u64.saturating_pow(job.attempts.clamp(1, 12) as u32).min(3600));
                 tracing::warn!(target: "kiln::jobs", id = job.id, name = %job.name, attempts = job.attempts, retry_in = ?delay, error = %error, "job failed; will retry");
                 let run_at = micros(Timestamp::now()) + delay.as_micros() as i64;
-                self.fetch_all(
+                self.role(crate::db::Role::Queue).fetch_all(
                     "UPDATE \"kiln_jobs\" SET \"status\" = 'queued', \"locked_at\" = NULL, \"last_error\" = ?, \"run_at\" = ? WHERE \"id\" = ? RETURNING \"id\"",
                     vec![Value::Text(error), Value::Integer(run_at), Value::Integer(id)],
                 )
@@ -433,6 +508,7 @@ impl Db {
     /// `(status, count)` for every status present.
     pub async fn job_counts(&self) -> Result<Vec<(String, i64)>> {
         let rows = self
+            .role(crate::db::Role::Queue)
             .fetch_all("SELECT \"status\", COUNT(*) FROM \"kiln_jobs\" GROUP BY \"status\" ORDER BY \"status\"", vec![])
             .await?;
         Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
@@ -441,6 +517,7 @@ impl Db {
     /// Failed jobs: `(id, name, attempts, last_error)`, newest first.
     pub async fn failed_jobs(&self) -> Result<Vec<(i64, String, i64, String)>> {
         let rows = self
+            .role(crate::db::Role::Queue)
             .fetch_all(
                 "SELECT \"id\", \"name\", \"attempts\", COALESCE(\"last_error\", '') FROM \"kiln_jobs\" WHERE \"status\" = 'failed' ORDER BY \"id\" DESC LIMIT 50",
                 vec![],
@@ -462,8 +539,9 @@ impl Db {
              RETURNING \"batch_id\", \"batch_hook\""
         );
         let count = self
+            .role(crate::db::Role::Queue)
             .transaction(|tx| async move {
-                let rows = tx.fetch_all(&sql, binds).await?;
+                let rows = tx.role(crate::db::Role::Queue).fetch_all(&sql, binds).await?;
                 for row in &rows {
                     if let (Some(batch), 0) = (row.get::<Option<i64>, _>(0), row.get::<i64, _>(1)) {
                         batch::job_retried(&tx, BatchId(batch)).await?;
@@ -479,8 +557,9 @@ impl Db {
     /// Running jobs whose cancel was requested but whose worker is gone: removed, and
     /// counted as cancelled in their batch.
     async fn reap_cancelled(&self, stale: i64) -> Result<()> {
-        self.transaction(|tx| async move {
+        self.role(crate::db::Role::Queue).transaction(|tx| async move {
             let rows = tx
+                .role(crate::db::Role::Queue)
                 .fetch_all(
                     "DELETE FROM \"kiln_jobs\" WHERE \"status\" = 'running' AND \"cancel_requested\" = 1 AND \"locked_at\" < ? \
                      RETURNING \"batch_id\", \"batch_hook\"",
@@ -502,6 +581,7 @@ impl Db {
     /// transactions roll back), and then removed. Returns false if there's no such job.
     pub async fn cancel_job(&self, id: i64) -> Result<bool> {
         let requested = self
+            .role(crate::db::Role::Queue)
             .fetch_all(
                 "UPDATE \"kiln_jobs\" SET \"cancel_requested\" = 1 WHERE \"id\" = ? AND \"status\" = 'running' RETURNING \"id\"",
                 vec![Value::Integer(id)],
@@ -511,30 +591,33 @@ impl Db {
             tracing::info!(target: "kiln::jobs", id, "cancel requested for a running job");
             return Ok(true);
         }
-        self.transaction(|tx| async move {
-            let rows = tx
-                .fetch_all(
-                    "DELETE FROM \"kiln_jobs\" WHERE \"id\" = ? AND \"status\" IN ('queued', 'failed') \
+        self.role(crate::db::Role::Queue)
+            .transaction(|tx| async move {
+                let rows = tx
+                    .role(crate::db::Role::Queue)
+                    .fetch_all(
+                        "DELETE FROM \"kiln_jobs\" WHERE \"id\" = ? AND \"status\" IN ('queued', 'failed') \
                      RETURNING \"status\", \"batch_id\", \"batch_hook\"",
-                    vec![Value::Integer(id)],
-                )
-                .await?;
-            let Some(row) = rows.first() else { return Ok(false) };
-            // A cancelled waiting job no longer holds its batch open. (A failed one was
-            // already counted as failed.)
-            if let ("queued", Some(batch), 0) =
-                (row.get::<&str, _>(0), row.get::<Option<i64>, _>(1), row.get::<i64, _>(2))
-            {
-                batch::job_ended(&tx, BatchId(batch), "cancelled").await?;
-            }
-            Ok(true)
-        })
-        .await
+                        vec![Value::Integer(id)],
+                    )
+                    .await?;
+                let Some(row) = rows.first() else { return Ok(false) };
+                // A cancelled waiting job no longer holds its batch open. (A failed one was
+                // already counted as failed.)
+                if let ("queued", Some(batch), 0) =
+                    (row.get::<&str, _>(0), row.get::<Option<i64>, _>(1), row.get::<i64, _>(2))
+                {
+                    batch::job_ended(&tx, BatchId(batch), "cancelled").await?;
+                }
+                Ok(true)
+            })
+            .await
     }
 
     /// Deletes every failed job. Returns how many.
     pub async fn discard_failed_jobs(&self) -> Result<usize> {
         Ok(self
+            .role(crate::db::Role::Queue)
             .fetch_all("DELETE FROM \"kiln_jobs\" WHERE \"status\" = 'failed' RETURNING \"id\"", vec![])
             .await?
             .len())
@@ -543,6 +626,7 @@ impl Db {
     /// Makes a delayed job due now.
     pub async fn run_job_now(&self, id: i64) -> Result<bool> {
         let rows = self
+            .role(crate::db::Role::Queue)
             .fetch_all(
                 "UPDATE \"kiln_jobs\" SET \"run_at\" = ? WHERE \"id\" = ? AND \"status\" = 'queued' RETURNING \"id\"",
                 vec![Value::Integer(micros(Timestamp::now())), Value::Integer(id)],
@@ -555,7 +639,7 @@ impl Db {
     /// Stops workers taking jobs from `queue` (running jobs finish). Jobs can still be
     /// enqueued; they wait.
     pub async fn pause_queue(&self, queue: &str) -> Result<()> {
-        self.fetch_all(
+        self.role(crate::db::Role::Queue).fetch_all(
             "INSERT INTO \"kiln_queue_pauses\" (\"queue\", \"paused_at\") VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING \"queue\"",
             vec![Value::Text(queue.to_owned()), Value::Integer(micros(Timestamp::now()))],
         )
@@ -564,11 +648,12 @@ impl Db {
     }
 
     pub async fn resume_queue(&self, queue: &str) -> Result<()> {
-        self.fetch_all(
-            "DELETE FROM \"kiln_queue_pauses\" WHERE \"queue\" = ? RETURNING \"queue\"",
-            vec![Value::Text(queue.to_owned())],
-        )
-        .await?;
+        self.role(crate::db::Role::Queue)
+            .fetch_all(
+                "DELETE FROM \"kiln_queue_pauses\" WHERE \"queue\" = ? RETURNING \"queue\"",
+                vec![Value::Text(queue.to_owned())],
+            )
+            .await?;
         wake_workers();
         Ok(())
     }
@@ -576,6 +661,7 @@ impl Db {
     /// Every queue with jobs or a pause: `(queue, paused, queued, running, failed)`.
     pub async fn queues(&self) -> Result<Vec<(String, bool, i64, i64, i64)>> {
         let rows = self
+            .role(crate::db::Role::Queue)
             .fetch_all(
                 "SELECT q.\"queue\", CASE WHEN EXISTS (SELECT 1 FROM \"kiln_queue_pauses\" p WHERE p.\"queue\" = q.\"queue\") THEN 1 ELSE 0 END,\
                  (SELECT COUNT(*) FROM \"kiln_jobs\" j WHERE j.\"queue\" = q.\"queue\" AND j.\"status\" = 'queued'), \
@@ -592,6 +678,7 @@ impl Db {
     /// Payloads of queued jobs named `name`, oldest first.
     pub(crate) async fn queued_payloads(&self, name: &str) -> Result<Vec<String>> {
         let rows = self
+            .role(crate::db::Role::Queue)
             .fetch_all(
                 "SELECT \"payload\" FROM \"kiln_jobs\" WHERE \"name\" = ? AND \"status\" = 'queued' ORDER BY \"id\"",
                 vec![Value::Text(name.to_owned())],
@@ -698,7 +785,7 @@ async fn watch_attempt(
                 } else {
                     vec![Value::Integer(job.id)]
                 };
-                let cancel = ctx.db.fetch_all(sql, binds).await.ok().and_then(|rows| rows.first().map(|r| r.get::<i64, _>(0) != 0));
+                let cancel = ctx.db.role(crate::db::Role::Queue).fetch_all(sql, binds).await.ok().and_then(|rows| rows.first().map(|r| r.get::<i64, _>(0) != 0));
                 if cancel == Some(true) {
                     handle.abort();
                     return Outcome::Cancelled;
@@ -805,14 +892,25 @@ pub async fn work(ctx: Ctx, concurrency: usize) {
     if let Err(e) = sync_app(&ctx).await {
         tracing::error!(target: "kiln::jobs", error = %e, "syncing schedules and queue limits failed");
     }
-    // Files no record kept (forms never saved, files replaced) go after two days.
-    let files = ctx.clone();
+    // Upkeep: files no record kept (forms never saved, files replaced) go after two days,
+    // expired cache entries every few minutes.
+    let upkeep = ctx.clone();
     tokio::spawn(async move {
+        let mut ticks: u64 = 0;
         while !shutting_down() {
-            if let Err(e) = crate::storage::purge_unattached(&files, jiff::SignedDuration::from_hours(48)).await {
+            if ticks.is_multiple_of(12)
+                && let Err(e) = crate::storage::purge_unattached(&upkeep, jiff::SignedDuration::from_hours(48)).await
+            {
                 tracing::error!(target: "kiln::storage", error = %e, "removing unattached files failed");
             }
-            tokio::time::sleep(Duration::from_secs(3600)).await;
+            if let Err(e) = clear_stale_pending(&upkeep.db).await {
+                tracing::error!(target: "kiln::jobs", error = %e, "clearing stale pending jobs failed");
+            }
+            if let Err(e) = crate::cache::purge_expired(&upkeep.db).await {
+                tracing::error!(target: "kiln::cache", error = %e, "removing expired cache entries failed");
+            }
+            ticks += 1;
+            tokio::time::sleep(Duration::from_secs(300)).await;
         }
     });
     if ctx.try_get::<crate::Schedule>().is_some() {

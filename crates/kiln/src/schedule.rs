@@ -176,13 +176,14 @@ pub struct ScheduleState {
 
 impl Db {
     pub(crate) async fn with_schedule_tables(self) -> Result<Self> {
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS \"kiln_schedules\" (\"name\" TEXT PRIMARY KEY, \"kind\" TEXT NOT NULL, \
+        self.role(crate::db::Role::Queue)
+            .execute(
+                "CREATE TABLE IF NOT EXISTS \"kiln_schedules\" (\"name\" TEXT PRIMARY KEY, \"kind\" TEXT NOT NULL, \
              \"expr\" TEXT NOT NULL, \"tz\" TEXT NOT NULL, \"queue\" TEXT NOT NULL, \"payload\" TEXT NOT NULL, \
              \"max_attempts\" INTEGER NOT NULL, \"next_run_at\" INTEGER NOT NULL, \"last_run_at\" INTEGER, \
              \"paused\" INTEGER NOT NULL DEFAULT 0)",
-        )
-        .await?;
+            )
+            .await?;
         self.ensure_columns("kiln_schedules", &[("priority", "INTEGER NOT NULL DEFAULT 0")]).await?;
         Ok(self)
     }
@@ -193,7 +194,7 @@ impl Db {
         for entry in &schedule.entries {
             let next =
                 entry.when.next_after(now).ok_or_else(|| Error::Config(format!("`{}` never runs", entry.name)))?;
-            self.fetch_all(
+            self.role(crate::db::Role::Queue).fetch_all(
                 "INSERT INTO \"kiln_schedules\" (\"name\", \"kind\", \"expr\", \"tz\", \"queue\", \"payload\", \"max_attempts\", \"next_run_at\", \"priority\") \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (\"name\") DO UPDATE SET \
                  \"next_run_at\" = CASE WHEN \"kiln_schedules\".\"kind\" = excluded.\"kind\" AND \"kiln_schedules\".\"expr\" = excluded.\"expr\" \
@@ -222,7 +223,7 @@ impl Db {
         } else {
             format!("DELETE FROM \"kiln_schedules\" WHERE \"name\" NOT IN ({placeholders}) RETURNING \"name\"")
         };
-        self.fetch_all(&sql, declared).await?;
+        self.role(crate::db::Role::Queue).fetch_all(&sql, declared).await?;
         Ok(())
     }
 
@@ -230,6 +231,7 @@ impl Db {
     /// missed. Safe to run from several processes at once. Returns the job names enqueued.
     pub async fn run_due_schedules(&self, now: Timestamp) -> Result<Vec<String>> {
         let due = self
+            .role(crate::db::Role::Queue)
             .fetch_all(
                 "SELECT \"name\", \"kind\", \"expr\", \"tz\", \"next_run_at\" FROM \"kiln_schedules\" \
                  WHERE \"paused\" = 0 AND \"next_run_at\" <= ? ORDER BY \"next_run_at\"",
@@ -242,11 +244,13 @@ impl Db {
                 (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
             let Some(next) = When::from_row(&kind, &expr, &tz).and_then(|w| w.next_after(now)) else { continue };
             let claimed = self
+                .role(crate::db::Role::Queue)
                 .transaction(|tx| {
                     let name = name.clone();
                     async move {
                         // Compare-and-set on the slot: one process wins, the rest see no row.
                         let won = tx
+                            .role(crate::db::Role::Queue)
                             .fetch_all(
                                 "UPDATE \"kiln_schedules\" SET \"next_run_at\" = ?, \"last_run_at\" = ? \
                                  WHERE \"name\" = ? AND \"next_run_at\" = ? AND \"paused\" = 0 \
@@ -285,6 +289,7 @@ impl Db {
     /// Every stored schedule, by next run.
     pub async fn schedules(&self) -> Result<Vec<ScheduleState>> {
         let rows = self
+            .role(crate::db::Role::Queue)
             .fetch_all(
                 "SELECT \"name\", \"kind\", \"expr\", \"tz\", \"queue\", \"next_run_at\", \"last_run_at\", \"paused\" \
                  FROM \"kiln_schedules\" ORDER BY \"next_run_at\"",
@@ -307,6 +312,7 @@ impl Db {
     /// Pauses or resumes a schedule. Resuming skips the slots missed while paused.
     pub async fn set_schedule_paused(&self, name: &str, paused: bool) -> Result<bool> {
         let rows = self
+            .role(crate::db::Role::Queue)
             .fetch_all(
                 "SELECT \"kind\", \"expr\", \"tz\" FROM \"kiln_schedules\" WHERE \"name\" = ?",
                 vec![Value::Text(name.to_owned())],
@@ -327,12 +333,13 @@ impl Db {
         } else {
             vec![Value::Integer(next), Value::Text(name.to_owned())]
         };
-        Ok(!self.fetch_all(sql, binds).await?.is_empty())
+        Ok(!self.role(crate::db::Role::Queue).fetch_all(sql, binds).await?.is_empty())
     }
 
     /// Enqueues a schedule's job now, without moving its next run. Works while paused.
     pub async fn run_schedule_now(&self, name: &str) -> Result<Option<i64>> {
         let rows = self
+            .role(crate::db::Role::Queue)
             .fetch_all(
                 "SELECT \"queue\", \"payload\", \"max_attempts\", \"priority\" FROM \"kiln_schedules\" WHERE \"name\" = ?",
                 vec![Value::Text(name.to_owned())],

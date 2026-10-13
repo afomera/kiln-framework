@@ -157,11 +157,18 @@ impl Batch {
             hooks.insert("progress".to_owned(), serde_json::to_value(progress?).expect("job specs serialize"));
         }
         let description = self.description;
-        db.transaction(|tx| async move {
+        // A queue in its own database can't join the caller's transaction: the batch and
+        // its jobs wait as `pending` until it commits, and go if it rolls back.
+        let handing_over = db.hands_over(crate::db::Role::Queue);
+        let status = if handing_over { "pending" } else { "running" };
+        let queue = db.role(crate::db::Role::Queue);
+        let create = queue.transaction(move |tx| async move {
             let rows = tx
                 .fetch_all(
-                    "INSERT INTO \"kiln_batches\" (\"description\", \"total\", \"pending\", \"hooks\", \"status\", \"created_at\") \
-                     VALUES (?, ?, ?, ?, 'running', ?) RETURNING \"id\"",
+                    &format!(
+                        "INSERT INTO \"kiln_batches\" (\"description\", \"total\", \"pending\", \"hooks\", \"status\", \"created_at\") \
+                         VALUES (?, ?, ?, ?, '{status}', ?) RETURNING \"id\""
+                    ),
                     vec![
                         Value::Text(description),
                         Value::Integer(jobs.len() as i64),
@@ -175,10 +182,50 @@ impl Batch {
             for job in jobs {
                 insert_job_in_batch(&tx, &job, Some(id), false).await?;
             }
-            settle(&tx, id).await?;
+            if !handing_over {
+                settle(&tx, id).await?;
+            }
             Ok(id)
+        });
+        if !handing_over {
+            return create.await;
+        }
+        let id = crate::jobs::HOLD_JOBS.scope(true, create).await?;
+        let (release, discard) = (queue.clone(), queue);
+        db.after_commit_async(move || async move {
+            let released = release
+                .transaction(|tx| async move {
+                    tx.fetch_all(
+                        "UPDATE \"kiln_batches\" SET \"status\" = 'running' WHERE \"id\" = ? AND \"status\" = 'pending' RETURNING \"id\"",
+                        vec![Value::Integer(id.0)],
+                    )
+                    .await?;
+                    tx.fetch_all(
+                        "UPDATE \"kiln_jobs\" SET \"status\" = 'queued' WHERE \"batch_id\" = ? AND \"status\" = 'pending' RETURNING \"id\"",
+                        vec![Value::Integer(id.0)],
+                    )
+                    .await?;
+                    settle(&tx, id).await
+                })
+                .await;
+            if let Err(e) = released {
+                tracing::error!(target: "kiln::jobs", batch = id.0, error = %e, "releasing a batch after its transaction committed failed");
+            }
+            crate::jobs::wake_workers();
         })
-        .await
+        .await;
+        db.after_rollback(move || async move {
+            let _ = discard
+                .fetch_all(
+                    "DELETE FROM \"kiln_jobs\" WHERE \"batch_id\" = ? RETURNING \"id\"",
+                    vec![Value::Integer(id.0)],
+                )
+                .await;
+            let _ = discard
+                .fetch_all("DELETE FROM \"kiln_batches\" WHERE \"id\" = ? RETURNING \"id\"", vec![Value::Integer(id.0)])
+                .await;
+        });
+        Ok(id)
     }
 }
 
@@ -220,20 +267,22 @@ impl BatchId {
     pub async fn add<J: JobInfo>(&self, db: &Db, job: J) -> Result<i64> {
         let spec = JobSpec::of(&job)?;
         let id = *self;
-        db.transaction(|tx| async move {
-            let open = tx
-                .fetch_all(
-                    "UPDATE \"kiln_batches\" SET \"total\" = \"total\" + 1, \"pending\" = \"pending\" + 1 \
+        db.role(crate::db::Role::Queue)
+            .transaction(|tx| async move {
+                let open = tx
+                    .role(crate::db::Role::Queue)
+                    .fetch_all(
+                        "UPDATE \"kiln_batches\" SET \"total\" = \"total\" + 1, \"pending\" = \"pending\" + 1 \
                      WHERE \"id\" = ? AND \"status\" = 'running' RETURNING \"id\"",
-                    vec![Value::Integer(id.0)],
-                )
-                .await?;
-            if open.is_empty() {
-                return Err(Error::Job(format!("batch {id} is finished or cancelled; it takes no more jobs")));
-            }
-            insert_job_in_batch(&tx, &spec, Some(id), false).await
-        })
-        .await
+                        vec![Value::Integer(id.0)],
+                    )
+                    .await?;
+                if open.is_empty() {
+                    return Err(Error::Job(format!("batch {id} is finished or cancelled; it takes no more jobs")));
+                }
+                insert_job_in_batch(&tx, &spec, Some(id), false).await
+            })
+            .await
     }
 
     pub async fn status(&self, db: &Db) -> Result<BatchStatus> {
@@ -244,8 +293,9 @@ impl BatchId {
     /// finish. Returns false if the batch had already ended.
     pub async fn cancel(&self, db: &Db) -> Result<bool> {
         let id = *self;
-        db.transaction(|tx| async move {
+        db.role(crate::db::Role::Queue).transaction(|tx| async move {
             let ended = tx
+                .role(crate::db::Role::Queue)
                 .fetch_all(
                     "UPDATE \"kiln_batches\" SET \"status\" = 'cancelled', \"finished_at\" = ? \
                      WHERE \"id\" = ? AND \"status\" = 'running' RETURNING \"id\"",
@@ -256,13 +306,14 @@ impl BatchId {
                 return Ok(false);
             }
             let removed = tx
+                .role(crate::db::Role::Queue)
                 .fetch_all(
                     "DELETE FROM \"kiln_jobs\" WHERE \"batch_id\" = ? AND \"batch_hook\" = 0 AND \"status\" = 'queued' RETURNING \"id\"",
                     vec![Value::Integer(id.0)],
                 )
                 .await?;
             let n = removed.len() as i64;
-            tx.fetch_all(
+            tx.role(crate::db::Role::Queue).fetch_all(
                 "UPDATE \"kiln_batches\" SET \"pending\" = \"pending\" - ?, \"cancelled\" = \"cancelled\" + ? WHERE \"id\" = ? RETURNING \"id\"",
                 vec![Value::Integer(n), Value::Integer(n), Value::Integer(id.0)],
             )
@@ -282,7 +333,7 @@ pub(crate) async fn job_ended(tx: &Db, batch: BatchId, outcome: &str) -> Result<
         "failed" => "failed",
         _ => "cancelled",
     };
-    tx.fetch_all(
+    tx.role(crate::db::Role::Queue).fetch_all(
         &format!("UPDATE \"kiln_batches\" SET \"pending\" = \"pending\" - 1, \"{column}\" = \"{column}\" + 1 WHERE \"id\" = ? RETURNING \"id\""),
         vec![Value::Integer(batch.0)],
     )
@@ -296,14 +347,17 @@ pub(crate) async fn job_ended(tx: &Db, batch: BatchId, outcome: &str) -> Result<
 
 /// Enqueues the batch's `on_progress` job, unless one is already waiting.
 async fn progress(tx: &Db, batch: BatchId) -> Result<()> {
-    let rows =
-        tx.fetch_all("SELECT \"hooks\" FROM \"kiln_batches\" WHERE \"id\" = ?", vec![Value::Integer(batch.0)]).await?;
+    let rows = tx
+        .role(crate::db::Role::Queue)
+        .fetch_all("SELECT \"hooks\" FROM \"kiln_batches\" WHERE \"id\" = ?", vec![Value::Integer(batch.0)])
+        .await?;
     let Some(row) = rows.first() else { return Ok(()) };
     let hooks: serde_json::Value = serde_json::from_str(&row.get::<String, _>(0)).unwrap_or_default();
     let Some(spec) = hooks.get("progress").and_then(|h| serde_json::from_value::<JobSpec>(h.clone()).ok()) else {
         return Ok(());
     };
     let waiting = tx
+        .role(crate::db::Role::Queue)
         .fetch_all(
             "SELECT 1 FROM \"kiln_jobs\" WHERE \"batch_id\" = ? AND \"batch_hook\" = 1 AND \"name\" = ? AND \"status\" = 'queued'",
             vec![Value::Integer(batch.0), Value::Text(spec.name.clone())],
@@ -317,7 +371,7 @@ async fn progress(tx: &Db, batch: BatchId) -> Result<()> {
 
 /// A failed job of the batch was queued again.
 pub(crate) async fn job_retried(tx: &Db, batch: BatchId) -> Result<()> {
-    tx.fetch_all(
+    tx.role(crate::db::Role::Queue).fetch_all(
         "UPDATE \"kiln_batches\" SET \"pending\" = \"pending\" + 1, \"failed\" = \"failed\" - 1, \"status\" = 'running', \"finished_at\" = NULL \
          WHERE \"id\" = ? AND \"status\" != 'cancelled' RETURNING \"id\"",
         vec![Value::Integer(batch.0)],
@@ -330,6 +384,7 @@ pub(crate) async fn job_retried(tx: &Db, batch: BatchId) -> Result<()> {
 /// `success`.
 async fn settle(tx: &Db, batch: BatchId) -> Result<()> {
     let done = tx
+        .role(crate::db::Role::Queue)
         .fetch_all(
             "UPDATE \"kiln_batches\" SET \"status\" = 'finished', \"finished_at\" = ? \
              WHERE \"id\" = ? AND \"status\" = 'running' AND \"pending\" <= 0 RETURNING \"failed\", \"cancelled\"",
@@ -348,6 +403,7 @@ async fn settle(tx: &Db, batch: BatchId) -> Result<()> {
 async fn fire(tx: &Db, batch: BatchId, hook: &str) -> Result<()> {
     let column = format!("fired_{hook}");
     let won = tx
+        .role(crate::db::Role::Queue)
         .fetch_all(
             &format!(
                 "UPDATE \"kiln_batches\" SET \"{column}\" = 1 WHERE \"id\" = ? AND \"{column}\" = 0 RETURNING \"hooks\""
@@ -366,7 +422,7 @@ async fn fire(tx: &Db, batch: BatchId, hook: &str) -> Result<()> {
 
 impl Db {
     pub(crate) async fn with_batch_table(self) -> Result<Self> {
-        self.execute(
+        self.role(crate::db::Role::Queue).execute(
             "CREATE TABLE IF NOT EXISTS \"kiln_batches\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \"description\" TEXT NOT NULL, \
              \"status\" TEXT NOT NULL, \"total\" INTEGER NOT NULL, \"pending\" INTEGER NOT NULL, \
              \"succeeded\" INTEGER NOT NULL DEFAULT 0, \"failed\" INTEGER NOT NULL DEFAULT 0, \"cancelled\" INTEGER NOT NULL DEFAULT 0, \
@@ -389,6 +445,7 @@ impl Db {
 
     async fn batches_where(&self, clause: &str, binds: Vec<Value>) -> Result<Vec<BatchStatus>> {
         let rows = self
+            .role(crate::db::Role::Queue)
             .fetch_all(
                 &format!(
                     "SELECT \"id\", \"description\", \"status\", \"total\", \"pending\", \"succeeded\", \"failed\", \"cancelled\", \

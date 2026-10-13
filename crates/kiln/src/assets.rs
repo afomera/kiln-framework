@@ -213,6 +213,7 @@ impl Assets {
             ("lexxy".to_owned(), lexxy_js().url.clone()),
             // Lexxy uploads attachments through Active Storage's `DirectUpload`; Kiln's own.
             ("@rails/activestorage".to_owned(), direct_upload_js().url.clone()),
+            ("kiln/direct-upload".to_owned(), direct_upload_js().url.clone()),
             ("kiln/confirm".to_owned(), confirm_js().url.clone()),
             ("kiln/dev-reload".to_owned(), dev_reload_js().url.clone()),
             ("kiln/rich-text".to_owned(), rich_text_js().url.clone()),

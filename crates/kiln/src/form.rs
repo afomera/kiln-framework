@@ -493,7 +493,10 @@ async fn file_token(ctx: &Ctx, token: &str) -> Result<String> {
         return Ok(String::new());
     }
     match crate::storage::from_form_token(&ctx.db, ctx.signing_key(), token.trim()).await? {
-        Some(attachment) => Ok(crate::form::FormField::to_field(&attachment)),
+        Some(attachment) => {
+            crate::storage::confirm_stored(ctx, &attachment).await?;
+            Ok(crate::form::FormField::to_field(&attachment))
+        }
         None => Err(Error::BadRequest("a file field held something other than a file this form uploaded".into())),
     }
 }

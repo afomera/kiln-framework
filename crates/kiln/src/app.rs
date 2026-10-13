@@ -517,12 +517,18 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
         && !path.starts_with("/kiln/streams/")
         && !path.starts_with(crate::storage::FILES_PATH)
         && !path.starts_with(crate::storage::VARIANTS_PATH)
-        && path != crate::storage::UPLOADS_PATH;
+        && !path.starts_with(crate::storage::DIRECT_UPLOADS_PATH);
     let viewer = if tools_path { tools_viewer(&shared, request.headers()).await } else { None };
     if *request.method() == Method::POST
         && let Some(viewer) = viewer.clone()
     {
         return crate::devtools::act(&shared.ctx, viewer, request).await;
+    }
+    // A direct upload's bytes, for stores without presigned URLs: the signed link is the
+    // permission, so no session is involved.
+    if *request.method() == Method::PUT && path.starts_with(&format!("{}/", crate::storage::DIRECT_UPLOADS_PATH)) {
+        let path = path.to_owned();
+        return crate::storage::receive_direct_upload(&shared.ctx, &path, request.into_body()).await;
     }
     // Static files skip sessions and logging: they never set cookies.
     if matches!(*request.method(), Method::GET | Method::HEAD) {
@@ -571,7 +577,6 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
     let boundary =
         multer::parse_boundary(content_type).ok().filter(|_| content_type.starts_with("multipart/form-data"));
     let mut fields: Vec<(String, String)> = vec![];
-    let mut uploaded: Option<(axum::body::Bytes, String)> = None;
     let body = if mutating && is_form {
         match axum::body::to_bytes(body, FORM_LIMIT).await {
             Ok(bytes) => {
@@ -585,7 +590,6 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
         match axum::body::to_bytes(body, crate::storage::max_upload_size() + FORM_LIMIT).await {
             Ok(bytes) => {
                 fields = multipart_text_fields(bytes.clone(), &boundary).await;
-                uploaded = Some((bytes.clone(), boundary));
                 Body::from(bytes)
             }
             Err(_) => return too_large(),
@@ -604,10 +608,11 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
     let method = parts.method.clone();
 
     let sent = parts.headers.get("x-csrf-token").and_then(|v| v.to_str().ok()).or_else(|| field("_csrf"));
-    // The rich text editor's uploads: same-site browsers only, like any form.
-    if method == Method::POST && path == crate::storage::UPLOADS_PATH {
+    // Starting a direct upload: same-site browsers only, like any form.
+    if method == Method::POST && path == crate::storage::DIRECT_UPLOADS_PATH {
         let csrf_ok = matches!((sent, session.existing_csrf_token()), (Some(sent), Some(expected)) if tokens_match(sent, &expected));
-        let response = crate::storage::direct_upload(&shared.ctx, csrf_ok, uploaded).await;
+        let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap_or_default();
+        let response = crate::storage::create_direct_upload(&shared.ctx, csrf_ok, &bytes).await;
         tracing::info!(target: "kiln::request", method = %method, path, status = response.status().as_u16(), elapsed = ?started.elapsed());
         return response;
     }

@@ -155,6 +155,10 @@ impl SqlType for RichText {
 }
 
 fn plain_text(html: &str) -> String {
+    // An attachment reads as `[caption]` or `[filename]` (as in Action Text), so a post
+    // that's only a picture isn't blank.
+    let html = render_attachments(html, &|url| Some(url.to_owned()));
+    let html = attachment_labels(&html);
     let mut out = String::new();
     let mut in_tag = false;
     for c in html.chars() {
@@ -340,6 +344,36 @@ pub(crate) fn render_attachments(html: &str, link: &dyn Fn(&str) -> Option<Strin
     out
 }
 
+/// Replaces rendered attachment figures with `[caption]` / `[filename]` text.
+fn attachment_labels(html: &str) -> String {
+    const OPEN: &str = "<figure class=\"attachment ";
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let figure = &rest[start..];
+        let end = figure.find("</figure>").map_or(figure.len(), |i| i + "</figure>".len());
+        let inner = &figure[..end];
+        let label = between(inner, "<figcaption class=\"attachment__caption\">", "</figcaption>")
+            .filter(|c| !c.contains('<'))
+            .or_else(|| {
+                between(inner, "class=\"attachment__name\"", "</a>").and_then(|a| a.split_once('>').map(|(_, t)| t))
+            })
+            .or_else(|| between(inner, "src=\"", "\"").and_then(|src| src.rsplit('/').next()))
+            .unwrap_or("attachment");
+        out.push_str(&format!(" [{label}] "));
+        rest = &figure[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn between<'a>(text: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let from = text.find(start)? + start.len();
+    let len = text[from..].find(end)?;
+    Some(&text[from..from + len])
+}
+
 /// `name="value"` pairs from a sanitized tag (values stay escaped).
 fn parse_attributes(text: &str) -> Vec<(String, String)> {
     let mut attrs = vec![];
@@ -417,6 +451,19 @@ mod tests {
         assert!(!shown.contains("kiln-attachment"), "the unsigned one is dropped: {shown}");
         let none = render_attachments(stored.as_html(), &|_| None);
         assert_eq!(none, "<p>Look:</p>");
+    }
+
+    #[test]
+    fn attachments_count_as_content() {
+        let only_image = RichText::new(
+            r#"<kiln-attachment url="/kiln/files/t/sun.png" content-type="image/png" filename="sun.png"></kiln-attachment>"#,
+        );
+        assert!(!only_image.is_empty());
+        assert_eq!(only_image.to_plain_text(), "[sun.png]");
+        let captioned = RichText::new(
+            r#"<p>Look</p><kiln-attachment url="/kiln/files/t/a.pdf" content-type="application/pdf" filename="a.pdf" caption="The plan"></kiln-attachment>"#,
+        );
+        assert_eq!(captioned.to_plain_text(), "Look [The plan]");
     }
 
     #[test]

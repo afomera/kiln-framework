@@ -138,9 +138,29 @@ impl Cli {
         }
     }
 
+    /// The app's database, plus separate ones for Kiln's queue, cache and broadcasts when
+    /// `QUEUE_DATABASE_URL`, `CACHE_DATABASE_URL` or `STREAMS_DATABASE_URL` name them.
     async fn db(&self) -> Result<Db> {
         std::fs::create_dir_all(self.root.join("db"))?;
-        Db::connect_or_create(&self.database_url()).await
+        let mut db = Db::connect_or_create(&self.database_url()).await?;
+        for (role, name) in [
+            (crate::db::Role::Queue, "QUEUE_DATABASE_URL"),
+            (crate::db::Role::Cache, "CACHE_DATABASE_URL"),
+            (crate::db::Role::Streams, "STREAMS_DATABASE_URL"),
+        ] {
+            if let Some(url) = crate::config::value(name).filter(|url| !url.is_empty()) {
+                let separate = Db::connect_or_create(&url).await?;
+                if separate.dialect().name() != db.dialect().name() {
+                    return Err(Error::Config(format!(
+                        "{name} is {}, but the app's database is {}; use the same backend for both",
+                        separate.dialect().name(),
+                        db.dialect().name()
+                    )));
+                }
+                db = db.with_role(role, separate);
+            }
+        }
+        Ok(db)
     }
 
     async fn dispatch(self, args: &[&str]) -> Result {

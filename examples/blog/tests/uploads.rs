@@ -23,11 +23,9 @@ fn img_src(html: &str) -> String {
 async fn an_author_uploads_a_cover_and_readers_see_it(app: TestApp) -> Result {
     let author = app.create::<User>().await?;
     let client = app.sign_in_as(&author);
-    client
-        .get_html(posts::new::path())
-        .await
-        .assert_contains(r#"enctype="multipart/form-data""#)
-        .assert_contains(r#"<input type="file" id="cover" name="cover" accept="image/*">"#);
+    client.get_html(posts::new::path()).await.assert_contains(r#"enctype="multipart/form-data""#).assert_contains(
+        r#"<input type="file" id="cover" name="cover" accept="image/*" data-direct-upload-url="/kiln/direct_uploads">"#,
+    );
     client
         .post_multipart(
             posts::create::path(),
@@ -208,13 +206,11 @@ async fn the_editor_uploads_attachments_that_posts_show(app: TestApp) -> Result 
     client
         .get_html(posts::new::path())
         .await
-        .assert_contains(r#"data-direct-upload-url="/kiln/uploads""#)
+        .assert_contains(r#"data-direct-upload-url="/kiln/direct_uploads""#)
         .assert_contains(r#""@rails/activestorage":"/kiln/direct-upload-"#);
 
-    // What Lexxy's upload does: the file, plus the page's CSRF token.
-    let upload = client.post_multipart("/kiln/uploads", &[], &[("file", Upload::png("sun.png"))]).await;
-    upload.assert_status(200);
-    let blob = upload.json();
+    // What Lexxy's upload does: the details (with the page's CSRF token), then the bytes.
+    let blob = client.direct_upload(Upload::png("sun.png")).await;
     assert_eq!((blob["filename"].as_str(), blob["content_type"].as_str()), (Some("sun.png"), Some("image/png")));
     let url = blob["url"].as_str().expect("url").to_owned();
 
@@ -244,8 +240,55 @@ async fn the_editor_uploads_attachments_that_posts_show(app: TestApp) -> Result 
 #[kiln::test]
 async fn uploads_need_the_pages_csrf_token(app: TestApp) -> Result {
     // A client with no page loaded has no session token to send.
-    let response = app.client().post_json("/kiln/uploads", &kiln::testing::json!({})).await;
+    let response = app
+        .client()
+        .post_json("/kiln/direct_uploads", &kiln::testing::json!({ "blob": { "filename": "x.png", "byte_size": 1 } }))
+        .await;
     response.assert_status(403);
+    // And the bytes only go where a signed link says.
+    app.client()
+        .request(kiln::testing::Method::PUT, "/kiln/direct_uploads/forged.token", None)
+        .await
+        .assert_status(403);
+    Ok(())
+}
+
+#[kiln::test]
+async fn forms_take_direct_uploads_by_token(app: TestApp) -> Result {
+    let author = app.create::<User>().await?;
+    let client = app.sign_in_as(&author);
+    client
+        .get_html(posts::new::path())
+        .await
+        .assert_contains(r#"accept="image/*" data-direct-upload-url="/kiln/direct_uploads""#);
+    // What the form's JavaScript does on submit: upload first, then send only the token.
+    let blob = client.direct_upload(Upload::png_sized("direct.png", 40, 20)).await;
+    let token = blob["upload_token"].as_str().expect("a form token").to_owned();
+    client
+        .post_form(posts::create::path(), &[("title", "Direct"), ("body", "<p>x</p>"), ("cover", &token)])
+        .await
+        .assert_status(303);
+    let post = Post::find_by(post::slug.eq("direct")).one_or_404(&app.db).await?;
+    let cover = post.cover.expect("the uploaded cover");
+    assert_eq!((cover.filename(), cover.content_type()), ("direct.png", "image/png"));
+    assert_eq!(app.ctx().storage()?.read(&cover).await?.len(), Upload::png_sized("x", 40, 20).bytes.len());
+    Ok(())
+}
+
+#[kiln::test]
+async fn direct_uploads_respect_the_size_limit(app: TestApp) -> Result {
+    let author = app.create::<User>().await?;
+    let client = app.sign_in_as(&author);
+    let token = client.csrf_token();
+    // Declared too big: refused before any bytes move. (The default cap is 25MB.)
+    let response = client
+        .post_json_with_csrf(
+            "/kiln/direct_uploads",
+            &kiln::testing::json!({ "blob": { "filename": "huge.bin", "byte_size": 100_000_000_u64 } }),
+            &token,
+        )
+        .await;
+    response.assert_status(413);
     Ok(())
 }
 

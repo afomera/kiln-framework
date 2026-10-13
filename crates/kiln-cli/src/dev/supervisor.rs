@@ -1109,7 +1109,7 @@ fn route_lines(routes: &[serde_json::Value]) -> Vec<Line> {
     let field = |r: &serde_json::Value, k: &str| r[k].as_str().unwrap_or("").to_owned();
     let path_width = routes.iter().map(|r| field(r, "path").chars().count()).max().unwrap_or(4).min(56);
     let action_width = routes.iter().map(|r| field(r, "action").chars().count()).max().unwrap_or(6).min(40);
-    let mut lines = vec![Line::system(&format!("{} routes · r refreshes · / searches", routes.len()))];
+    let mut lines = vec![Line::system(format!("{} routes · r refreshes · / searches", routes.len()))];
     for r in routes {
         let method = field(r, "method");
         let color = match method.as_str() {

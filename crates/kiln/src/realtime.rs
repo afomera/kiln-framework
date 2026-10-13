@@ -74,13 +74,29 @@ impl Db {
             "CREATE INDEX IF NOT EXISTS \"kiln_stream_messages_stream\" ON \"kiln_stream_messages\" (\"stream\", \"id\")",
         )
         .await?;
-        self.with_job_table().await?.with_blob_table().await
+        self.with_job_table().await?.with_blob_table().await?.with_cache_table().await
     }
 
     /// Sends `turbo` to every page subscribed to `stream`. The stream's views render now,
     /// without a request, so they can't use `current_user`: broadcasts go to everyone.
     pub async fn broadcast(&self, stream: &str, turbo: TurboStream) -> Result<()> {
         let payload = turbo.render()?;
+        // The stream log in its own database can't join the caller's transaction: the
+        // message is written once it commits (and never if it rolls back).
+        if self.hands_over(crate::db::Role::Streams) {
+            let (streams, stream) = (self.role(crate::db::Role::Streams), stream.to_owned());
+            self.after_commit_async(move || async move {
+                if let Err(e) = streams.write_broadcast(&stream, payload).await {
+                    tracing::error!(target: "kiln::realtime", stream, error = %e, "broadcasting after the transaction committed failed");
+                }
+            })
+            .await;
+            return Ok(());
+        }
+        self.role(crate::db::Role::Streams).write_broadcast(stream, payload).await
+    }
+
+    async fn write_broadcast(&self, stream: &str, payload: String) -> Result<()> {
         let rows = self
             .fetch_all(
                 "INSERT INTO \"kiln_stream_messages\" (\"stream\", \"payload\", \"created_at\") VALUES (?, ?, ?) RETURNING \"id\"",
@@ -103,6 +119,7 @@ impl Db {
     /// Messages on `stream` after `after`, oldest first: `(id, payload)`.
     pub async fn stream_messages(&self, stream: &str, after: i64) -> Result<Vec<(i64, String)>> {
         let rows = self
+            .role(crate::db::Role::Streams)
             .fetch_all(
                 "SELECT \"id\", \"payload\" FROM \"kiln_stream_messages\" WHERE \"stream\" = ? AND \"id\" > ? ORDER BY \"id\" LIMIT 500",
                 vec![Value::Text(stream.to_owned()), Value::Integer(after)],
@@ -113,7 +130,10 @@ impl Db {
 
     /// `(oldest, newest)` ids still in the log.
     async fn stream_log_bounds(&self) -> Result<(Option<i64>, i64)> {
-        let rows = self.fetch_all("SELECT MIN(\"id\"), MAX(\"id\") FROM \"kiln_stream_messages\"", vec![]).await?;
+        let rows = self
+            .role(crate::db::Role::Streams)
+            .fetch_all("SELECT MIN(\"id\"), MAX(\"id\") FROM \"kiln_stream_messages\"", vec![])
+            .await?;
         let row = rows.first().ok_or(Error::NotFound)?;
         Ok((row.get(0), row.get::<Option<i64>, _>(1).unwrap_or(0)))
     }

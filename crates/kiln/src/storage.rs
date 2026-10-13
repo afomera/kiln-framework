@@ -135,6 +135,13 @@ impl Storage {
         Ok(())
     }
 
+    /// A presigned `PUT` for a direct upload, when the store can take one.
+    async fn signed_upload_url(&self, key: &str) -> Option<String> {
+        let signer = self.signer.as_ref()?;
+        let url = signer.signed_url(axum::http::Method::PUT, &StorePath::from(key), PUT_TTL).await.ok()?;
+        Some(url.to_string())
+    }
+
     async fn signed_url(&self, key: &str) -> Option<String> {
         let signer = self.signer.as_ref()?;
         let url = signer
@@ -240,6 +247,17 @@ pub(crate) async fn store(
     };
     let byte_size = bytes.len() as i64;
     storage.put(&key, bytes).await?;
+    insert_blob(db, key, filename, content_type, byte_size, checksum).await
+}
+
+async fn insert_blob(
+    db: &Db,
+    key: String,
+    filename: String,
+    content_type: String,
+    byte_size: i64,
+    checksum: String,
+) -> Result<Attachment> {
     let rows = db
         .fetch_all(
             "INSERT INTO \"kiln_blobs\" (\"key\", \"filename\", \"content_type\", \"byte_size\", \"checksum\", \"created_at\") \
@@ -256,6 +274,26 @@ pub(crate) async fn store(
         .await?;
     let id = rows.first().map(|r| sqlx::Row::get::<i64, _>(r, 0)).unwrap_or_default();
     Ok(Attachment { blob_id: id, key, filename, content_type, byte_size })
+}
+
+/// Before a form keeps a file: it must really be in the store (a direct upload the browser
+/// never finished isn't) and within `MAX_UPLOAD_SIZE`.
+pub(crate) async fn confirm_stored(ctx: &Ctx, attachment: &Attachment) -> Result<()> {
+    let storage = ctx.storage()?;
+    let meta = match storage.store.head(&StorePath::from(attachment.key.as_str())).await {
+        Ok(meta) => meta,
+        Err(object_store::Error::NotFound { .. }) => {
+            return Err(Error::BadRequest(format!(
+                "`{}` didn't finish uploading; choose it again",
+                attachment.filename
+            )));
+        }
+        Err(e) => return Err(storage_error(e)),
+    };
+    if meta.size as usize > max_upload_size() {
+        return Err(Error::BadRequest(format!("`{}` is larger than MAX_UPLOAD_SIZE", attachment.filename)));
+    }
+    Ok(())
 }
 
 /// `ab/cd/abcd…`: 26 random characters, fanned out so no directory gets huge.
@@ -654,63 +692,130 @@ async fn blob(db: &Db, id: i64) -> Result<Option<Attachment>> {
 
 pub(crate) const FILES_PATH: &str = "/kiln/files/";
 
-/// Where the rich text editor uploads attachments.
-pub(crate) const UPLOADS_PATH: &str = "/kiln/uploads";
+/// Direct uploads: `POST` the file's details here, then `PUT` the bytes where it says.
+pub(crate) const DIRECT_UPLOADS_PATH: &str = "/kiln/direct_uploads";
 
-/// `POST /kiln/uploads`: one multipart `file`, stored now, described as Lexxy expects
-/// (the shape of Active Storage's direct-upload response).
-pub(crate) async fn direct_upload(ctx: &Ctx, csrf_ok: bool, body: Option<(Bytes, String)>) -> Response {
-    let json = |status: StatusCode, value: serde_json::Value| {
-        let mut response = (status, value.to_string()).into_response();
-        response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        response
-    };
+/// How long a direct upload's `PUT` URL works.
+const PUT_TTL: Duration = Duration::from_secs(600);
+
+fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
+    let mut response = (status, value.to_string()).into_response();
+    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+}
+
+/// `POST /kiln/direct_uploads` with `{"blob": {"filename", "content_type", "byte_size"}}` (Active
+/// Storage's shape, which Lexxy sends): records the blob and answers where to `PUT` the
+/// bytes. Cloud stores get a presigned URL, so the file never passes through the app; local
+/// disk gets Kiln's own `PUT /kiln/direct_uploads/<token>`.
+pub(crate) async fn create_direct_upload(ctx: &Ctx, csrf_ok: bool, body: &[u8]) -> Response {
     if !csrf_ok {
-        return json(
+        return json_response(
             StatusCode::FORBIDDEN,
             serde_json::json!({ "error": "missing or stale CSRF token; reload the page" }),
         );
     }
-    let Some((bytes, boundary)) = body else {
-        return json(StatusCode::BAD_REQUEST, serde_json::json!({ "error": "send the file as multipart/form-data" }));
+    let request: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    let blob = request.get("blob").unwrap_or(&request);
+    let filename = clean_filename(blob["filename"].as_str().unwrap_or("file"));
+    let declared = blob["content_type"].as_str().filter(|t| !t.is_empty()).unwrap_or("application/octet-stream");
+    let Some(byte_size) = blob["byte_size"].as_u64() else {
+        return json_response(StatusCode::BAD_REQUEST, serde_json::json!({ "error": "send the file's byte_size" }));
     };
-    let stream = futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes) });
-    let mut multipart = multer::Multipart::new(stream, boundary);
-    let result: Result<Option<Attachment>> = async {
+    if byte_size as usize > max_upload_size() {
+        return json_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            serde_json::json!({ "error": format!("`{filename}` is larger than MAX_UPLOAD_SIZE ({} bytes)", max_upload_size()) }),
+        );
+    }
+    let checksum = blob["checksum"].as_str().unwrap_or_default().to_owned();
+    let result: Result<(Attachment, String)> = async {
         let storage = ctx.storage()?;
-        while let Some(field) = multipart.next_field().await.map_err(|e| Error::BadRequest(e.to_string()))? {
-            if field.name() != Some("file") {
-                continue;
+        let file = insert_blob(&ctx.db, new_key(), filename, declared.to_owned(), byte_size as i64, checksum).await?;
+        let put = match storage.signed_upload_url(&file.key).await {
+            Some(url) => url,
+            None => {
+                let until = (Timestamp::now() + jiff::SignedDuration::try_from(PUT_TTL).unwrap_or_default())
+                    .as_jiff()
+                    .as_second();
+                format!(
+                    "{DIRECT_UPLOADS_PATH}/{}",
+                    ctx.signing_key().sign_str(&format!("put:{}:{until}", file.blob_id))
+                )
             }
-            let filename = field.file_name().unwrap_or("file").to_owned();
-            let declared = field.content_type().map(ToString::to_string).unwrap_or_default();
-            let data = field.bytes().await.map_err(|e| Error::BadRequest(e.to_string()))?;
-            return Ok(Some(store(&ctx.db, &storage, &filename, &declared, data).await?));
-        }
-        Ok(None)
+        };
+        Ok((file, put))
     }
     .await;
     match result {
-        Ok(Some(file)) => {
-            let token = ctx.signing_key().sign_str(&format!("file:{}", file.blob_id));
-            json(
+        Ok((file, put)) => {
+            let key = ctx.signing_key();
+            json_response(
                 StatusCode::OK,
                 serde_json::json!({
-                    "signed_id": token,
-                    "attachable_sgid": token,
+                    "signed_id": key.sign_str(&format!("file:{}", file.blob_id)),
+                    "attachable_sgid": key.sign_str(&format!("file:{}", file.blob_id)),
+                    // What a form field submits to keep the file.
+                    "upload_token": file.form_token(key),
                     "filename": file.filename,
                     "content_type": file.content_type,
                     "byte_size": file.byte_size,
                     "previewable": false,
-                    "url": file.url_signed(ctx.signing_key()),
+                    "url": file.url_signed(key),
+                    "direct_upload": { "url": put, "headers": { "Content-Type": file.content_type } },
                 }),
             )
         }
-        Ok(None) => json(StatusCode::BAD_REQUEST, serde_json::json!({ "error": "no `file` in the upload" })),
         Err(e) => {
-            tracing::error!(target: "kiln::storage", error = %e, "storing an upload failed");
-            json(StatusCode::BAD_REQUEST, serde_json::json!({ "error": e.to_string() }))
+            tracing::error!(target: "kiln::storage", error = %e, "starting a direct upload failed");
+            json_response(StatusCode::BAD_REQUEST, serde_json::json!({ "error": e.to_string() }))
         }
+    }
+}
+
+/// `PUT /kiln/direct_uploads/<token>`: the bytes of a direct upload, for stores that can't
+/// take them from the browser themselves (local disk, memory).
+pub(crate) async fn receive_direct_upload(ctx: &Ctx, path: &str, body: axum::body::Body) -> Response {
+    let token = path.strip_prefix(DIRECT_UPLOADS_PATH).unwrap_or_default().trim_start_matches('/');
+    let parsed = ctx.signing_key().verify_str(token).and_then(|v| {
+        let (id, until) = v.strip_prefix("put:")?.split_once(':')?;
+        Some((id.parse::<i64>().ok()?, until.parse::<i64>().ok()?))
+    });
+    let Some((id, _)) = parsed.filter(|(_, until)| *until >= Timestamp::now().as_jiff().as_second()) else {
+        return json_response(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({ "error": "that upload link is invalid or has expired" }),
+        );
+    };
+    let bytes = match axum::body::to_bytes(body, max_upload_size()).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return json_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                serde_json::json!({ "error": "larger than MAX_UPLOAD_SIZE" }),
+            );
+        }
+    };
+    let result: Result<()> = async {
+        let file = blob(&ctx.db, id).await?.ok_or(Error::NotFound)?;
+        if bytes.len() as i64 != file.byte_size {
+            return Err(Error::BadRequest(format!("expected {} bytes, got {}", file.byte_size, bytes.len())));
+        }
+        // The bytes are here, so the real type can be read from them.
+        if let Some(real) = sniff(&bytes).filter(|real| *real != file.content_type) {
+            ctx.db
+                .fetch_all(
+                    "UPDATE \"kiln_blobs\" SET \"content_type\" = ? WHERE \"id\" = ? RETURNING \"id\"",
+                    vec![Value::Text(real.to_owned()), Value::Integer(id)],
+                )
+                .await?;
+        }
+        ctx.storage()?.put(&file.key, bytes).await
+    }
+    .await;
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => json_response(StatusCode::BAD_REQUEST, serde_json::json!({ "error": e.to_string() })),
     }
 }
 

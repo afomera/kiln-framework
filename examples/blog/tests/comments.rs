@@ -122,7 +122,7 @@ async fn gaps_older_than_the_log_refresh_the_page(app: TestApp) -> Result {
     }
     // Simulate retention pruning the oldest message.
     let oldest = app.db.stream_messages(&post::stream_name(post.id), 0).await?[0].0;
-    app.db.execute(&format!("DELETE FROM kiln_stream_messages WHERE id = {oldest}")).await?;
+    app.db.role(kiln::Role::Streams).execute(&format!("DELETE FROM kiln_stream_messages WHERE id = {oldest}")).await?;
 
     let text = app.client().read_stream(&url, Some(&(oldest - 1).to_string()), |t| t.contains("refresh")).await;
     assert!(text.contains(r#"<turbo-stream action="refresh"></turbo-stream>"#), "{text}");

@@ -30,7 +30,7 @@ Run them from the app directory.
 | Inspect the running app | `/kiln` in development: routes, records, jobs, schedules, batches, mail, broadcasts, sign-ins, each searchable, with controls (retry, cancel, pause, run now) |
 | Secrets | `kiln secrets set SMTP_URL smtp://..`, `kiln secrets show` (key in `config/master.key`, never committed) |
 | Fresh database | `kiln db reset` (migrate + seed); sign in at /session/new as ada@example.com |
-| Database | SQLite (`db/development.sqlite3`) or Postgres (`kiln new app --database postgres`: `postgres://localhost/<app>_development`, tests in `<app>_test`); `DATABASE_URL` / `TEST_DATABASE_URL` override. `db/snapshot.json` records which. |
+| Database | SQLite (`db/development.sqlite3`) or Postgres (`kiln new app --database postgres`: `postgres://localhost/<app>_development`, tests in `<app>_test`); `DATABASE_URL` / `TEST_DATABASE_URL` override. `db/snapshot.json` records which. Kiln's queue, cache and broadcast log can each live in their own database (`QUEUE_DATABASE_URL`, `CACHE_DATABASE_URL`, `STREAMS_DATABASE_URL`, same backend); then jobs and broadcasts sent inside a transaction are handed over when it commits (a rollback still sends nothing). |
 
 Field types: `string`, `text`, `rich_text` (the editor; `?` means it may be left empty), `integer`, `float`, `bool`, `timestamp`, `file`, `image` (uploads; `image` accepts only images), `ref:<Record>`. A
 trailing `?` makes a field optional; quote it in zsh (`'notes:text?'`). A trailing `:internal`
@@ -219,7 +219,7 @@ generated tests passing.
   refresh the page (scroll kept), JS edits reload, and Rust edits reload once `kiln dev` restarts.
 - **Files:** `pub cover: Option<Attachment>` on the record and the form, with
   `#[validate(file(max_size = "5MB", accept = "image/*"))]`, and `form_start(.., multipart=true)` (the
-  generator does all three for `file`/`image` fields). Uploads are stored as the request arrives; a form
+  generator does all three for `file`/`image` fields). With JavaScript, file fields upload straight to storage on submit (direct uploads: `POST /kiln/direct_uploads`, then a `PUT` to the store or, for local disk, to Kiln; S3/R2 buckets need CORS allowing `PUT` from the app's origin) and the form sends a token; without it they post as multipart and are stored as the request arrives. A form
   re-rendered with errors, and an edit form, keep the current file (a signed hidden field) unless a new
   one is chosen. Show with `{{ post.cover.url }}`, `.filename`, `.content_type`, `.byte_size`,
   `.is_image`; resized: `{{ post.cover | variant(width=400) }}`, `variant(width=200, height=200, crop=true)`
@@ -227,12 +227,17 @@ generated tests passing.
   made; `ctx.storage()?.read(&attachment)` reads one. Links (`/kiln/files/..`) work for anyone who has
   them and can't be guessed; HTML and SVG always download. `STORAGE_URL` picks the store (`file://storage`
   by default; `s3://bucket` with `AWS_*` for S3/R2/MinIO; `gs://bucket`), `MAX_UPLOAD_SIZE` caps uploads
-  (25MB). Files no record holds are removed after two days. Tests: `client.post_multipart(path, &[..],
+  (25MB). Files no record holds are removed after two days. Tests: `client.direct_upload(Upload::png("a.png"))` returns the blob (`upload_token` is what a form submits), `client.post_multipart(path, &[..],
   &[("cover", Upload::png("cover.png"))])`, `patch_multipart`; each test has its own in-memory store.
+- **Cache:** `ctx.cache().fetch("key", SignedDuration::from_mins(5), || async { .. }).await?` computes on a
+  miss (values are `Serialize + Deserialize`); `get::<T>`, `set(key, &value, ttl)`, `delete`, `delete_prefix("post:12:")`,
+  `increment(key, 1, ttl)` (atomic counters, e.g. rate limits), `clear`. It lives in the app's database (`kiln_cache`), so
+  there's nothing to run. Put a version or `updated_at` in keys whose contents change (`format!("post:{}:{}", post.id,
+  post.updated_at)`) instead of remembering to delete. `/kiln/cache` lists and clears entries.
 - **Pending migrations (development):** a database error caused by unapplied migrations lists them with a
   "Run migrations" button. `app.stop_on_pending_migrations()` in `src/app.rs` shows that page for every
   request until they're applied.
-- **Rich text attachments:** images and files dropped or pasted into the editor upload to `/kiln/uploads`
+- **Rich text attachments:** images and files dropped or pasted into the editor upload directly (`/kiln/direct_uploads`)
   and are stored in the HTML as `<kiln-attachment>` elements with signed `/kiln/files/` links;
   `| rich_text` shows them as figures (dropping any link Kiln didn't sign), and the files are kept while
   a rich text column links them.

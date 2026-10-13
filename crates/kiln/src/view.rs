@@ -668,7 +668,11 @@ mod forms {
                         );
                     }
                 }
-                let _ = writeln!(html, "  <input type=\"file\" {attrs}{accept}>");
+                // With JavaScript the file goes straight to storage on submit (kiln/direct-upload).
+                let _ = writeln!(
+                    html,
+                    "  <input type=\"file\" {attrs}{accept} data-direct-upload-url=\"/kiln/direct_uploads\">\n  <script type=\"module\">import \"kiln/direct-upload\"</script>"
+                );
             }
             "textarea" => {
                 lengths(&mut attrs)?;
@@ -684,7 +688,7 @@ mod forms {
                 // `name`; Kiln's module configures it and the stylesheet skins it.
                 let _ = write!(
                     html,
-                    "  <label for=\"{id}\">{}</label>\n  <link rel=\"stylesheet\" href=\"{}\">\n  <lexxy-editor {attrs} class=\"kiln-rich-text lexxy-content\" data-direct-upload-url=\"/kiln/uploads\" data-blob-url-template=\"/kiln/files/:signed_id/:filename\" value=\"{}\"></lexxy-editor>\n  <script type=\"module\">import \"kiln/rich-text\"</script>\n",
+                    "  <label for=\"{id}\">{}</label>\n  <link rel=\"stylesheet\" href=\"{}\">\n  <lexxy-editor {attrs} class=\"kiln-rich-text lexxy-content\" data-direct-upload-url=\"/kiln/direct_uploads\" data-blob-url-template=\"/kiln/files/:signed_id/:filename\" value=\"{}\"></lexxy-editor>\n  <script type=\"module\">import \"kiln/rich-text\"</script>\n",
                     esc(&label),
                     crate::assets::rich_text_css_url(),
                     esc(&value)
