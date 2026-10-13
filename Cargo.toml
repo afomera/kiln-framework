@@ -9,8 +9,8 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.88"
 
 [workspace.dependencies]
-kiln = { path = "crates/kiln" }
-kiln-macros = { path = "crates/kiln-macros" }
+kiln = { path = "crates/kiln", package = "kiln-framework" }
+kiln-macros = { path = "crates/kiln-macros", package = "kiln-framework-macros" }
 axum = "0.8"
 inventory = "0.3"
 jiff = "0.2"

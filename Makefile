@@ -11,7 +11,7 @@ TARGET := $(CURDIR)/target/debug/kiln
 .PHONY: build install uninstall test lint fmt vendor-lexxy
 
 build:
-	cargo build -p kiln-cli
+	cargo build -p kiln-framework-cli
 
 # A symlink, so later `make` runs update the installed command without reinstalling.
 install: build

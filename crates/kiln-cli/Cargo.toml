@@ -1,6 +1,6 @@
 [package]
-name = "kiln-cli"
-description = "The kiln command: generators, schema workflow and convention checks."
+name = "kiln-framework-cli"
+description = "The kiln command for Kiln (kiln-framework): generators, schema workflow, checks and deploys."
 edition.workspace = true
 version.workspace = true
 license.workspace = true

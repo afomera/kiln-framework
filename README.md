@@ -5,7 +5,7 @@
   </picture>
 </h1>
 
-A full-stack Rust web framework where the compiler is the reviewer. Working name.
+A full-stack Rust web framework where the compiler is the reviewer. Published on crates.io as `kiln-framework` (with `kiln-framework-macros` and `kiln-framework-cli`), since `kiln` is taken; apps still `use kiln::prelude::*` and the command is `kiln`.
 
 Spec: [Kiln Framework Spec](https://claude.ai/artifact/PNHemnZU3NnUq51gfW65uv)
 

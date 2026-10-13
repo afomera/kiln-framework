@@ -302,7 +302,7 @@ dependencies = [
 name = "blog"
 version = "0.0.1"
 dependencies = [
- "kiln",
+ "kiln-framework",
  "serde",
  "tokio",
  "tracing-subscriber",
@@ -1825,7 +1825,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kiln"
+name = "kiln-framework"
 version = "0.0.1"
 dependencies = [
  "ammonia",
@@ -1839,7 +1839,7 @@ dependencies = [
  "image",
  "inventory",
  "jiff",
- "kiln-macros",
+ "kiln-framework-macros",
  "lettre",
  "minijinja",
  "multer",
@@ -1858,7 +1858,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kiln-cli"
+name = "kiln-framework-cli"
 version = "0.0.1"
 dependencies = [
  "clap",
@@ -1874,7 +1874,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kiln-macros"
+name = "kiln-framework-macros"
 version = "0.0.1"
 dependencies = [
  "proc-macro2",

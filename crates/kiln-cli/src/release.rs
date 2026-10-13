@@ -158,7 +158,10 @@ fn build_docker(app: &App) -> Result<bool, String> {
 
 /// `kiln = { path = "…" }` from an app's manifest.
 fn kiln_path_dependency(manifest: &str) -> Option<PathBuf> {
-    let line = manifest.lines().find(|l| l.trim_start().starts_with("kiln ") || l.trim_start().starts_with("kiln="))?;
+    let line = manifest.lines().find(|l| {
+        let l = l.trim_start();
+        ["kiln ", "kiln=", "kiln-framework ", "kiln-framework="].iter().any(|p| l.starts_with(p))
+    })?;
     let rest = line.split("path").nth(1)?;
     let start = rest.find('"')? + 1;
     let end = start + rest[start..].find('"')?;
@@ -225,7 +228,7 @@ mod tests {
 
     #[test]
     fn finds_the_kiln_path() {
-        let manifest = "[dependencies]\nkiln = { path = \"/src/kiln/crates/kiln\" }\nserde = \"1\"\n";
+        let manifest = "[dependencies]\nkiln-framework = { path = \"/src/kiln/crates/kiln\" }\nserde = \"1\"\n";
         assert_eq!(kiln_path_dependency(manifest), Some(PathBuf::from("/src/kiln/crates/kiln")));
         assert_eq!(kiln_path_dependency("[dependencies]\nkiln = \"0.1\"\n"), None);
     }

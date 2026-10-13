@@ -1,12 +1,13 @@
 [package]
-name = "kiln-macros"
-description = "Derive and attribute macros for kiln."
+name = "kiln-framework-macros"
+description = "Derive and attribute macros for Kiln (kiln-framework)."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [lib]
+name = "kiln_macros"
 proc-macro = true
 
 [dependencies]
