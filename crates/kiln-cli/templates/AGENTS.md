@@ -24,7 +24,7 @@ Run them from the app directory.
 | Fewer migration files | `kiln db squash` (one file per past year; databases that ran the originals skip it) |
 | Verify | `kiln check` (must end `0 errors`), then `kiln test` |
 | Routes | `kiln routes` |
-| Run | `kiln dev` (port 3000; `--port 4000` for another): runs `Procfile.dev`, rebuilds and restarts on src/ changes |
+| Run | `kiln dev` (port 3000; `--port 4000` for another): runs `Procfile.dev`, rebuilds and restarts on src/ changes, restarts crashed processes. In a terminal it's a TUI: `1`-`9`/Tab select, `j`/`k` `g`/`G` scroll, `r` restart (on build: rebuild), `s` stop/start, `/` search (`n`/`N`), `f` filter, `m` all-output stream, `c` clear, `o` open /kiln, `K` check, `T` test, `q` quit. Piped, in CI or with `--inline` it prints `web \| ...` lines; `--json` prints NDJSON events (start, output, exit, restarting, failed, build, ready). Stopping it (q, Ctrl-C, SIGTERM) stops every process it started and frees the port. |
 | Jobs | `kiln jobs` (counts, queues, failures), `kiln jobs retry [id]`, `cancel <id>`, `run <id>`, `pause <queue>`, `resume <queue>`, `discard-failed` |
 | Schedules, batches | `kiln schedules [pause\|resume\|run <job>]`, `kiln batches [cancel <id>]` |
 | Inspect the running app | `/kiln` in development: routes, records, jobs, schedules, batches, mail, broadcasts, sign-ins, each searchable, with controls (retry, cancel, pause, run now) |

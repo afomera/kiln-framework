@@ -86,10 +86,18 @@ enum Command {
     },
     /// Run the app for development: builds it, runs `Procfile.dev` (default `web: $APP
     /// serve`), and rebuilds and restarts on changes to src/. Port 3000 unless --port or PORT.
+    /// In a terminal it shows a TUI (keys in its footer; q quits); piped or in CI it
+    /// prints prefixed lines.
     Dev {
         /// Port to listen on (default 3000, or the PORT environment variable).
         #[arg(long)]
         port: Option<u16>,
+        /// Print prefixed lines (`web | ...`) instead of the TUI.
+        #[arg(long, conflicts_with = "json")]
+        inline: bool,
+        /// Print NDJSON events (start, output, exit, restarting, failed, build) instead of the TUI.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -124,7 +132,7 @@ fn main() -> ExitCode {
             Command::Test { args } => {
                 app.cargo(&[&["test", "--quiet"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
             }
-            Command::Dev { port } => dev::run(&app, port),
+            Command::Dev { port, inline, json } => dev::run(&app, dev::Options { port, inline, json }),
         }
     })();
     match result {
