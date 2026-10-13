@@ -1,11 +1,6 @@
 use kiln::prelude::*;
 
-use crate::{
-    actions::{home, passwords},
-    forms::NewPasswordForm,
-    ops,
-    views::passwords::Edit,
-};
+use crate::{actions::passwords, forms::NewPasswordForm, ops, views::passwords::Edit};
 
 /// Every device is signed out by the reset; this browser is signed back in.
 #[action(PATCH "/passwords/{token}")]
@@ -15,5 +10,5 @@ pub async fn update(ctx: Ctx, session: Session, token: Param<String>, form: Form
         return Ok(Redirect::to(passwords::new::path()).alert("That reset link is invalid or has expired."));
     };
     session.sign_in(&ctx.db, &user).await?;
-    Ok(Redirect::to(home::index::path()).notice("Password changed."))
+    Ok(Redirect::to("/").notice("Password changed."))
 }

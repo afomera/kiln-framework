@@ -1,6 +1,6 @@
 use kiln::prelude::*;
 
-use crate::{actions::home, forms::SignUpForm, ops, views::registrations::New};
+use crate::{forms::SignUpForm, ops, views::registrations::New};
 
 #[action(POST "/sign_up")]
 pub async fn create(ctx: Ctx, session: Session, form: Form<SignUpForm>) -> Result<Redirect> {
@@ -10,5 +10,5 @@ pub async fn create(ctx: Ctx, session: Session, form: Form<SignUpForm>) -> Resul
         return Err(Error::unprocessable(&New { form: state.with_error("email", "is already registered") }));
     };
     session.sign_in(&ctx.db, &user).await?;
-    Ok(Redirect::to(home::index::path()).notice("Welcome! We've emailed you a link to confirm your address."))
+    Ok(Redirect::to("/").notice("Welcome! We've emailed you a link to confirm your address."))
 }

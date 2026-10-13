@@ -254,7 +254,8 @@ impl Assets {
     /// Serves a file from `public/`, if there is one.
     pub fn serve_public(&self, request_path: &str) -> Option<Response> {
         let name = request_path.trim_start_matches('/');
-        let mut path = self.public.join(safe_relative(name).filter(|_| !name.is_empty())?);
+        // `/` is `public/index.html` when there is one.
+        let mut path = if name.is_empty() { self.public.clone() } else { self.public.join(safe_relative(name)?) };
         if path.is_dir() {
             path = path.join("index.html");
         }

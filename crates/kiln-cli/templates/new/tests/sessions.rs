@@ -1,9 +1,9 @@
-use @@crate@@::{actions::{home, sessions}, records::*};
+use @@crate@@::{actions::sessions, records::*};
 use kiln::{prelude::*, testing::TestApp};
 
 #[kiln::test]
-async fn home_page_renders(app: TestApp) -> Result {
-    app.get(home::index::path()).await.assert_status(200);
+async fn sign_in_page_renders(app: TestApp) -> Result {
+    app.get_html(sessions::new::path()).await.assert_status(200).assert_contains("Sign in");
     Ok(())
 }
 
@@ -14,7 +14,7 @@ async fn sign_in_and_out(app: TestApp) -> Result {
     client
         .post_form(sessions::create::path(), &[("email", &user.email)])
         .await
-        .assert_redirect(&home::index::path())
+        .assert_redirect("/")
         .assert_flash(&format!("Signed in as {}.", user.name));
     client.delete(sessions::destroy::path()).await.assert_flash("Signed out.");
     Ok(())

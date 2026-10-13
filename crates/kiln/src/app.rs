@@ -635,6 +635,13 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
     {
         return file;
     }
+    // Nothing for `/` yet: kiln's welcome page (outside production).
+    if action.is_none()
+        && response.status() == StatusCode::NOT_FOUND
+        && crate::welcome::applies(&method, &path, crate::config::is_production())
+    {
+        response = crate::welcome::page(&crate::config::root().unwrap_or_else(|| std::path::PathBuf::from(".")));
+    }
     let status = response.status().as_u16();
     let elapsed = started.elapsed();
     // In development, a database error with migrations waiting is almost always that.
