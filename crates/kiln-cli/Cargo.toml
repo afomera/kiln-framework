@@ -17,3 +17,7 @@ quote.workspace = true
 serde_json.workspace = true
 syn.workspace = true
 ctrlc = { version = "3", features = ["termination"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
+portable-pty = "0.9"
+libc = "0.2"
+unicode-width = "0.2"
