@@ -1,4 +1,4 @@
-use @@krate@@::{actions::{home, sessions}, records::*};
+use @@krate@@::{actions::sessions, records::*};
 use kiln::{prelude::*, testing::TestApp};
 
 #[kiln::test]
@@ -15,7 +15,7 @@ async fn sign_in_and_out(app: TestApp) -> Result {
     client
         .post_form(sessions::create::path(), &[("email", &user.email), ("password", "password")])
         .await
-        .assert_redirect(&home::index::path())
+        .assert_redirect("/")
         .assert_flash(&format!("Signed in as {}.", user.name));
     client.delete(sessions::destroy::path()).await.assert_flash("Signed out.");
     Ok(())

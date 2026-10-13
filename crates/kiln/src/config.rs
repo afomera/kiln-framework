@@ -101,6 +101,11 @@ pub(crate) fn set_root(root: &Path) {
     let _ = ROOT.set(root.to_owned());
 }
 
+/// The app's root directory (the current directory when nothing set it).
+pub(crate) fn root() -> PathBuf {
+    ROOT.get().cloned().unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Raw values for config loading: secrets file entries (when it can be decrypted).
 fn secret_values() -> &'static BTreeMap<String, String> {
     static VALUES: OnceLock<BTreeMap<String, String>> = OnceLock::new();

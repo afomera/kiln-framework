@@ -36,6 +36,7 @@ pub mod testing;
 pub mod turbo;
 mod types;
 pub mod view;
+mod welcome;
 
 pub use app::{App, Ctx};
 pub use axum::Json;

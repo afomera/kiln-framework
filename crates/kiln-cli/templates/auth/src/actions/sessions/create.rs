@@ -1,6 +1,6 @@
 use kiln::{auth, prelude::*};
 
-use crate::{actions::home, forms::SignInForm, records::*, views::sessions::New};
+use crate::{forms::SignInForm, records::*, views::sessions::New};
 
 #[action(POST "/session")]
 pub async fn create(ctx: Ctx, session: Session, form: Form<SignInForm>) -> Result<Redirect> {
@@ -13,5 +13,5 @@ pub async fn create(ctx: Ctx, session: Session, form: Form<SignInForm>) -> Resul
         return Err(Error::unprocessable(&New { form }));
     };
     session.sign_in(&ctx.db, &user).await?;
-    Ok(Redirect::to(home::index::path()).notice(format!("Signed in as {}.", user.name)))
+    Ok(Redirect::to("/").notice(format!("Signed in as {}.", user.name)))
 }

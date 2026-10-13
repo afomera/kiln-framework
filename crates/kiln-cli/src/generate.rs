@@ -1458,9 +1458,6 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
     let read = |path: &str| std::fs::read_to_string(app.path(path)).ok();
     let user = read("src/records/user.rs")
         .ok_or("`kiln g auth` adds passwords to the `User` record, but src/records/user.rs is missing")?;
-    if !app.path("src/actions/home/index.rs").exists() {
-        return Err("`kiln g auth` sends people to `home::index` after signing in; add it first (`kiln g action home index GET /`)".into());
-    }
     if user.contains("password_digest") && !force {
         return Err("User already has a `password_digest`; auth looks set up (pass --force to regenerate)".into());
     }
