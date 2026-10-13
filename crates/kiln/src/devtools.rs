@@ -322,7 +322,7 @@ fn routes_page(query: &Query) -> Response {
         .iter()
         .filter(|r| method.is_empty() || method == "all" || r.method == method)
         .filter(|r| pipeline.is_empty() || pipeline == "all" || r.pipeline == pipeline)
-        .filter(|r| matches(query, &[r.path, &r.name(), r.file]))
+        .filter(|r| matches(query, &[r.path, r.name(), r.file]))
         .collect();
     let rows: String = shown
         .iter()
@@ -330,7 +330,7 @@ fn routes_page(query: &Query) -> Response {
             format!(
                 "<tr><td><span class=\"pill {m}\">{m}</span></td><td><code>{}</code></td><td>{}</td><td class=muted>{}:{}</td><td class=muted>{}</td></tr>",
                 esc(r.path),
-                esc(&r.name()),
+                esc(r.name()),
                 esc(r.file),
                 r.line,
                 r.pipeline,

@@ -3,12 +3,13 @@
 #   make install   build the CLI and link it onto your PATH as `kiln-dev`
 #   make           rebuild (the installed link picks it up)
 #   make vendor-lexxy VERSION=1.0.2   update the vendored rich text editor
+#   make release VERSION=0.0.2        bump, check, commit, tag, then (asked) publish to crates.io
 
 BIN_DIR ?= $(HOME)/.local/bin
 BIN_NAME ?= kiln-dev
 TARGET := $(CURDIR)/target/debug/kiln
 
-.PHONY: build install uninstall test lint fmt vendor-lexxy
+.PHONY: build install uninstall test lint fmt vendor-lexxy release
 
 build:
 	cargo build -p kiln-framework-cli
@@ -35,3 +36,7 @@ fmt:
 vendor-lexxy:
 	@test -n "$(VERSION)" || (echo "usage: make vendor-lexxy VERSION=1.0.2" && exit 1)
 	scripts/vendor-lexxy.sh $(VERSION)
+
+release:
+	@test -n "$(VERSION)" || (echo "usage: make release VERSION=0.0.2" && exit 1)
+	scripts/release.sh $(VERSION)
