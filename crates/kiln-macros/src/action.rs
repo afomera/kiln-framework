@@ -40,9 +40,14 @@ impl Parse for Args {
     }
 }
 
+#[derive(Debug, PartialEq)]
 enum Segment {
     Literal(String),
-    Capture(String),
+    /// `{slug}`, or with `catch_all` a `{*path}` that takes the remaining segments.
+    Capture {
+        name: String,
+        catch_all: bool,
+    },
 }
 
 fn parse_path(lit: &LitStr) -> syn::Result<Vec<Segment>> {
@@ -55,15 +60,27 @@ fn parse_path(lit: &LitStr) -> syn::Result<Vec<Segment>> {
     while let Some(start) = rest.find('{') {
         segments.push(Segment::Literal(rest[..start].to_owned()));
         let end = rest[start..].find('}').ok_or_else(|| Error::new(lit.span(), "unclosed `{` in route"))? + start;
-        let name = &rest[start + 1..end];
-        if name.is_empty() || !name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+        let capture = &rest[start + 1..end];
+        let (name, catch_all) = match capture.strip_prefix('*') {
+            Some(name) => (name, true),
+            None => (capture, false),
+        };
+        if name.is_empty() || !name.chars().all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit()) {
+            let fix = if catch_all { "{*snake_case_name}" } else { "{snake_case_name}" };
+            return Err(Error::new(lit.span(), format!("`{{{capture}}}` is not a valid capture; use `{fix}`")));
+        }
+        let whole_segment = rest[..start].ends_with('/');
+        rest = &rest[end + 1..];
+        if catch_all && (!rest.is_empty() || !whole_segment) {
             return Err(Error::new(
                 lit.span(),
-                format!("`{{{name}}}` is not a valid capture; use `{{snake_case_name}}`"),
+                format!(
+                    "`{{{capture}}}` takes the rest of the path, so it must be the whole last segment, \
+                     e.g. `/files/{{{capture}}}`; move it to the end"
+                ),
             ));
         }
-        segments.push(Segment::Capture(name.to_owned()));
-        rest = &rest[end + 1..];
+        segments.push(Segment::Capture { name: name.to_owned(), catch_all });
     }
     if !rest.is_empty() {
         segments.push(Segment::Literal(rest.to_owned()));
@@ -96,7 +113,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let captures: Vec<&str> = segments
         .iter()
         .filter_map(|s| match s {
-            Segment::Capture(c) => Some(c.as_str()),
+            Segment::Capture { name, .. } => Some(name.as_str()),
             Segment::Literal(_) => None,
         })
         .collect();
@@ -177,9 +194,10 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     });
     let pushes = segments.iter().map(|s| match s {
         Segment::Literal(lit) => quote! { __kiln_path.push_str(#lit); },
-        Segment::Capture(c) => {
-            let (ident, ty) = (format_ident!("{}", c), type_of(c));
-            quote! { __kiln_path.push_str(&::kiln::PathArg::<#ty>::segment(&#ident)); }
+        Segment::Capture { name, catch_all } => {
+            let (ident, ty) = (format_ident!("{}", name), type_of(name));
+            let encode = if *catch_all { quote!(segments) } else { quote!(segment) };
+            quote! { __kiln_path.push_str(&::kiln::PathArg::<#ty>::#encode(&#ident)); }
         }
     });
 
@@ -227,4 +245,32 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(path: &str) -> Result<Vec<Segment>, String> {
+        parse_path(&LitStr::new(path, proc_macro2::Span::call_site())).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn catch_all_is_the_whole_last_segment() {
+        assert_eq!(
+            parse("/{owner}/tree/{*path}").unwrap(),
+            [
+                Segment::Literal("/".into()),
+                Segment::Capture { name: "owner".into(), catch_all: false },
+                Segment::Literal("/tree/".into()),
+                Segment::Capture { name: "path".into(), catch_all: true },
+            ]
+        );
+        for misplaced in ["/{*path}/edit", "/files-{*path}", "/{a}{*path}"] {
+            assert!(parse(misplaced).unwrap_err().contains("must be the whole last segment"), "{misplaced}");
+        }
+        assert!(parse("/{*Path}").unwrap_err().contains("use `{*snake_case_name}`"));
+        assert!(parse("/{*}").unwrap_err().contains("use `{*snake_case_name}`"));
+        assert!(parse("/{Slug}").unwrap_err().contains("use `{snake_case_name}`"));
+    }
 }

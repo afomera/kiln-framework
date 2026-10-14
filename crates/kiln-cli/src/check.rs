@@ -500,29 +500,71 @@ fn lint_transactions(file: &str, syntax: &syn::File, findings: &mut Findings) {
 
 /// K0110: two routes that match the same requests. The router refuses to start with them.
 fn lint_route_conflicts(report: &serde_json::Value, findings: &mut Findings) {
-    let mut seen: std::collections::BTreeMap<(String, String), (String, String, u64)> = Default::default();
-    for r in report["routes"].as_array().into_iter().flatten() {
-        let method = r["method"].as_str().unwrap_or_default().to_owned();
-        let path = r["path"].as_str().unwrap_or_default();
-        // `{slug}` and `{id}` in the same place match the same URLs.
-        let shape: String =
-            path.split('/').map(|seg| if seg.starts_with('{') { "{}" } else { seg }).collect::<Vec<_>>().join("/");
-        let action = r["action"].as_str().unwrap_or_default().to_owned();
-        let file = r["file"].as_str().unwrap_or_default().to_owned();
-        let line = r["line"].as_u64().unwrap_or(0);
-        if let Some((other, other_file, other_line)) = seen.get(&(method.clone(), shape.clone())) {
-            findings.error(
-                "K0110",
-                format!(
-                    "`{method} {path}` ({action}) matches the same requests as {other} ({other_file}:{other_line}); \
-                     the server won't start. Change one path, or merge the actions"
-                ),
-                Some(&file),
-                Some(line as usize),
-            );
-        } else {
-            seen.insert((method, shape), (action, file, line));
+    let routes: Vec<&serde_json::Value> = report["routes"].as_array().into_iter().flatten().collect();
+    let text = |r: &serde_json::Value, key: &str| r[key].as_str().unwrap_or_default().to_owned();
+    for (i, r) in routes.iter().enumerate() {
+        let (method, path) = (text(r, "method"), text(r, "path"));
+        let clash = routes[..i].iter().find_map(|other| {
+            let other_path = text(other, "path");
+            if other_path == path {
+                // One path under two methods is one route; the same method twice is a clash.
+                (text(other, "method") == method).then_some((other, "matches the same requests as"))
+            } else {
+                paths_conflict(&path, &other_path).map(|reason| (other, reason))
+            }
+        });
+        let Some((other, reason)) = clash else { continue };
+        findings.error(
+            "K0110",
+            format!(
+                "`{method} {path}` ({}) {reason} `{} {}` ({}, {}:{}); the server won't start. Change one path, \
+                 or merge the actions",
+                text(r, "action"),
+                text(other, "method"),
+                text(other, "path"),
+                text(other, "action"),
+                text(other, "file"),
+                other["line"].as_u64().unwrap_or(0),
+            ),
+            r["file"].as_str(),
+            r["line"].as_u64().map(|line| line as usize),
+        );
+    }
+}
+
+/// A route segment as the router sees it: capture names don't matter.
+#[derive(PartialEq)]
+enum Part<'a> {
+    Literal(&'a str),
+    Capture,
+    CatchAll,
+}
+
+/// Why axum refuses to register two different paths, whatever their methods. `{slug}` and
+/// `{id}` in the same place are one route, and a catch-all can't share its place with a
+/// capture, even `/{owner}/{repo}` beside `/{owner}/{*path}`. Literals win over both, so
+/// `/posts/new` and `/files/README` are fine next to `/posts/{slug}` and `/files/{*path}`.
+fn paths_conflict(a: &str, b: &str) -> Option<&'static str> {
+    fn parts(path: &str) -> Vec<Part<'_>> {
+        path.split('/')
+            .map(|segment| match segment {
+                s if s.starts_with("{*") => Part::CatchAll,
+                s if s.starts_with('{') => Part::Capture,
+                s => Part::Literal(s),
+            })
+            .collect()
+    }
+    let (a, b) = (parts(a), parts(b));
+    if a == b {
+        return Some("matches the same requests as");
+    }
+    let shared = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    match (a.get(shared), b.get(shared)) {
+        (Some(Part::CatchAll), Some(Part::Capture | Part::CatchAll)) => {
+            Some("has a catch-all where there's a capture in")
         }
+        (Some(Part::Capture), Some(Part::CatchAll)) => Some("has a capture where there's a catch-all in"),
+        _ => None,
     }
 }
 
@@ -742,5 +784,31 @@ pub async fn delete_event(ctx: &Ctx, event: Authorized<Delete, Event>) -> Result
         lint_route_conflicts(&report, &mut findings);
         assert_eq!(codes(&findings), [("K0110".into(), Some(7))]);
         assert!(findings.0[0].message.contains("posts::show"));
+    }
+
+    #[test]
+    fn catch_alls_conflict_with_captures_in_their_place() {
+        let route = |method: &str, path: &str, line: u64| serde_json::json!({ "method": method, "path": path, "action": "repos::x", "file": "src/actions/repos/x.rs", "line": line });
+        let report = serde_json::json!({ "routes": [
+            route("GET", "/{owner}/{repo}/tree/{*path}", 1),
+            // Literals and shorter paths are resolved by priority (see kiln's routing tests).
+            route("GET", "/{owner}/{repo}/tree/README", 2),
+            route("GET", "/{owner}/{repo}/tree", 3),
+            route("GET", "/{owner}/{repo}/{*rest}", 4),
+            route("POST", "/{owner}/{repo}/tree/{*path}", 5),
+            // A capture beside the catch-all clashes even under another method.
+            route("POST", "/{owner}/{repo}/tree/{sha}/comments", 6),
+            route("GET", "/{user}/{name}/tree/{*file}", 7),
+            route("GET", "/{owner}/{*path}", 8),
+        ]});
+        let mut findings = Findings::default();
+        lint_route_conflicts(&report, &mut findings);
+        assert_eq!(codes(&findings), [("K0110".into(), Some(6)), ("K0110".into(), Some(7)), ("K0110".into(), Some(8))]);
+        assert!(
+            findings.0[0]
+                .message
+                .contains("has a capture where there's a catch-all in `GET /{owner}/{repo}/tree/{*path}`")
+        );
+        assert!(findings.0[2].message.contains("has a catch-all where there's a capture in"));
     }
 }

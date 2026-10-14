@@ -114,6 +114,8 @@ generated tests passing.
   `has_one(namespace: Namespace)` on each).
 - **Links are typed:** `posts::show::path(&post.slug)` in Rust,
   `{{ path("posts::show", slug=post.slug) }}` in templates.
+- **Slashes in a param:** end the route with a catch-all, `/{owner}/{repo}/tree/{*path}`
+  with `path: Param<String>` (`"src/lib.rs"`); `tree::path(o, r, "src/lib.rs")` keeps the slashes.
 - **Permissions are policies:** `impl Allows<A, Post> for User` in `src/policies/post.rs`,
   where `A` is `Read`, `Create` (checked against `NewPost`), `Update` or `Delete` from
   `kiln::policy` (or your own unit struct, e.g. `Publish`). `user.authorize::<Update, _>(post)?`

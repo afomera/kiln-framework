@@ -75,12 +75,14 @@ Rename the function to match the file, or the file to match the function.",
     (
         "K0110",
         "Two routes match the same requests",
-        "Two actions declare the same method and a path that matches the same URLs: identical, or
-the same apart from a parameter's name (`/posts/{slug}` and `/posts/{id}`). The router
-can't choose between them and refuses to start.
+        "Two actions declare paths the router can't tell apart: the same method and path twice, or
+paths the same apart from a parameter's name (`/posts/{slug}` and `/posts/{id}`, under any
+methods), or a parameter in the same place as a catch-all (`/files/{id}/raw` beside
+`/files/{*path}`). The router refuses to start.
 
 Change one path (`/posts/{id}/preview`), or merge the two actions. Static segments beat
-parameters, so `/posts/new` next to `/posts/{slug}` is fine.",
+parameters and catch-alls, so `/posts/new` next to `/posts/{slug}`, or `/files/README`
+next to `/files/{*path}`, is fine.",
     ),
     (
         "K0202",

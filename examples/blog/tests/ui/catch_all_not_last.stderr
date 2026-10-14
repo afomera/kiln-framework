@@ -1,0 +1,5 @@
+error: `{*path}` takes the rest of the path, so it must be the whole last segment, e.g. `/files/{*path}`; move it to the end
+ --> tests/ui/catch_all_not_last.rs:4:14
+  |
+4 | #[action(GET "/{owner}/{repo}/blob/{*path}/edit")]
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
