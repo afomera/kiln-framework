@@ -501,7 +501,13 @@ impl Cli {
                 let relations: Vec<_> = r
                     .relations
                     .iter()
-                    .map(|(kind, name, target)| json!({ "kind": kind, "name": name, "target": target }))
+                    .map(|(kind, name, target, through)| {
+                        let mut rel = json!({ "kind": kind, "name": name, "target": target });
+                        if !through.is_empty() {
+                            rel["through"] = json!(through);
+                        }
+                        rel
+                    })
                     .collect();
                 let indexes: Vec<_> = schema
                     .indexes

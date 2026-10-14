@@ -1,15 +1,18 @@
-error[E0308]: mismatched types
+error[E0277]: `Comment` isn't joined into this `blog::records::Post` query
  --> tests/ui/wrong_table_filter.rs:6:26
   |
 6 |     Post::query().filter(comment::body.eq("hi"))
-  |                   ------ ^^^^^^^^^^^^^^^^^^^^^^ expected `Expr<Post>`, found `Expr<Comment>`
+  |                   ------ ^^^^^^^^^^^^^^^^^^^^^^ this is a column of `Comment`
   |                   |
-  |                   arguments to this method are incorrect
+  |                   required by a bound introduced by this call
   |
-  = note: expected struct `kiln::Expr<blog::records::Post>`
-             found struct `kiln::Expr<Comment>`
-note: method defined here
+  = help: the trait `InScope<blog::records::Post, (), _>` is not implemented for `Comment`
+  = note: add `.join(..)` with the `belongs_to`/`has_one` relation leading to `Comment` (e.g. `.join(repository::namespace)` before using `namespace::path`); to filter through a `has_many`, use `.in_query(..)`
+note: required by a bound in `kiln::Query::<T, R, J>::filter`
  --> $WORKSPACE/crates/kiln/src/query.rs
   |
-  |     pub fn filter(mut self, expr: Expr<T>) -> Self {
-  |            ^^^^^^
+  |     pub fn filter<U, I>(mut self, expr: Expr<U>) -> Self
+  |            ------ required by a bound in this associated function
+  |     where
+  |         U: InScope<T, J, I>,
+  |            ^^^^^^^^^^^^^^^^ required by this bound in `Query::<T, R, J>::filter`
