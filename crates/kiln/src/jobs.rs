@@ -64,6 +64,10 @@ pub struct JobDef {
     pub run: fn(Ctx, serde_json::Value) -> BoxFuture<'static, Result>,
     /// Seconds an attempt may run (`JobInfo::TIMEOUT`).
     pub timeout: Option<i64>,
+    pub queue: &'static str,
+    pub attempts: i64,
+    pub priority: i64,
+    pub unique_for: Option<i64>,
 }
 
 /// Per-queue caps on running jobs, across every process: `app.queue_limit("imports", 2)`.

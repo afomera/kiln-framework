@@ -43,6 +43,8 @@ Commands:
   schedules           Recurring jobs; schedules pause|resume|run <job name>
   batches             Recent batches; batches cancel <id>
   health              Exit 0 if the running server answers GET /up (for HEALTHCHECK)
+  introspect          The app as JSON: routes, records, jobs, schedules, notifications, lints
+  lint [--list]       Run the app's own `kiln check` rules (src/lints/), or list them
   db migrate          Apply pending migrations
   db diff <name>      Write a migration for changes to the record structs
   db undo             Delete the newest migration and restore the snapshot from before it
@@ -195,6 +197,24 @@ impl Cli {
         match args {
             [] | ["serve"] => self.serve().await,
             ["health"] => health(),
+            // The app's own `kiln check` rules; development builds only (see `kiln::lint`).
+            #[cfg(debug_assertions)]
+            ["lint"] => {
+                println!("{}", crate::lint::run(&self.root));
+                Ok(())
+            }
+            #[cfg(debug_assertions)]
+            ["lint", "--list"] => {
+                println!("{}", serde_json::to_string_pretty(&crate::lint::list()).expect("lints serialize"));
+                Ok(())
+            }
+            ["introspect"] => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&self.introspect().await?).expect("introspection serializes")
+                );
+                Ok(())
+            }
             ["db", "migrate"] => {
                 let applied = self.db().await?.migrate(&self.migrations_dir()).await?;
                 if applied.is_empty() {
@@ -353,6 +373,130 @@ impl Cli {
     }
 
     /// The configured app, refusing to start with pending migrations.
+    /// What the binary knows about the app (`kiln introspect` adds what the source says).
+    /// Built against an in-memory database, so it needs no database of its own.
+    async fn introspect(self) -> Result<serde_json::Value> {
+        use serde_json::json;
+        let backend = self.backend().name();
+        let app_name = app_name(&self.root);
+        let mut app = App::new(Db::memory().await?).root(&self.root);
+        if let Some(configure) = self.configure {
+            app = configure(app)?;
+        }
+        let routes: Vec<_> = routes()
+            .iter()
+            .map(|r| {
+                let args: Vec<_> = r.args.iter().map(|(name, ty)| json!({ "name": name, "type": ty })).collect();
+                let wrapped = |wrapper: &str| {
+                    r.args.iter().find_map(|(_, ty)| {
+                        ty.strip_prefix(&format!("{wrapper}<")).and_then(|t| t.strip_suffix('>')).map(str::to_owned)
+                    })
+                };
+                let params: Vec<_> = r
+                    .args
+                    .iter()
+                    .filter_map(|(name, ty)| {
+                        let inner = ty.strip_prefix("Param<")?.strip_suffix('>')?;
+                        Some(json!({ "name": name, "type": inner }))
+                    })
+                    .collect();
+                let optional_actor =
+                    wrapped("Option").and_then(|t| t.strip_prefix("Current<")?.strip_suffix('>').map(str::to_owned));
+                json!({
+                    "method": r.method,
+                    "path": r.path,
+                    "action": r.name(),
+                    "file": r.file,
+                    "line": r.line,
+                    "pipeline": r.pipeline,
+                    "params": params,
+                    "signed_in": wrapped("Current").or(optional_actor.clone()),
+                    "sign_in_required": wrapped("Current").is_some(),
+                    "form": wrapped("Form"),
+                    "json_body": wrapped("Json"),
+                    "returns": r.returns,
+                    "args": args,
+                })
+            })
+            .collect();
+        let records: Vec<_> = records()
+            .iter()
+            .map(|r| {
+                let schema = (r.schema)();
+                let columns: Vec<_> = schema
+                    .columns
+                    .iter()
+                    .map(|c| {
+                        json!({
+                            "name": c.name,
+                            "type": c.sql_type,
+                            "nullable": c.nullable,
+                            "primary_key": c.primary_key,
+                            "unique": c.unique,
+                            "indexed": c.indexed,
+                            "references": c.references,
+                            "variants": c.variants,
+                            "attachment": c.attachment,
+                            "rich_text": c.rich_text,
+                        })
+                    })
+                    .collect();
+                let relations: Vec<_> = r
+                    .relations
+                    .iter()
+                    .map(|(kind, name, target)| json!({ "kind": kind, "name": name, "target": target }))
+                    .collect();
+                json!({ "name": r.name, "table": r.table, "columns": columns, "relations": relations })
+            })
+            .collect();
+        let mut jobs: Vec<_> = inventory::iter::<crate::jobs::JobDef>
+            .into_iter()
+            .map(|j| {
+                json!({
+                    "name": j.name,
+                    "queue": j.queue,
+                    "attempts": j.attempts,
+                    "priority": j.priority,
+                    "timeout_seconds": j.timeout,
+                    "unique_for_seconds": j.unique_for,
+                })
+            })
+            .collect();
+        jobs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        let schedules: Vec<_> = app
+            .ctx()
+            .try_get::<crate::Schedule>()
+            .map(|s| {
+                s.entries
+                    .iter()
+                    .map(|e| json!({ "job": e.name, "when": e.when.describe(), "queue": e.queue }))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut notifications: Vec<_> = inventory::iter::<crate::notify::NotificationDef>
+            .into_iter()
+            .map(|n| {
+                let optional: Vec<_> = n.optional.iter().map(|c| format!("{c:?}").to_lowercase()).collect();
+                json!({ "name": n.name, "description": n.description, "to": (n.to)(), "optional": optional })
+            })
+            .collect();
+        notifications.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        let mut previews: Vec<&str> = inventory::iter::<crate::mail::PreviewDef>.into_iter().map(|p| p.name).collect();
+        previews.sort();
+        Ok(json!({
+            "kiln": env!("CARGO_PKG_VERSION"),
+            "app": app_name,
+            "backend": backend,
+            "routes": routes,
+            "records": records,
+            "jobs": jobs,
+            "schedules": schedules,
+            "notifications": notifications,
+            "mail_previews": previews,
+            "lints": crate::lint::list(),
+        }))
+    }
+
     async fn app(self) -> Result<App> {
         let db = self.db().await?;
         let pending = db.pending_migrations(&self.migrations_dir()).await?;

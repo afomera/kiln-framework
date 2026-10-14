@@ -21,6 +21,7 @@ mod error_page;
 mod files;
 pub mod form;
 pub mod jobs;
+pub mod lint;
 pub mod mail;
 mod migrate;
 pub mod notify;

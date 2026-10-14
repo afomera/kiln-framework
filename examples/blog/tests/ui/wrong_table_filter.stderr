@@ -6,8 +6,8 @@ error[E0308]: mismatched types
   |                   |
   |                   arguments to this method are incorrect
   |
-  = note: expected struct `Expr<blog::records::Post>`
-             found struct `Expr<Comment>`
+  = note: expected struct `kiln::Expr<blog::records::Post>`
+             found struct `kiln::Expr<Comment>`
 note: method defined here
  --> $WORKSPACE/crates/kiln/src/query.rs
   |

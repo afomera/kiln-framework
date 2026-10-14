@@ -20,6 +20,8 @@ pub struct RecordDef {
     pub name: &'static str,
     pub table: &'static str,
     pub schema: fn() -> TableSchema,
+    /// `(kind, name, target)`: `("belongs_to", "author", "User")`.
+    pub relations: &'static [(&'static str, &'static str, &'static str)],
 }
 
 inventory::collect!(RecordDef);

@@ -6,6 +6,7 @@ pub mod config;
 pub mod factories;
 pub mod forms;
 pub mod jobs;
+pub mod lints;
 pub mod mail;
 pub mod notifications;
 pub mod ops;

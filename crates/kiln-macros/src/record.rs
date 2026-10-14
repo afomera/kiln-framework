@@ -234,6 +234,18 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     };
 
     let relations = rels.iter().map(|rel| relation_items(name, vis, rel));
+    let relation_specs: Vec<TokenStream> = rels
+        .iter()
+        .map(|rel| {
+            let kind = match rel.kind {
+                RelKind::BelongsTo => "belongs_to",
+                _ => "has_many",
+            };
+            let rel_name = rel.name.to_string();
+            let target = rel.target.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+            quote! { (#kind, #rel_name, #target) }
+        })
+        .collect();
 
     let accessor_sigs: Vec<TokenStream> = rels
         .iter()
@@ -329,7 +341,12 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         #parts_enabled
 
         ::kiln::__private::inventory::submit! {
-            ::kiln::RecordDef { name: #name_str, table: #table, schema: <#name as ::kiln::Record>::schema }
+            ::kiln::RecordDef {
+                name: #name_str,
+                table: #table,
+                schema: <#name as ::kiln::Record>::schema,
+                relations: &[#( #relation_specs ),*],
+            }
         }
     })
 }

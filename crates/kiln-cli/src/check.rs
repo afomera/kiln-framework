@@ -20,7 +20,7 @@ enum Level {
 
 struct Finding {
     level: Level,
-    code: &'static str,
+    code: String,
     message: String,
     file: Option<String>,
     line: Option<usize>,
@@ -39,7 +39,7 @@ impl Findings {
     }
 
     fn push(&mut self, level: Level, code: &'static str, message: String, file: Option<&str>, line: Option<usize>) {
-        self.0.push(Finding { level, code, message, file: file.map(str::to_owned), line });
+        self.0.push(Finding { level, code: code.to_owned(), message, file: file.map(str::to_owned), line });
     }
 }
 
@@ -125,6 +125,7 @@ pub fn run(app: &App, json: bool) -> Result<bool, String> {
                 .collect();
             lint_templates(app, &routes, &mut findings);
         }
+        app_lints(app, &mut findings)?;
     }
 
     report(&findings, json);
@@ -269,6 +270,16 @@ fn lint_items(file: &str, items: &[Item], tests: &str, findings: &mut Findings) 
                 if let Some(attr) = has_attr(&f.attrs, "action") {
                     actions.push((f.sig.ident.to_string(), attr.span().start().line, attr));
                 }
+                if let Some(attr) = has_attr(&f.attrs, "lint")
+                    && !file.starts_with("src/lints/")
+                {
+                    findings.error(
+                        "K0101",
+                        "`#[lint]` rules belong in src/lints/",
+                        Some(file),
+                        Some(attr.span().start().line),
+                    );
+                }
             }
             Item::Impl(i) => {
                 if has_attr(&i.attrs, "part").is_some() && !file.starts_with("src/parts/") {
@@ -401,6 +412,30 @@ fn check_write(file: &str, sig: &syn::Signature, body: &str, guarded: &BTreeSet<
     }
 }
 
+/// The app's own rules (`#[lint]` in src/lints/), run by its binary.
+fn app_lints(app: &App, findings: &mut Findings) -> Result<(), String> {
+    if !app.path("src/lints").is_dir() {
+        return Ok(());
+    }
+    eprintln!("kiln check: the app's rules");
+    let Some(out) = app.binary_output(&["lint"])? else {
+        findings.error("K0003", "couldn't run the app's own rules (`lint` in the app binary)", None, None);
+        return Ok(());
+    };
+    let report: serde_json::Value = serde_json::from_str(out.trim()).unwrap_or_default();
+    for f in report["findings"].as_array().into_iter().flatten() {
+        let level = if f["level"] == "warning" { Level::Warning } else { Level::Error };
+        findings.0.push(Finding {
+            level,
+            code: f["code"].as_str().unwrap_or("A0000").to_owned(),
+            message: f["message"].as_str().unwrap_or_default().to_owned(),
+            file: f["file"].as_str().map(str::to_owned),
+            line: f["line"].as_u64().map(|l| l as usize),
+        });
+    }
+    Ok(())
+}
+
 /// Every `path("..")` in a template names a real route; every include/extends exists.
 fn lint_templates(app: &App, routes: &BTreeSet<String>, findings: &mut Findings) {
     let root = app.path("templates");
@@ -468,4 +503,7 @@ fn report(findings: &Findings, json: bool) {
     }
     let plural = |n: usize, word: &str| if n == 1 { format!("{n} {word}") } else { format!("{n} {word}s") };
     println!("\nkiln check: {}, {}", plural(errors, "error"), plural(warnings, "warning"));
+    if let Some(f) = findings.0.first() {
+        println!("`kiln explain {}` (or any code above) says why a rule exists and how to fix it", f.code);
+    }
 }

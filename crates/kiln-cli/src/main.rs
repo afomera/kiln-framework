@@ -7,7 +7,9 @@ mod app;
 mod check;
 mod dev;
 mod edit;
+mod explain;
 mod generate;
+mod introspect;
 mod names;
 mod new;
 mod release;
@@ -69,6 +71,15 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// The whole app at a glance: routes, records, views, forms, policies, ops, jobs, mail,
+    /// config and templates, with file:line. `--json` for agents.
+    Introspect {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The long form of a `kiln check` code or an error page's code: `kiln explain K0301`.
+    /// Without a code, lists them all (and the app's own rules).
+    Explain { code: Option<String> },
     /// Print the route table.
     Routes {
         #[arg(long)]
@@ -114,9 +125,12 @@ fn main() -> ExitCode {
         if let Command::New { name, kiln, database } = &cli.command {
             return new::run(name, kiln.as_deref(), database).map(|()| true);
         }
+        if let Command::Explain { code } = &cli.command {
+            return explain::run(app::App::find(cli.app.as_deref()), code.as_deref());
+        }
         let app = app::App::find(cli.app.as_deref())?;
         match cli.command {
-            Command::New { .. } => unreachable!("handled above"),
+            Command::New { .. } | Command::Explain { .. } => unreachable!("handled above"),
             Command::Generate(g) => g.run(&app).map(|()| true),
             Command::Db { args } => {
                 app.run_binary(&[&["db"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
@@ -135,6 +149,7 @@ fn main() -> ExitCode {
                 app.run_binary(&[&["batches"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
             }
             Command::Routes { json } => app.run_binary(if json { &["routes", "--json"] } else { &["routes"] }),
+            Command::Introspect { json } => introspect::run(&app, json),
             Command::Check { format } => check::run(&app, format == "json"),
             Command::Build { docker } => release::run(&app, docker),
             Command::Test { args } => {

@@ -20,6 +20,10 @@ pub struct RouteDef {
     pub line: u32,
     /// `browser` (session, CSRF, HTML errors) or `api` (no session, JSON errors).
     pub pipeline: &'static str,
+    /// The action's arguments as written, `(name, type)`: `("user", "Current<User>")`.
+    pub args: &'static [(&'static str, &'static str)],
+    /// The return type as written, e.g. `Result<Redirect>`.
+    pub returns: &'static str,
     pub mount: fn(axum::Router<Ctx>) -> axum::Router<Ctx>,
 }
 

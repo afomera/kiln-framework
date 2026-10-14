@@ -101,6 +101,28 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         })
         .collect();
 
+    // For introspection: each argument and the return type as the author wrote them.
+    let type_text = |ty: &dyn quote::ToTokens| crate::util::type_text(&quote!(#ty).to_string());
+    let arg_specs: Vec<TokenStream> = func
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(arg) => {
+                let name = match &*arg.pat {
+                    Pat::Ident(pat) => pat.ident.to_string(),
+                    _ => "_".to_owned(),
+                };
+                let ty = type_text(&arg.ty);
+                Some(quote! { (#name, #ty) })
+            }
+            FnArg::Receiver(_) => None,
+        })
+        .collect();
+    let returns = match &func.sig.output {
+        syn::ReturnType::Default => "()".to_owned(),
+        syn::ReturnType::Type(_, ty) => type_text(ty),
+    };
     let mut wrapper_params = Vec::new();
     let mut call_args = Vec::new();
     let mut param_lets = Vec::new();
@@ -199,6 +221,8 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                 file: ::core::file!(),
                 line: ::core::line!(),
                 pipeline: #pipeline,
+                args: &[#( #arg_specs ),*],
+                returns: #returns,
                 mount: __kiln_mount,
             }
         }

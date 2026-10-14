@@ -59,6 +59,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 name: #name_str,
                 run: ::kiln::jobs::run_job::<#name>,
                 timeout: <#name as ::kiln::jobs::JobInfo>::TIMEOUT,
+                queue: <#name as ::kiln::jobs::JobInfo>::QUEUE,
+                attempts: <#name as ::kiln::jobs::JobInfo>::ATTEMPTS,
+                priority: <#name as ::kiln::jobs::JobInfo>::PRIORITY,
+                unique_for: <#name as ::kiln::jobs::JobInfo>::UNIQUE_FOR,
             }
         }
     })

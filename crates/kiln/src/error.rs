@@ -68,7 +68,7 @@ impl Error {
         }
     }
 
-    /// Stable code for this kind of error. `kiln explain <code>` will document each one.
+    /// Stable code for this kind of error; `kiln explain <code>` documents each one.
     pub fn code(&self) -> &'static str {
         match self {
             Error::NotFound => "K1002",

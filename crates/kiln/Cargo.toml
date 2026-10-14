@@ -15,6 +15,9 @@ categories = ["web-programming::http-server"]
 name = "kiln"
 
 [dependencies]
+# `kiln::lint`: the app's own `kiln check` rules read its source as syntax, with line numbers.
+syn = { workspace = true, features = ["visit"] }
+proc-macro2 = { workspace = true, features = ["span-locations"] }
 kiln-macros.workspace = true
 axum.workspace = true
 inventory.workspace = true

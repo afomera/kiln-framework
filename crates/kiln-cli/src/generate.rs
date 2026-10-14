@@ -102,6 +102,19 @@ pub enum Generate {
         #[arg(long)]
         force: bool,
     },
+    /// One of the app's own `kiln check` rules in src/lints, with tests:
+    /// `kiln g lint no_unwrap_in_actions`. Gets the next free `A` code unless `--code`.
+    Lint {
+        name: String,
+        /// The rule's code: a capital letter other than K, and four digits (`T0001`).
+        #[arg(long)]
+        code: Option<String>,
+        /// Report its findings as warnings rather than errors.
+        #[arg(long)]
+        warning: bool,
+        #[arg(long)]
+        force: bool,
+    },
     /// A `#[part]` block for a record, and the record's `parts` opt-in: `kiln g part Post`.
     Part {
         record: String,
@@ -146,6 +159,7 @@ impl Generate {
             Generate::Op { name, force } => (op(app, &name)?, force, None),
             Generate::Part { record, force } => (part(app, &record)?, force, None),
             Generate::Job { name, force } => (job(app, &name)?, force, None),
+            Generate::Lint { name, code, warning, force } => (lint(app, &name, code, warning)?, force, None),
             Generate::Mail { name, force } => (mail(app, &name)?, force, None),
             Generate::Notification { name, to, force } => (notification(app, &name, to.as_deref())?, force, None),
             Generate::NotificationSettings { to, force } => {
@@ -1239,6 +1253,70 @@ fn check_verb_noun(app: &App, name: &str, what: &str, example: &str) -> Result<(
         return Err(format!("{what} are named `verb_noun`, so the verb comes first: `{rest}_{first}`, not `{name}`"));
     }
     Ok(())
+}
+
+/// `kiln g lint no_unwrap_in_actions`
+fn lint(app: &App, name: &str, code: Option<String>, warning: bool) -> Result<Plan, String> {
+    if !is_snake(name) {
+        return Err(format!(
+            "lints are named for what they enforce, in snake_case: `no_unwrap_in_actions` (got `{name}`)"
+        ));
+    }
+    let used = lint_codes(app);
+    let code = match code {
+        Some(code) => {
+            let mut chars = code.chars();
+            let letter = chars.next().filter(|c| c.is_ascii_uppercase() && *c != 'K');
+            if code.len() != 5 || letter.is_none() || !chars.all(|c| c.is_ascii_digit()) {
+                return Err(format!(
+                    "lint codes are a capital letter other than K (Kiln's own) and four digits, like A0001 (got `{code}`)"
+                ));
+            }
+            if used.contains(&code) {
+                return Err(format!("{code} is taken; `kiln g lint {name}` picks the next free code"));
+            }
+            code
+        }
+        None => {
+            let next = used.iter().filter_map(|c| c.strip_prefix('A')?.parse::<u32>().ok()).max().unwrap_or(0) + 1;
+            format!("A{next:04}")
+        }
+    };
+    let level = if warning { ", level = \"warning\"" } else { "" };
+    let values = [("name", name), ("code", code.as_str()), ("level", level), ("krate", &app.crate_name())];
+    let mut plan = Plan::default();
+    plan.file(
+        format!("src/lints/{name}.rs"),
+        fill(
+            "use kiln::lint::*;\n\n/// What this rule enforces and why, written for whoever trips it: `kiln explain @@code@@`\n/// prints this comment.\n#[lint(code = \"@@code@@\"@@level@@)]\npub fn @@name@@(file: &File, report: &mut Report) {\n    // One file at a time: `file.path`, `file.is_in(\"src/actions\")`, `file.code_lines()`\n    // (numbered from 1, `//` comments removed) and `report.at(line, \"..\")`; or\n    // `file.syntax()` for the parsed Rust (a `syn::File`) and `report.on(&node, \"..\")`.\n    // Templates come through too (`file.is_template()`).\n    let _ = (file, report);\n    todo!(\"implement @@name@@\")\n}\n",
+            &values,
+        ),
+    );
+    plan.module("src/lints/mod.rs", format!("mod {name};"));
+    plan.module("src/lints/mod.rs", format!("pub use {name}::{name};"));
+    plan.module("src/lib.rs", "pub mod lints;");
+    plan.file(
+        format!("tests/lint_{name}.rs"),
+        fill(
+            "use @@krate@@::lints::@@name@@;\nuse kiln::lint::check;\n\n#[test]\nfn @@name@@_flags_what_it_should() {\n    let found = check(@@name@@, \"src/actions/posts/show.rs\", \"// code the rule should flag\\n\");\n    assert_eq!(found.len(), 1, \"{found:?}\");\n}\n\n#[test]\nfn @@name@@_allows_what_it_should() {\n    let found = check(@@name@@, \"src/actions/posts/show.rs\", \"// code the rule should leave alone\\n\");\n    assert!(found.is_empty(), \"{found:?}\");\n}\n",
+            &values,
+        ),
+    );
+    Ok(plan)
+}
+
+/// Codes the app's rules already use, from `#[lint(code = "..")]` in src/lints/.
+fn lint_codes(app: &App) -> Vec<String> {
+    let mut codes = vec![];
+    for entry in std::fs::read_dir(app.path("src/lints")).into_iter().flatten().flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        for rest in text.split("code = \"").skip(1) {
+            if let Some(code) = rest.get(..5) {
+                codes.push(code.to_owned());
+            }
+        }
+    }
+    codes
 }
 
 /// `kiln g op publish_post`

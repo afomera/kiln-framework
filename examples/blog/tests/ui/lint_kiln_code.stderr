@@ -1,0 +1,17 @@
+error: `K` codes are Kiln's own; use another letter for the app's rules, like "A0001"
+ --> tests/ui/lint_kiln_code.rs:4:15
+  |
+4 | #[lint(code = "K0101")]
+  |               ^^^^^^^
+
+error: lint codes are a capital letter and four digits, like "A0001"
+ --> tests/ui/lint_kiln_code.rs:7:15
+  |
+7 | #[lint(code = "A1")]
+  |               ^^^^
+
+error: a lint is `fn name(file: &File, report: &mut Report)`
+  --> tests/ui/lint_kiln_code.rs:11:1
+   |
+11 | fn wrong_shape(_file: &File) {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

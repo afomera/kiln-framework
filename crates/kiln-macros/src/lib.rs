@@ -10,6 +10,7 @@ mod db_enum;
 mod embed;
 mod form;
 mod job;
+mod lint;
 mod mail;
 mod notification;
 mod part;
@@ -120,6 +121,14 @@ pub fn embedded_files(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     test::expand(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Registers one of the app's own `kiln check` rules: `#[lint(code = "A0001")]` on
+/// `fn rule(file: &File, report: &mut Report)` in `src/lints/`. `level = "warning"` makes
+/// its findings warnings. The doc comment is what `kiln explain A0001` prints.
+#[proc_macro_attribute]
+pub fn lint(attr: TokenStream, item: TokenStream) -> TokenStream {
+    lint::expand(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// Exposes a record's presentation methods to templates: `#[part] impl Post { .. }` in

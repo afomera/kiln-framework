@@ -170,7 +170,7 @@ pub(crate) fn markdown(report: &ErrorReport, request: &RequestInfo<'_>) -> Strin
     let _ = writeln!(md, "- Request: `{} {}`", request.method, request.path);
     let _ =
         writeln!(md, "- Action: {}", request.action.map_or("none (no route matched)".to_owned(), |a| format!("`{a}`")));
-    let _ = writeln!(md, "- Code: `{}`\n", report.code);
+    let _ = writeln!(md, "- Code: `{}` (`kiln explain {}` says more)\n", report.code, report.code);
 
     if let Some(source) = &report.source {
         let width = source.lines.last().map_or(1, |(n, _)| n.to_string().len());
@@ -312,7 +312,7 @@ fn html_page(report: &ErrorReport, request: &RequestInfo<'_>, markdown: &str) ->
            <div class=\"badges\">\
              <span class=\"status\">{status}</span>\
              <span class=\"title\">{title}</span>\
-             <span class=\"code\" title=\"Stable error code\">{code}</span>\
+             <span class=\"code\" title=\"Stable error code: `kiln explain {code}` says more\">{code}</span>\
            </div>\
            <button id=\"copy\" class=\"copy\" type=\"button\" aria-describedby=\"copy-hint\">\
              <svg viewBox=\"0 0 16 16\" aria-hidden=\"true\"><rect x=\"5\" y=\"5\" width=\"8.5\" height=\"8.5\" rx=\"1.5\"/><path d=\"M10.5 3V2.5A1.5 1.5 0 0 0 9 1H3.5A1.5 1.5 0 0 0 2 2.5V8a1.5 1.5 0 0 0 1.5 1.5H4\"/></svg>\
