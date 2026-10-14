@@ -21,6 +21,7 @@ Run them from the app directory.
 | Stimulus controller | `kiln g controller clipboard` → `assets/controllers/clipboard_controller.js` (`data-controller="clipboard"`; `admin/users` is `admin--users`) |
 | JavaScript package (no npm) | `kiln importmap pin @pierre/diffs[@1.5.2]` downloads it from jsDelivr into `assets/vendor/npm/` and pins it in `config/importmap.toml`; then `import { .. } from "@pierre/diffs"`. `--cdn` pins the CDN URL instead; `kiln importmap unpin <pkg>` |
 | Passwords, sign-up, resets, sign-in list | `kiln g auth` (once; replaces the demo sign-in) |
+| API tokens (personal access tokens) | `kiln g api_tokens` (after `kiln g auth`): `/settings/api_tokens` to create (shown once) and revoke, `GET /api/me`, tests. Scopes are listed in `src/forms/api_token_form.rs` |
 | Schema change | edit the record struct → `kiln db diff <snake_case_name>` → review the SQL → `kiln db migrate` |
 | Redo a migration | `kiln db undo` (deletes the newest generated migration and restores the snapshot), then `kiln db diff` again. Never delete migration files by hand. |
 | Deploy | `kiln build --docker` builds the production image from `Dockerfile` (`docker run -p 8080:8080 -e KILN_SECRET_KEY=… -v app-storage:/app/storage app`; migrations run on boot, `GET /up` is the health check). `kiln build` makes `dist/<app>`: one binary with templates, assets, migrations and secrets compiled in (`.files(kiln::embedded_files!())` in `src/main.rs`; debug builds read them from disk), run with `KILN_ENV=production` where it may create `storage/`. In production SQLite is `storage/production.sqlite3` (next to uploads: keep `storage/` on a volume) and the server binds `0.0.0.0` (`HOST`, `PORT`). `kiln g dockerfile` adds the files to an older app. |
@@ -161,8 +162,25 @@ generated tests passing.
   - Display with `{{ event.starts_at | datetime }}` (`Oct 12, 2026 09:30 UTC`; the default format ends in `UTC`) or `{{ event.starts_at | datetime("%b %-d") }}`.
   - Form time inputs are read as UTC.
 - **API routes** (`pipeline = Api`) take JSON or form bodies through the same `Form<T>`, return
-  JSON problem reports on errors, and never use the session cookie. API auth (tokens) isn't
-  available yet.
+  JSON problem reports on errors, and never use the session cookie (so no CSRF token).
+- **API tokens:** on `pipeline = Api` routes, `Current<User>` comes from `Authorization: Bearer <token>`,
+  or from HTTP Basic with the token as the password (what git sends; return
+  `kiln::auth::basic_auth_challenge("App")` when `Option<Current<User>>` is none so git asks). Browser
+  routes ignore tokens. Tokens look like `kiln_pat_…` (`app.api_token_prefix("forked_pat_")` in
+  `src/app.rs`), are stored as SHA-256 in `kiln_api_tokens` and can't be shown twice:
+  `kiln::auth::create_api_token(&ctx.db, &*user, "Laptop", &["repo:read"], Some(ttl))` returns
+  `.secret.expose()` once; `api_tokens_of`, `revoke_api_token(&db, &user, id)`, `revoke_api_tokens`.
+  `user.require_scope("repo:write")?` is a 403 (K1021) for tokens without it; cookie sign-ins have
+  every scope, and actions that don't check accept any token. Service callbacks with a shared
+  secret from config take `headers: HeaderMap` and check
+  `kiln::auth::bearer_matches(&headers, config.hook_secret.expose())` (constant time). Never log tokens.
+- **Rate limits:** take `limit: RateLimit` and call `limit.check("api", 5000, SignedDuration::from_hours(1)).await?`
+  (per signed-in record when the action takes `Current<..>`, else per IP address) or
+  `limit.check_key("sign_in", &email, 5, SignedDuration::from_mins(15))`; over the limit is a 429 with
+  `Retry-After` (K1022). Counts live in the cache, in fixed windows.
+- **Testing APIs:** `app.api_client(&user, &["repo:read"]).await?` is a client with a fresh token;
+  `client.bearer(token)`, `.basic("ada", token)`, `.header("x-forwarded-for", "203.0.113.9")`;
+  `client.post_json(path, &json!({..}))`, `client.send_json(Method::PATCH, path, &json!({..}))`.
 - **Turbo is on.** Links and forms navigate without full reloads (Turbo Drive), and kiln's
   303 redirects and 422 re-renders are what Turbo expects, so normal actions need nothing
   special. For in-place updates, take `turbo: Turbo` and return

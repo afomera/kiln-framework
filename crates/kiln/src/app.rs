@@ -258,6 +258,14 @@ impl App {
         self
     }
 
+    /// The prefix new API tokens start with (default `kiln_pat_`), e.g. `"forked_pat_"`. A
+    /// distinctive prefix lets secret scanners find leaked tokens; register it with them.
+    /// Tokens issued under an earlier prefix keep working.
+    pub fn api_token_prefix(self, prefix: &'static str) -> Self {
+        crate::auth::set_api_token_prefix(prefix);
+        self
+    }
+
     pub fn ctx(&self) -> &Ctx {
         &self.ctx
     }
@@ -346,9 +354,26 @@ async fn route_checks(State(state): State<RouteState>, mut request: Request, nex
 
     let scope = if route.pipeline == "api" {
         // API routes ignore the cookie session. CSRF protection relies on it, so an API
-        // route authenticated by cookie would be forgeable from other sites.
+        // route authenticated by cookie would be forgeable from other sites. They
+        // authenticate with API tokens instead, which browsers never attach on their own...
         request.extensions_mut().insert(Session::default());
-        Some(RequestScope { key: Some(state.key.clone()), ..RequestScope::default() })
+        let token = crate::auth::presented_token(request.headers());
+        // ...except Basic credentials a browser saved after a prompt. Cross-site forms can
+        // only send form-like bodies, so those can't carry them.
+        if token.as_ref().is_some_and(|t| t.basic) && form_like(&request) {
+            let mut response = Error::BadRequest(
+                "HTTP Basic credentials can't authenticate a form-encoded write, because browsers resend saved Basic credentials on cross-site forms. Send the token as `Authorization: Bearer <token>`, or send a JSON (or other non-form) body".into(),
+            )
+            .into_response();
+            response.extensions_mut().insert(ActionName(route.name()));
+            response.extensions_mut().insert(PipelineName(route.pipeline));
+            return response;
+        }
+        Some(RequestScope {
+            key: Some(state.key.clone()),
+            api_token: token.map(|t| t.digest),
+            ..RequestScope::default()
+        })
     } else {
         let session = request.extensions().get::<Session>().cloned().unwrap_or_default();
         let mutating = !matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS);
@@ -360,7 +385,14 @@ async fn route_checks(State(state): State<RouteState>, mut request: Request, nex
         let frame = Turbo::from_parts_of(&request).frame().is_some();
         csrf_ok.then(|| {
             let flash = session.take_flash();
-            RequestScope { session, flash, cache: Default::default(), frame, key: Some(state.key.clone()) }
+            RequestScope {
+                session,
+                flash,
+                cache: Default::default(),
+                frame,
+                key: Some(state.key.clone()),
+                api_token: None,
+            }
         })
     };
 
@@ -378,6 +410,16 @@ async fn route_checks(State(state): State<RouteState>, mut request: Request, nex
     response.extensions_mut().insert(ActionName(route.name()));
     response.extensions_mut().insert(PipelineName(route.pipeline));
     response
+}
+
+/// A write with a body another site's form (or a no-CORS `fetch`) could send: urlencoded,
+/// multipart, plain text, or untyped.
+fn form_like(request: &Request) -> bool {
+    let mutating = !matches!(*request.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    let content_type = request.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let essence = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    mutating
+        && matches!(essence.as_str(), "" | "application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain")
 }
 
 /// Views are rendered here, after the action, so the `current_*` values their templates
@@ -734,7 +776,7 @@ fn header_str(parts: &axum::http::request::Parts, name: header::HeaderName) -> &
 
 /// The client's address: the first `X-Forwarded-For` hop (set by a proxy in production),
 /// else the connection's peer.
-fn client_ip(parts: &axum::http::request::Parts) -> String {
+pub(crate) fn client_ip(parts: &axum::http::request::Parts) -> String {
     if let Some(forwarded) = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         return forwarded.split(',').next().unwrap_or("").trim().to_owned();
     }

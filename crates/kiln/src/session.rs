@@ -239,6 +239,27 @@ impl<T> Current<T> {
     pub fn into_inner(self) -> T {
         self.0
     }
+
+    /// The API token this request was authenticated with, or none for a cookie sign-in.
+    pub fn api_token(&self) -> Option<crate::auth::ApiToken> {
+        current_scope().and_then(|scope| scope.cache.api_token.lock().unwrap_or_else(|e| e.into_inner()).clone())
+    }
+
+    /// Checks that the request may act with `scope` (e.g. `"repo:write"`): API tokens need it
+    /// among their scopes; cookie sign-ins have every scope. Otherwise a 403 (K1021) naming
+    /// the missing scope.
+    pub fn require_scope(&self, scope: &str) -> Result<(), Error> {
+        let Some(request) = current_scope() else {
+            return Err(Error::Integrity(format!(
+                "`require_scope(\"{scope}\")` was called outside a request; call it in the action, before spawning work"
+            )));
+        };
+        let token = request.cache.api_token.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        match token {
+            Some(token) if !token.has_scope(scope) => Err(Error::MissingScope { scope: scope.to_owned() }),
+            _ => Ok(()),
+        }
+    }
 }
 
 async fn load_current<T: Record>(parts: &Parts, ctx: &Ctx) -> Result<Option<T>, Error> {
@@ -249,12 +270,24 @@ async fn load_current<T: Record>(parts: &Parts, ctx: &Ctx) -> Result<Option<T>, 
 /// The signed-in `T`, loaded at most once per request: the action's `Current<T>` and the
 /// layout's `current_*` value share one query.
 pub(crate) async fn signed_in<T: Record>(session: &Session, db: &crate::Db) -> Result<Option<T>, Error> {
-    let cache = current_scope().map(|scope| scope.cache);
+    let scope = current_scope();
+    let cache = scope.as_ref().map(|scope| scope.cache.clone());
     if let Some(hit) = cache.as_ref().and_then(|c| c.get::<T>()) {
         return Ok(hit);
     }
-    let record = match session.sign_in_token::<T>() {
-        Some(token) => {
+    let presented = scope.and_then(|scope| scope.api_token);
+    let record = match (presented, session.sign_in_token::<T>()) {
+        // API routes: the token, never a cookie (their session is always empty).
+        (Some(digest), _) => match crate::auth::find_by_api_token::<T>(db, &digest).await? {
+            Some((record, token)) => {
+                if let Some(cache) = &cache {
+                    *cache.api_token.lock().unwrap_or_else(|e| e.into_inner()) = Some(token);
+                }
+                Some(record)
+            }
+            None => None,
+        },
+        (None, Some(token)) => {
             let record = crate::auth::find_signed_in::<T>(db, &token).await?;
             if record.is_some() {
                 crate::auth::touch_sign_in(db, session, T::TABLE, &token).await?;
@@ -264,7 +297,7 @@ pub(crate) async fn signed_in<T: Record>(session: &Session, db: &crate::Db) -> R
             }
             record
         }
-        None => None,
+        (None, None) => None,
     };
     if let Some(cache) = cache {
         cache.put(record.clone());
@@ -299,6 +332,8 @@ pub(crate) struct RequestScope {
     pub frame: bool,
     /// Signs stream names for `turbo_stream_from`.
     pub key: Option<SecretKey>,
+    /// On API routes, the SHA-256 of the API token the request carries.
+    pub api_token: Option<String>,
 }
 
 /// Records loaded for this request, by table, and the `current_*` template values.
@@ -306,6 +341,10 @@ pub(crate) struct RequestScope {
 pub(crate) struct RequestCache {
     records: Mutex<std::collections::HashMap<&'static str, Option<Arc<dyn std::any::Any + Send + Sync>>>>,
     pub templates: Mutex<BTreeMap<String, minijinja::Value>>,
+    /// The API token that authenticated this request, once `Current<T>` found it.
+    pub api_token: Mutex<Option<crate::auth::ApiToken>>,
+    /// `users:12` for the first signed-in record found, the key rate limits count under.
+    pub signed_in_as: Mutex<Option<String>>,
 }
 
 impl RequestCache {
@@ -316,6 +355,10 @@ impl RequestCache {
     }
 
     fn put<T: Record>(&self, record: Option<T>) {
+        if let Some(record) = &record {
+            let mut who = self.signed_in_as.lock().unwrap_or_else(|e| e.into_inner());
+            who.get_or_insert_with(|| format!("{}:{}", T::TABLE, record.id().get()));
+        }
         let value = record.map(|r| Arc::new(r) as Arc<dyn std::any::Any + Send + Sync>);
         self.records.lock().unwrap_or_else(|e| e.into_inner()).insert(T::TABLE, value);
     }

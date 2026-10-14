@@ -31,6 +31,7 @@ mod migrate;
 pub mod notify;
 pub mod policy;
 mod query;
+pub mod rate_limit;
 mod realtime;
 mod redirect;
 pub mod rel;
@@ -50,6 +51,8 @@ mod welcome;
 
 pub use app::{App, Ctx};
 pub use axum::Json;
+/// Request headers, as an action argument: `headers: HeaderMap` (see `kiln::auth::bearer_matches`).
+pub use axum::http::HeaderMap;
 pub use cli::Cli;
 pub use db::{Db, Role, Row};
 pub use error::{Error, Result};
@@ -59,6 +62,7 @@ pub use migrate::{
     write_migration,
 };
 pub use query::{Column, Delete, Expr, Insert, MinMax, Order, Query, Select, Subquery, Summable, Update};
+pub use rate_limit::RateLimit;
 pub use redirect::{Redirect, ViewOrRedirect};
 pub use rel::{Append, BoxFuture, HasRel, HasRelation, Loaded, RelSet, Relation};
 pub use rich_text::RichText;
@@ -135,6 +139,7 @@ pub mod prelude {
         part,
         policy::{Allows, Authorize, Authorized},
     };
+    pub use crate::{HeaderMap, RateLimit};
 }
 
 #[doc(hidden)]

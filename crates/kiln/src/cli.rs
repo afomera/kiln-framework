@@ -465,6 +465,9 @@ impl Cli {
                     "params": params,
                     "signed_in": wrapped("Current").or(optional_actor.clone()),
                     "sign_in_required": wrapped("Current").is_some(),
+                    // API routes take `Authorization: Bearer <token>` (or Basic) for `Current<..>`.
+                    "accepts_api_tokens": r.pipeline == "api" && (wrapped("Current").is_some() || optional_actor.is_some()),
+                    "rate_limited": r.args.iter().any(|(_, ty)| ty.ends_with("RateLimit")),
                     "form": wrapped("Form"),
                     "json_body": wrapped("Json"),
                     "returns": r.returns,

@@ -1,3 +1,4 @@
+mod api_token_form;
 mod bookmark_form;
 mod change_password_form;
 mod comment_form;
@@ -8,6 +9,7 @@ mod sign_in_form;
 mod sign_up_form;
 mod subscription_form;
 
+pub use api_token_form::{API_SCOPES, ApiTokenForm};
 pub use bookmark_form::BookmarkForm;
 pub use change_password_form::ChangePasswordForm;
 pub use comment_form::CommentForm;

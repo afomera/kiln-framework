@@ -344,6 +344,29 @@ record's current state (an issue already sent, a seat already taken). It respond
 the message. For browsers, a redirect back with a flash message is often kinder.",
     ),
     (
+        "K1021",
+        "Missing token scope",
+        "The request was authenticated by an API token, and the action called
+`user.require_scope(\"repo:write\")` for a scope the token doesn't have. It responds 403
+naming the scope.
+
+The token's owner should create a token with that scope (and revoke the old one). Cookie
+sign-ins have every scope, so this only happens on `pipeline = Api` routes. Scopes are set
+when the token is made: `kiln::auth::create_api_token(&db, &user, name, &[\"repo:read\"], ttl)`.",
+    ),
+    (
+        "K1022",
+        "Too many requests",
+        "The action's `limit.check(name, max, per)` (a `RateLimit` argument) counted more than `max`
+requests in the current window. It responds 429 with a `Retry-After` header: the seconds
+until the window resets.
+
+Counts are per signed-in record when the action takes `Current<..>`, otherwise per IP
+address (`check_key` counts under a key you choose). They live in the cache, so
+`/kiln/cache` shows them (`rate:..` keys) and `ctx.cache().delete_prefix(\"rate:\")`
+clears them. Raise the limit if real clients hit it; slow down if you're the client.",
+    ),
+    (
         "K1101",
         "Template error",
         "A template failed to render: an undefined variable or attribute, a filter given the

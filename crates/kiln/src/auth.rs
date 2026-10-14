@@ -18,6 +18,14 @@
 //! **Tokens.** [`Tokens`] makes signed, expiring, single-purpose tokens for links in email
 //! (password resets, confirmations). Bind a token to state that changes once it's used,
 //! such as the password digest, and it stops working after one use.
+//!
+//! **API tokens.** [`create_api_token`] issues a personal access token (`kiln_pat_…`) with a
+//! name, optional scopes and expiry; `kiln_api_tokens` keeps its SHA-256, so it's shown once.
+//! On `pipeline = Api` routes, `Current<User>` accepts `Authorization: Bearer <token>`, or
+//! HTTP Basic with the token as the password (git). Those routes never read the cookie, so
+//! they need no CSRF token. `user.require_scope("repo:write")?` checks a token's scopes
+//! (cookie sign-ins have them all). Service callbacks check a shared secret with
+//! [`bearer_matches`].
 
 use std::time::Duration;
 
@@ -25,7 +33,11 @@ use argon2::{
     Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier,
     password_hash::{SaltString, rand_core::OsRng},
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use axum::http::{HeaderMap, header};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use rand::RngCore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -56,7 +68,7 @@ fn now() -> i64 {
     Timestamp::now().as_jiff().as_second()
 }
 
-fn digest(token: &str) -> String {
+pub(crate) fn digest(token: &str) -> String {
     Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -70,6 +82,17 @@ impl Db {
         .await?;
         self.execute(
             "CREATE INDEX IF NOT EXISTS \"kiln_sessions_record\" ON \"kiln_sessions\" (\"record_table\", \"record_id\")",
+        )
+        .await?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS \"kiln_api_tokens\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \
+             \"token_digest\" TEXT NOT NULL UNIQUE, \"record_table\" TEXT NOT NULL, \"record_id\" INTEGER NOT NULL, \
+             \"name\" TEXT NOT NULL, \"scopes\" TEXT NOT NULL, \"hint\" TEXT NOT NULL, \"created_at\" INTEGER NOT NULL, \
+             \"last_used_at\" INTEGER, \"expires_at\" INTEGER)",
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS \"kiln_api_tokens_record\" ON \"kiln_api_tokens\" (\"record_table\", \"record_id\")",
         )
         .await?;
         Ok(self)
@@ -323,6 +346,281 @@ fn argon2() -> Argon2<'static> {
     }
 }
 
+/// API tokens start with this unless the app sets its own prefix with
+/// `App::api_token_prefix`. A recognizable prefix lets secret scanners spot leaked tokens.
+pub const DEFAULT_API_TOKEN_PREFIX: &str = "kiln_pat_";
+/// Random characters after the prefix: 40 alphanumerics, about 238 bits.
+const API_TOKEN_CHARS: usize = 40;
+/// `last_used_at` is written at most this often per token.
+const API_TOKEN_TOUCH_EVERY: i64 = 60;
+
+static API_TOKEN_PREFIX: std::sync::RwLock<&'static str> = std::sync::RwLock::new(DEFAULT_API_TOKEN_PREFIX);
+
+pub(crate) fn set_api_token_prefix(prefix: &'static str) {
+    assert!(
+        (3..=24).contains(&prefix.len()) && prefix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+        "an API token prefix is 3 to 24 letters, digits or underscores, like `forked_pat_` (got {prefix:?})"
+    );
+    *API_TOKEN_PREFIX.write().unwrap_or_else(|e| e.into_inner()) = prefix;
+}
+
+/// The prefix new API tokens start with.
+pub fn api_token_prefix() -> &'static str {
+    *API_TOKEN_PREFIX.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A personal access token, as a settings page lists it. The token itself is never stored
+/// (only its SHA-256), so it can't be shown again; see [`create_api_token`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiToken {
+    pub id: i64,
+    /// What it's for, e.g. "Laptop git".
+    pub name: String,
+    /// What it may do, e.g. `["repo:read"]`, checked with `user.require_scope(..)`.
+    pub scopes: Vec<String>,
+    /// The token's first characters (`kiln_pat_a1B2…`), to tell tokens apart.
+    pub hint: String,
+    pub created_at: Timestamp,
+    pub last_used_at: Option<Timestamp>,
+    pub expires_at: Option<Timestamp>,
+    /// Past `expires_at`: it no longer authenticates.
+    pub expired: bool,
+}
+
+impl ApiToken {
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|s| s == scope)
+    }
+}
+
+/// A token just created. Show `secret` to its owner now: it can't be shown again.
+#[derive(Debug)]
+pub struct IssuedApiToken {
+    pub token: ApiToken,
+    /// What the client sends: `Authorization: Bearer <secret>`. Redacted in `Debug`.
+    pub secret: crate::Secret<String>,
+}
+
+const API_TOKEN_COLUMNS: &str =
+    "\"id\", \"name\", \"scopes\", \"hint\", \"created_at\", \"last_used_at\", \"expires_at\"";
+
+fn api_token_from_row(row: &crate::Row) -> ApiToken {
+    let at = |s: i64| Timestamp::from_jiff(jiff::Timestamp::from_second(s).unwrap_or_default());
+    let scopes: String = row.get(2);
+    let expires_at: Option<i64> = row.get(6);
+    ApiToken {
+        id: row.get(0),
+        name: row.get(1),
+        scopes: scopes.split_whitespace().map(str::to_owned).collect(),
+        hint: row.get(3),
+        created_at: at(row.get(4)),
+        last_used_at: row.get::<Option<i64>, _>(5).map(at),
+        expires_at: expires_at.map(at),
+        expired: expires_at.is_some_and(|e| e <= now()),
+    }
+}
+
+/// Scope names are letters, digits and `:._-`, like `repo:write`.
+fn check_scope(scope: &str) -> Result<()> {
+    let valid = !scope.is_empty()
+        && scope.len() <= 64
+        && scope.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'.' | b'_' | b'-'));
+    if valid {
+        return Ok(());
+    }
+    Err(Error::BadRequest(format!(
+        "`{scope}` isn't a valid token scope; use up to 64 letters, digits and `:._-`, like `repo:write`"
+    )))
+}
+
+/// Creates a personal access token for `record` (usually the signed-in user) and returns it,
+/// the only time it's available. `scopes` limit what it may do (`user.require_scope(..)`
+/// checks them); with `expires_in` it stops working after that long.
+///
+/// ```ignore
+/// let issued = kiln::auth::create_api_token(&ctx.db, &*user, "Laptop git", &["repo:read"], None).await?;
+/// // Show issued.secret.expose() now; only its SHA-256 is kept.
+/// ```
+pub async fn create_api_token<T: Record>(
+    db: &Db,
+    record: &T,
+    name: &str,
+    scopes: &[&str],
+    expires_in: Option<jiff::SignedDuration>,
+) -> Result<IssuedApiToken> {
+    use rand::{Rng, distributions::Alphanumeric};
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 100 {
+        return Err(Error::BadRequest("an API token needs a name of 1 to 100 characters, like \"Laptop git\"".into()));
+    }
+    let mut kept: Vec<&str> = vec![];
+    for scope in scopes {
+        check_scope(scope)?;
+        if !kept.contains(scope) {
+            kept.push(scope);
+        }
+    }
+    let random: String = rand::thread_rng().sample_iter(&Alphanumeric).take(API_TOKEN_CHARS).map(char::from).collect();
+    let prefix = api_token_prefix();
+    let secret = format!("{prefix}{random}");
+    // A literal NULL: Postgres can't infer a type for a bound one.
+    let expires_at = match expires_in {
+        Some(ttl) => (Timestamp::now() + ttl).as_jiff().as_second().to_string(),
+        None => "NULL".to_owned(),
+    };
+    let rows = db
+        .fetch_all(
+            &format!(
+                "INSERT INTO \"kiln_api_tokens\" (\"token_digest\", \"record_table\", \"record_id\", \"name\", \"scopes\", \"hint\", \
+                 \"created_at\", \"expires_at\") VALUES (?, ?, ?, ?, ?, ?, ?, {expires_at}) RETURNING {API_TOKEN_COLUMNS}"
+            ),
+            vec![
+                Value::Text(digest(&secret)),
+                Value::Text(T::TABLE.to_owned()),
+                Value::Integer(record.id().get()),
+                Value::Text(name.to_owned()),
+                Value::Text(kept.join(" ")),
+                Value::Text(format!("{prefix}{}…", &random[..4])),
+                Value::Integer(now()),
+            ],
+        )
+        .await?;
+    let token = rows
+        .first()
+        .map(api_token_from_row)
+        .ok_or_else(|| Error::Integrity("storing the API token returned no row; check the database's logs".into()))?;
+    Ok(IssuedApiToken { token, secret: crate::Secret::new(secret) })
+}
+
+/// `record`'s API tokens, newest first, expired ones included (marked `expired`).
+pub async fn api_tokens_of<T: Record>(db: &Db, record: &T) -> Result<Vec<ApiToken>> {
+    let rows = db
+        .fetch_all(
+            &format!(
+                "SELECT {API_TOKEN_COLUMNS} FROM \"kiln_api_tokens\" WHERE \"record_table\" = ? AND \"record_id\" = ? \
+                 ORDER BY \"created_at\" DESC, \"id\" DESC"
+            ),
+            vec![Value::Text(T::TABLE.to_owned()), Value::Integer(record.id().get())],
+        )
+        .await?;
+    Ok(rows.iter().map(api_token_from_row).collect())
+}
+
+/// Revokes one of `record`'s API tokens by id; it stops working at once. Returns whether
+/// there was one; ids belonging to anyone else are ignored.
+pub async fn revoke_api_token<T: Record>(db: &Db, record: &T, id: i64) -> Result<bool> {
+    let rows = db
+        .fetch_all(
+            "DELETE FROM \"kiln_api_tokens\" WHERE \"id\" = ? AND \"record_table\" = ? AND \"record_id\" = ? RETURNING \"id\"",
+            vec![Value::Integer(id), Value::Text(T::TABLE.to_owned()), Value::Integer(record.id().get())],
+        )
+        .await?;
+    Ok(!rows.is_empty())
+}
+
+/// Revokes every API token `record` has, e.g. when the account is locked. How many went.
+pub async fn revoke_api_tokens<T: Record>(db: &Db, record: &T) -> Result<usize> {
+    let rows = db
+        .fetch_all(
+            "DELETE FROM \"kiln_api_tokens\" WHERE \"record_table\" = ? AND \"record_id\" = ? RETURNING \"id\"",
+            vec![Value::Text(T::TABLE.to_owned()), Value::Integer(record.id().get())],
+        )
+        .await?;
+    Ok(rows.len())
+}
+
+/// The record a live API token belongs to, and the token, found by the token's SHA-256.
+pub(crate) async fn find_by_api_token<T: Record>(db: &Db, token_digest: &str) -> Result<Option<(T, ApiToken)>> {
+    let rows = db
+        .fetch_all(
+            &format!(
+                "SELECT {API_TOKEN_COLUMNS}, \"record_id\" FROM \"kiln_api_tokens\" WHERE \"token_digest\" = ? AND \"record_table\" = ?"
+            ),
+            vec![Value::Text(token_digest.to_owned()), Value::Text(T::TABLE.to_owned())],
+        )
+        .await?;
+    let Some(row) = rows.first() else { return Ok(None) };
+    let token = api_token_from_row(row);
+    if token.expired {
+        return Ok(None);
+    }
+    let Some(record) = T::find(Id::new(row.get(7))).one(db).await? else { return Ok(None) };
+    let now = now();
+    if token.last_used_at.is_none_or(|at| now - at.as_jiff().as_second() >= API_TOKEN_TOUCH_EVERY) {
+        db.fetch_all(
+            "UPDATE \"kiln_api_tokens\" SET \"last_used_at\" = ? WHERE \"id\" = ? RETURNING \"id\"",
+            vec![Value::Integer(now), Value::Integer(token.id)],
+        )
+        .await?;
+    }
+    Ok(Some((record, token)))
+}
+
+/// An API token a request carries.
+pub(crate) struct PresentedToken {
+    /// Its SHA-256; the token itself isn't kept.
+    pub digest: String,
+    /// Sent as an HTTP Basic password rather than a bearer token.
+    pub basic: bool,
+}
+
+/// The API token in `Authorization: Bearer <token>`, or in HTTP Basic as the password (what
+/// git sends; the username is ignored). Basic counts only when the password starts with the
+/// token prefix, so a staging site's own Basic auth isn't mistaken for a token.
+pub(crate) fn presented_token(headers: &HeaderMap) -> Option<PresentedToken> {
+    let (scheme, credentials) = headers.get(header::AUTHORIZATION)?.to_str().ok()?.trim().split_once(' ')?;
+    let credentials = credentials.trim();
+    if scheme.eq_ignore_ascii_case("bearer") && !credentials.is_empty() {
+        return Some(PresentedToken { digest: digest(credentials), basic: false });
+    }
+    if scheme.eq_ignore_ascii_case("basic") {
+        let decoded = String::from_utf8(STANDARD.decode(credentials).ok()?).ok()?;
+        let (_, password) = decoded.split_once(':')?;
+        if password.starts_with(api_token_prefix()) {
+            return Some(PresentedToken { digest: digest(password), basic: true });
+        }
+    }
+    None
+}
+
+/// Whether the request carries `Authorization: Bearer <secret>`, compared in constant time.
+/// For service callbacks that share a secret from config, rather than a user's token:
+///
+/// ```ignore
+/// #[action(POST "/internal/git/pushed", pipeline = Api)]
+/// pub async fn pushed(ctx: Ctx, headers: HeaderMap, ..) -> Result<Json<..>> {
+///     if !kiln::auth::bearer_matches(&headers, ctx.config::<Config>().git_hook_secret.expose()) {
+///         return Err(Error::Unauthenticated { record: "git service" });
+///     }
+/// ```
+///
+/// An empty `secret` never matches, so a missing config value locks the route rather than
+/// opening it.
+pub fn bearer_matches(headers: &HeaderMap, secret: &str) -> bool {
+    let sent = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+        .map(|(_, token)| token.trim());
+    // Comparing digests keeps the time independent of the secret's length too.
+    !secret.is_empty() && sent.is_some_and(|sent| crate::session::tokens_match(&digest(sent), &digest(secret)))
+}
+
+/// A 401 asking for HTTP Basic credentials. git (like curl) sends credentials only after
+/// this challenge, so return it from a git route when `Option<Current<User>>` is none;
+/// people enter an API token as the password.
+pub fn basic_auth_challenge(realm: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let realm = realm.replace(['"', '\\'], "");
+    (
+        axum::http::StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, format!("Basic realm=\"{realm}\", charset=\"UTF-8\""))],
+        "Authentication required: use your username and an API token as the password.\n",
+    )
+        .into_response()
+}
+
 /// Keeps email tokens apart from other signed strings (stream names).
 const TOKEN_PREFIX: &str = "kiln-token/";
 
@@ -368,6 +666,24 @@ impl Tokens {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_tokens_are_read_from_bearer_and_basic() {
+        let presented = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, value.parse().unwrap());
+            presented_token(&headers).map(|t| (t.digest, t.basic))
+        };
+        let token = "kiln_pat_abc123";
+        assert_eq!(presented(&format!("Bearer {token}")), Some((digest(token), false)));
+        assert_eq!(presented(&format!("bearer  {token} ")), Some((digest(token), false)));
+        let basic = STANDARD.encode(format!("x-access-token:{token}"));
+        assert_eq!(presented(&format!("Basic {basic}")), Some((digest(token), true)));
+        // Basic passwords without the prefix belong to something else (staging auth).
+        assert_eq!(presented(&format!("Basic {}", STANDARD.encode("ada:hunter2"))), None);
+        assert_eq!(presented("Bearer "), None);
+        assert_eq!(presented("Token abc"), None);
+    }
 
     #[test]
     fn passwords_hash_and_verify() {

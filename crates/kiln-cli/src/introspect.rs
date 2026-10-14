@@ -210,6 +210,12 @@ fn summary(report: &Value) -> String {
             let optional = r["sign_in_required"] == Value::Bool(false);
             extras.push(if optional { format!("signed in or out: {user}") } else { format!("signed in: {user}") });
         }
+        if r["accepts_api_tokens"].as_bool() == Some(true) {
+            extras.push("api tokens".to_owned());
+        }
+        if r["rate_limited"].as_bool() == Some(true) {
+            extras.push("rate limited".to_owned());
+        }
         if let Some(form) = r["form"].as_str() {
             extras.push(format!("form: {form}"));
         }

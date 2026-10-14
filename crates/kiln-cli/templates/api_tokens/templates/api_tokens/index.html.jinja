@@ -1,0 +1,22 @@
+{% set title = "API tokens" %}
+<h1>API tokens</h1>
+<p>Tokens let scripts and tools act as you. Send one as <code>Authorization: Bearer &lt;token&gt;</code>, or as the password when git asks.</p>
+{% if tokens %}
+<ul class="api-tokens">
+  {% for token in tokens %}
+  <li id="api_token_{{ token.id }}">
+    <strong>{{ token.name }}</strong> <code>{{ token.hint }}</code>{% if token.expired %} · expired{% endif %}
+    <br><small>{% if token.scopes %}{{ token.scopes | join(" ") }}{% else %}no scopes{% endif %} · created {{ token.created_at | datetime }} · {% if token.last_used_at %}last used {{ token.last_used_at | datetime }}{% else %}never used{% endif %}{% if token.expires_at and not token.expired %} · expires {{ token.expires_at | datetime }}{% endif %}</small>
+    {{ button_to("Revoke", path("api_tokens::destroy", id=token.id), method="delete", class="inline", confirm="Revoke " ~ token.name ~ "? Anything using it stops working.", confirm_button="Revoke", tone="danger") }}
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>You have no tokens yet.</p>
+{% endif %}
+<h2>New token</h2>
+{# A full page load: the next page shows the token once, so it can't be a redirect. #}
+{{ form_start(path("api_tokens::create"), turbo=false) }}
+  {{ fields(form) }}
+  <button>Create token</button>
+{{ form_end() }}

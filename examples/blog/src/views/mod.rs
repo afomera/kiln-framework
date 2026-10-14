@@ -1,4 +1,5 @@
 pub mod api;
+pub mod api_tokens;
 pub mod bookmarks;
 pub mod comments;
 pub mod current_user;

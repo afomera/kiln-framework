@@ -42,6 +42,12 @@ pub enum Error {
     PendingMigrations(Vec<String>),
     #[error("invalid or missing CSRF token")]
     Csrf,
+    /// The request's API token lacks a scope the action requires (`require_scope`). 403.
+    #[error("the API token lacks the `{scope}` scope")]
+    MissingScope { scope: String },
+    /// Too many requests under a rate limit (`RateLimit::check`). 429 with `Retry-After`.
+    #[error("rate limited; retry in {retry_after}s")]
+    RateLimited { retry_after: u64 },
     /// A page rendered in place of the action's normal response, e.g. a form re-rendered
     /// with errors (422). Not a failure; no error page is shown.
     #[error("rendered {status}")]
@@ -60,7 +66,8 @@ impl Error {
             Error::NotFound | Error::MissingRecord { .. } => StatusCode::NOT_FOUND,
             Error::BadRequest(_) => StatusCode::BAD_REQUEST,
             Error::Unauthenticated { .. } => StatusCode::UNAUTHORIZED,
-            Error::Forbidden { .. } | Error::Csrf => StatusCode::FORBIDDEN,
+            Error::Forbidden { .. } | Error::Csrf | Error::MissingScope { .. } => StatusCode::FORBIDDEN,
+            Error::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Error::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::Rendered { status, .. } => *status,
@@ -80,6 +87,8 @@ impl Error {
             Error::Rendered { .. } => "K1009",
             Error::Invalid(_) => "K1010",
             Error::Conflict(_) => "K1011",
+            Error::MissingScope { .. } => "K1021",
+            Error::RateLimited { .. } => "K1022",
             Error::PendingMigrations(_) => "K1203",
             Error::Config(_) => "K1401",
             Error::Job(_) => "K1501",
@@ -141,6 +150,7 @@ impl Error {
                 report.hint(
                     "Browsers are redirected to the sign-in page registered with `signs_in::<..>(..)` in `src/app.rs`.",
                 );
+                report.hint("On `pipeline = Api` routes, send an API token: `Authorization: Bearer <token>`. Unknown, revoked and expired tokens all get this 401.");
             }
             Error::Forbidden { action, record } => {
                 report.message = format!("The signed-in user may not `{action}` this `{record}`.");
@@ -152,6 +162,16 @@ impl Error {
                 report.message = "The form's CSRF token is missing or doesn't match the session.".into();
                 report.hint("Put `{{ csrf_field() }}` inside every `<form method=\"post\">`, or send the token in an `X-CSRF-Token` header.");
                 report.hint("The token rotates on sign-in and sign-out, so reload the form after either.");
+            }
+            Error::MissingScope { scope } => {
+                report.message = format!("The API token used for this request doesn't have the `{scope}` scope.");
+                report
+                    .hint(format!("Create a token that includes `{scope}` (and revoke this one), then retry with it."));
+                report.hint("The action calls `user.require_scope(..)`; cookie sign-ins have every scope.");
+            }
+            Error::RateLimited { retry_after } => {
+                report.message = format!("Too many requests. Try again in {retry_after} seconds.");
+                report.hint("The action's `RateLimit::check` counts requests per signed-in user (or IP address) in the cache. The `Retry-After` header says when the window resets.");
             }
             Error::Rendered { .. } => {}
             Error::PendingMigrations(pending) => {
@@ -192,6 +212,8 @@ impl Error {
             Error::Unauthenticated { .. } => "Sign-in required",
             Error::Forbidden { .. } => "Not allowed",
             Error::Csrf => "Invalid CSRF token",
+            Error::MissingScope { .. } => "Missing token scope",
+            Error::RateLimited { .. } => "Too many requests",
             Error::Rendered { .. } => "Rendered",
             Error::Invalid(_) => "Invalid input",
             Error::Conflict(_) => "Conflict",
@@ -273,6 +295,9 @@ impl IntoResponse for Error {
         let status = self.status();
         let report = self.report();
         let mut response = (status, format!("{} {}: {}", status.as_u16(), report.code, report.title)).into_response();
+        if let Error::RateLimited { retry_after } = self {
+            response.headers_mut().insert(axum::http::header::RETRY_AFTER, retry_after.into());
+        }
         response.extensions_mut().insert(report);
         response
     }
