@@ -47,6 +47,7 @@ const LEXXY_CSS: [&str; 3] = [
 /// Kiln's own editor code: configuration and skin.
 const RICH_TEXT_JS: &str = include_str!("../assets/rich-text.js");
 const RICH_TEXT_CSS: &str = include_str!("../assets/rich-text.css");
+const MARKDOWN_CSS: &str = include_str!("../assets/markdown.css");
 const RICH_TEXT_DISPLAY_JS: &str = include_str!("../assets/rich-text-display.js");
 const CONFIRM_JS: &str = include_str!("../assets/confirm.js");
 const DIRECT_UPLOAD_JS: &str = include_str!("../assets/direct-upload.js");
@@ -128,6 +129,16 @@ fn rich_text_css() -> &'static Served {
 /// The stylesheet `RichText` fields and `| rich_text` output need.
 pub(crate) fn rich_text_css_url() -> &'static str {
     &rich_text_css().url
+}
+
+fn markdown_css() -> &'static Served {
+    static SERVED: OnceLock<Served> = OnceLock::new();
+    SERVED.get_or_init(|| Served::new("markdown", "css", MARKDOWN_CSS.to_owned()))
+}
+
+/// The stylesheet for `| markdown` content and highlighted code.
+pub(crate) fn markdown_css_url() -> &'static str {
+    &markdown_css().url
 }
 
 fn short_hash(bytes: &[u8]) -> String {
@@ -274,6 +285,7 @@ pub(crate) fn serve_kiln(request_path: &str) -> Option<Response> {
         (direct_upload_js(), "direct-upload.js"),
         (dev_reload_js(), "dev-reload.js"),
         (rich_text_css(), "rich-text.css"),
+        (markdown_css(), "markdown.css"),
     ]
     .into_iter()
     .find(|(served, _)| served.url == request_path)

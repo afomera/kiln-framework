@@ -1,0 +1,115 @@
+/* Rendered markdown (`| markdown`) and highlighted code (`| highlight`). Rules use :where()
+   so any app stylesheet wins without !important; colors are variables to retheme. Code
+   tokens are syntect scopes as classes: `.hl-comment`, `.hl-string`, `.hl-keyword`.. */
+
+:where(.kiln-markdown, .kiln-code) {
+  --kiln-md-ink: oklch(23% 0.012 60);
+  --kiln-md-ink-muted: oklch(48% 0.012 60);
+  --kiln-md-line: oklch(90% 0.008 70);
+  --kiln-md-wash: oklch(97% 0.006 75);
+  --kiln-md-accent: oklch(52% 0.15 42);
+  --kiln-hl-comment: oklch(55% 0.01 70);
+  --kiln-hl-keyword: oklch(50% 0.17 330);
+  --kiln-hl-string: oklch(50% 0.13 150);
+  --kiln-hl-constant: oklch(52% 0.14 250);
+  --kiln-hl-function: oklch(50% 0.15 290);
+  --kiln-hl-type: oklch(55% 0.13 60);
+  --kiln-hl-tag: oklch(52% 0.16 25);
+  --kiln-hl-inserted: oklch(50% 0.13 150);
+  --kiln-hl-deleted: oklch(52% 0.17 25);
+}
+
+/* Dark: when the OS prefers it (unless the page chose light), or when the page sets
+   data-theme="dark" on <html>. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) :where(.kiln-markdown, .kiln-code) {
+    --kiln-md-ink: oklch(92% 0.008 70);
+    --kiln-md-ink-muted: oklch(72% 0.01 70);
+    --kiln-md-line: oklch(32% 0.008 60);
+    --kiln-md-wash: oklch(24% 0.008 60);
+    --kiln-md-accent: oklch(72% 0.13 48);
+    --kiln-hl-comment: oklch(64% 0.01 70);
+    --kiln-hl-keyword: oklch(76% 0.13 330);
+    --kiln-hl-string: oklch(78% 0.13 150);
+    --kiln-hl-constant: oklch(78% 0.1 240);
+    --kiln-hl-function: oklch(78% 0.11 300);
+    --kiln-hl-type: oklch(80% 0.12 65);
+    --kiln-hl-tag: oklch(74% 0.14 20);
+    --kiln-hl-inserted: oklch(78% 0.13 150);
+    --kiln-hl-deleted: oklch(74% 0.14 20);
+  }
+}
+
+:root[data-theme="dark"] :where(.kiln-markdown, .kiln-code) {
+  --kiln-md-ink: oklch(92% 0.008 70);
+  --kiln-md-ink-muted: oklch(72% 0.01 70);
+  --kiln-md-line: oklch(32% 0.008 60);
+  --kiln-md-wash: oklch(24% 0.008 60);
+  --kiln-md-accent: oklch(72% 0.13 48);
+  --kiln-hl-comment: oklch(64% 0.01 70);
+  --kiln-hl-keyword: oklch(76% 0.13 330);
+  --kiln-hl-string: oklch(78% 0.13 150);
+  --kiln-hl-constant: oklch(78% 0.1 240);
+  --kiln-hl-function: oklch(78% 0.11 300);
+  --kiln-hl-type: oklch(80% 0.12 65);
+  --kiln-hl-tag: oklch(74% 0.14 20);
+  --kiln-hl-inserted: oklch(78% 0.13 150);
+  --kiln-hl-deleted: oklch(74% 0.14 20);
+}
+
+/* Content */
+:where(.kiln-markdown) { color: var(--kiln-md-ink); line-height: 1.6; overflow-wrap: break-word; }
+:where(.kiln-markdown) > :where(:first-child) { margin-top: 0; }
+:where(.kiln-markdown) > :where(:last-child) { margin-bottom: 0; }
+:where(.kiln-markdown) :where(h1, h2, h3, h4, h5, h6) { line-height: 1.25; margin: 1.5em 0 0.5em; }
+:where(.kiln-markdown) :where(h1, h2) { padding-bottom: 0.3em; border-bottom: 1px solid var(--kiln-md-line); }
+:where(.kiln-markdown) :where(p, ul, ol, dl, table, pre, blockquote, details) { margin: 0 0 1em; }
+:where(.kiln-markdown) :where(a) { color: var(--kiln-md-accent); }
+:where(.kiln-markdown) :where(a.anchor) { margin-left: 0.3em; text-decoration: none; opacity: 0; }
+:where(.kiln-markdown) :where(a.anchor)::before { content: "#"; }
+:where(.kiln-markdown) :where(h1, h2, h3, h4, h5, h6):hover :where(a.anchor) { opacity: 0.6; }
+:where(.kiln-markdown) :where(img) { max-width: 100%; height: auto; }
+:where(.kiln-markdown) :where(blockquote) { padding: 0 1em; color: var(--kiln-md-ink-muted); border-left: 0.25em solid var(--kiln-md-line); }
+:where(.kiln-markdown) :where(hr) { border: 0; border-top: 1px solid var(--kiln-md-line); margin: 1.5em 0; }
+:where(.kiln-markdown) :where(table) { display: block; overflow-x: auto; border-collapse: collapse; }
+:where(.kiln-markdown) :where(th, td) { padding: 0.4em 0.8em; border: 1px solid var(--kiln-md-line); }
+:where(.kiln-markdown) :where(th) { background: var(--kiln-md-wash); }
+:where(.kiln-markdown) :where(th[align="center"], td[align="center"]) { text-align: center; }
+:where(.kiln-markdown) :where(th[align="right"], td[align="right"]) { text-align: right; }
+:where(.kiln-markdown) :where(:not(pre) > code, kbd) { padding: 0.15em 0.35em; font-size: 0.875em; background: var(--kiln-md-wash); border-radius: 4px; }
+:where(.kiln-markdown) :where(kbd) { border: 1px solid var(--kiln-md-line); }
+:where(.kiln-markdown) :where(.contains-task-list) { list-style: none; padding-left: 1.2em; }
+:where(.kiln-markdown) :where(.task-list-item-checkbox) { margin: 0 0.4em 0 -1.2em; vertical-align: middle; }
+:where(.kiln-markdown) :where(.footnotes) { font-size: 0.875em; color: var(--kiln-md-ink-muted); border-top: 1px solid var(--kiln-md-line); padding-top: 1em; }
+:where(.kiln-markdown) :where(.markdown-alert) { padding: 0.5em 1em; margin: 0 0 1em; border-left: 0.25em solid var(--kiln-alert, var(--kiln-md-line)); }
+:where(.kiln-markdown) :where(.markdown-alert-title) { font-weight: 600; color: var(--kiln-alert); margin-bottom: 0.25em; }
+:where(.kiln-markdown) :where(.markdown-alert-note) { --kiln-alert: var(--kiln-hl-constant); }
+:where(.kiln-markdown) :where(.markdown-alert-tip) { --kiln-alert: var(--kiln-hl-string); }
+:where(.kiln-markdown) :where(.markdown-alert-important) { --kiln-alert: var(--kiln-hl-function); }
+:where(.kiln-markdown) :where(.markdown-alert-warning) { --kiln-alert: var(--kiln-hl-type); }
+:where(.kiln-markdown) :where(.markdown-alert-caution) { --kiln-alert: var(--kiln-hl-deleted); }
+:where(.kiln-markdown-note, .kiln-code-note) { color: var(--kiln-md-ink-muted, inherit); font-style: italic; }
+
+/* Code */
+:where(.kiln-code, .kiln-markdown pre) {
+  padding: 0.9em 1em;
+  overflow-x: auto;
+  font-size: 0.875em;
+  line-height: 1.5;
+  color: var(--kiln-md-ink);
+  background: var(--kiln-md-wash);
+  border-radius: 6px;
+  tab-size: 4;
+}
+:where(.kiln-code) :where(.hl-comment) { color: var(--kiln-hl-comment); font-style: italic; }
+:where(.kiln-code) :where(.hl-keyword, .hl-storage) { color: var(--kiln-hl-keyword); }
+:where(.kiln-code) :where(.hl-string) { color: var(--kiln-hl-string); }
+:where(.kiln-code) :where(.hl-constant, .hl-support.hl-constant) { color: var(--kiln-hl-constant); }
+:where(.kiln-code) :where(.hl-entity.hl-name.hl-function, .hl-support.hl-function) { color: var(--kiln-hl-function); }
+:where(.kiln-code) :where(.hl-entity.hl-name.hl-type, .hl-entity.hl-name.hl-class, .hl-support.hl-type, .hl-support.hl-class, .hl-storage.hl-type) { color: var(--kiln-hl-type); }
+:where(.kiln-code) :where(.hl-entity.hl-name.hl-tag, .hl-entity.hl-other.hl-attribute-name) { color: var(--kiln-hl-tag); }
+:where(.kiln-code) :where(.hl-variable.hl-parameter, .hl-variable.hl-other.hl-member) { color: var(--kiln-hl-type); }
+:where(.kiln-code) :where(.hl-markup.hl-heading) { color: var(--kiln-hl-function); font-weight: 600; }
+:where(.kiln-code) :where(.hl-markup.hl-inserted) { color: var(--kiln-hl-inserted); }
+:where(.kiln-code) :where(.hl-markup.hl-deleted) { color: var(--kiln-hl-deleted); }
+:where(.kiln-code) :where(.hl-invalid) { color: var(--kiln-hl-deleted); text-decoration: underline wavy; }
