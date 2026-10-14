@@ -13,7 +13,7 @@ use crate::{
 pub enum Generate {
     /// A CRUD resource: record, migration, form, policy, ops, actions, views, templates,
     /// factory and tests. Fields: `title:string body:text published_at:timestamp?
-    /// owner:ref:User`. Types: string, text, rich_text, integer, float, bool, timestamp,
+    /// owner:ref:User`. Types: string, text, rich_text, markdown, integer, float, bool, timestamp,
     /// file, image (an upload, checked to really be an image), ref:<Record>; a trailing `?` makes a field optional, and `:internal`
     /// (`sent_at:timestamp?:internal`) keeps a field the app sets off the form. The first required ref to a record people sign
     /// in as (registered with `signs_in::<..>` in src/app.rs, e.g. `owner:ref:User` or
@@ -229,6 +229,8 @@ enum Kind {
     Text,
     /// Formatted text in the rich text editor (`kiln::RichText`).
     RichText,
+    /// Markdown source in a textarea, shown rendered (`kiln::Markdown`).
+    Markdown,
     Integer,
     Float,
     Bool,
@@ -296,6 +298,7 @@ impl Field {
             "string" => Kind::String,
             "text" => Kind::Text,
             "rich_text" | "richtext" => Kind::RichText,
+            "markdown" | "md" => Kind::Markdown,
             "integer" | "int" => Kind::Integer,
             "float" => Kind::Float,
             "bool" | "boolean" => Kind::Bool,
@@ -305,7 +308,7 @@ impl Field {
             "image" => Kind::Image,
             other => {
                 return Err(format!(
-                    "`{spec}`: unknown type `{other}`; use string, text, rich_text, integer, float, bool, timestamp, file, image or ref:<Record>"
+                    "`{spec}`: unknown type `{other}`; use string, text, rich_text, markdown, integer, float, bool, timestamp, file, image or ref:<Record>"
                 ));
             }
         };
@@ -338,6 +341,7 @@ impl Field {
         match self.kind {
             Kind::String | Kind::Text => "String".into(),
             Kind::RichText => "RichText".into(),
+            Kind::Markdown => "Markdown".into(),
             Kind::Integer => "i64".into(),
             Kind::Float => "f64".into(),
             Kind::Bool => "bool".into(),
@@ -391,7 +395,9 @@ impl Field {
             return format!("{}@example.com", prefix.to_lowercase());
         }
         match self.kind {
-            Kind::String | Kind::Text | Kind::RichText => format!("{prefix} {}", self.name.replace('_', " ")),
+            Kind::String | Kind::Text | Kind::RichText | Kind::Markdown => {
+                format!("{prefix} {}", self.name.replace('_', " "))
+            }
             // Small values, so adding a `range(..)` rule later doesn't break the tests.
             Kind::Integer => "3".into(),
             Kind::Float => "2.5".into(),
@@ -582,7 +588,7 @@ impl Resource {
                 (_, true) => "None".to_owned(),
                 (Kind::String, _) if f.is_email() => format!("format!(\"{}{{n}}@example.com\")", self.snake),
                 (Kind::String, _) => format!("format!(\"{} {{n}}\")", human(&f.name)),
-                (Kind::Text, _) => format!("\"{} text.\".into()", human(&f.name)),
+                (Kind::Text | Kind::Markdown, _) => format!("\"{} text.\".into()", human(&f.name)),
                 (Kind::RichText, _) => format!("\"<p>{} text.</p>\".into()", human(&f.name)),
                 (Kind::Integer, _) => "n as i64".into(),
                 (Kind::Float, _) => "1.5".into(),
@@ -651,6 +657,7 @@ impl Resource {
                 (Kind::String, true) => body.push_str("    #[validate(length(max = 200))]\n"),
                 (Kind::Text, false) => body.push_str("    #[validate(length(min = 1))]\n    #[form(textarea)]\n"),
                 (Kind::Text, true) => body.push_str("    #[form(textarea)]\n"),
+                (Kind::Markdown, false) => body.push_str("    /// Markdown, shown rendered (`| markdown`).\n    #[validate(length(min = 1))]\n"),
                 (Kind::Image, _) => body.push_str("    #[validate(file(max_size = \"10MB\", accept = \"image/*\"))]\n"),
                 (Kind::File, _) => body.push_str("    #[validate(file(max_size = \"25MB\"))]\n"),
                 (Kind::RichText, _) if !f.may_be_empty => {
@@ -663,7 +670,11 @@ impl Resource {
         let from_record: String = fields
             .iter()
             .map(|f| {
-                let clone = if f.is_text() || f.is_file() || f.kind == Kind::RichText { ".clone()" } else { "" };
+                let clone = if f.is_text() || f.is_file() || matches!(f.kind, Kind::RichText | Kind::Markdown) {
+                    ".clone()"
+                } else {
+                    ""
+                };
                 format!("            {}: {}.{}{clone},\n", f.column(), self.snake, f.column())
             })
             .collect();
@@ -917,6 +928,11 @@ impl Resource {
                 let value = match (f.kind, f.optional) {
                     (Kind::Timestamp, _) => format!("{{{{ @@name@@.{} | datetime }}}}", f.column()),
                     (Kind::RichText, _) => format!("{{{{ @@name@@.{} | rich_text }}}}", f.column()),
+                    (Kind::Markdown, false) => format!("{{{{ @@name@@.{} | markdown }}}}", f.column()),
+                    (Kind::Markdown, true) => format!(
+                        "{{% if @@name@@.{c} %}}{{{{ @@name@@.{c} | markdown }}}}{{% else %}}—{{% endif %}}",
+                        c = f.column()
+                    ),
                     (Kind::Image, _) => format!(
                         "{{% if @@name@@.{c} %}}<img src=\"{{{{ @@name@@.{c} | variant(width=640) }}}}\" alt=\"\">{{% else %}}—{{% endif %}}",
                         c = f.column()

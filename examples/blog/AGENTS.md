@@ -37,7 +37,7 @@ Run them from the app directory.
 | Fresh database | `kiln db reset` (migrate + seed); sign in at /session/new as ada@example.com |
 | Database | SQLite (`storage/development.sqlite3`, beside uploaded files) or Postgres (`kiln new app --database postgres`: `postgres://localhost/<app>_development`, tests in `<app>_test`); `DATABASE_URL` / `TEST_DATABASE_URL` override. `db/snapshot.json` records which. Kiln's queue, cache and broadcast log can each live in their own database (`QUEUE_DATABASE_URL`, `CACHE_DATABASE_URL`, `STREAMS_DATABASE_URL`, same backend); then jobs and broadcasts sent inside a transaction are handed over when it commits (a rollback still sends nothing). |
 
-Field types: `string`, `text`, `rich_text` (the editor; `?` means it may be left empty), `integer`, `float`, `bool`, `timestamp`, `file`, `image` (uploads; `image` accepts only images), `ref:<Record>`. A
+Field types: `string`, `text`, `rich_text` (the editor; `?` means it may be left empty), `markdown` (a textarea, shown rendered), `integer`, `float`, `bool`, `timestamp`, `file`, `image` (uploads; `image` accepts only images), `ref:<Record>`. A
 trailing `?` makes a field optional; quote it in zsh (`'notes:text?'`). A trailing `:internal`
 (`'sent_at:timestamp?:internal'`, `sends:integer:internal`) is a field the app sets, not the form:
 it's left off the form and its tests, and new records start with `None`, `false` or `0`. Fields
