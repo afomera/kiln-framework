@@ -304,6 +304,7 @@ version = "0.0.1"
 dependencies = [
  "kiln-framework",
  "serde",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
  "trybuild",

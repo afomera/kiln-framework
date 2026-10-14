@@ -42,6 +42,19 @@ pub trait Dialect: Send + Sync + 'static {
         ""
     }
 
+    /// Appended to a `SELECT` whose rows stay locked until the transaction ends
+    /// (`Query::for_update`). Empty when the backend has no row locks.
+    fn row_lock(&self) -> &'static str {
+        ""
+    }
+
+    /// Run before a `for_update` read on a backend without row locks: a write that takes
+    /// the lock writers queue on, so the read and the writes after it can't interleave
+    /// with another transaction's.
+    fn write_lock(&self, _table: &str) -> Option<String> {
+        None
+    }
+
     /// Run inside the claim's transaction first, when concurrent claims must queue
     /// (so per-queue limits hold across workers). `None` when the backend serializes
     /// writes anyway.
@@ -76,6 +89,15 @@ impl Dialect for Sqlite {
 
     fn columns_query(&self, table: &str) -> String {
         format!("SELECT \"name\" FROM pragma_table_info('{}')", table.replace('\'', "''"))
+    }
+
+    /// SQLite locks the whole database for writing, and `Db::transaction` begins deferred
+    /// (plain `BEGIN`), so a read alone takes no lock another writer waits on. A write that
+    /// matches nothing takes the write lock now; as a transaction's first statement it waits
+    /// (busy timeout) for the current writer and then reads the latest data. Held until
+    /// commit, it makes the transaction exclusive, which is all `FOR UPDATE` promises.
+    fn write_lock(&self, table: &str) -> Option<String> {
+        Some(format!("UPDATE \"{table}\" SET \"id\" = \"id\" WHERE 0 = 1"))
     }
 
     fn alters_columns(&self) -> bool {
@@ -157,6 +179,10 @@ impl Dialect for Postgres {
 
     fn claim_lock(&self) -> &'static str {
         " FOR UPDATE SKIP LOCKED"
+    }
+
+    fn row_lock(&self) -> &'static str {
+        " FOR UPDATE"
     }
 
     fn serialize_claims(&self) -> Option<&'static str> {

@@ -34,6 +34,7 @@ mod routing;
 pub mod schedule;
 mod schema;
 pub mod session;
+mod sql;
 pub mod storage;
 pub mod testing;
 pub mod turbo;
@@ -51,13 +52,14 @@ pub use migrate::{
     ColumnSnapshot, Diff, Migration, RecordDef, Snapshot, TableSnapshot, diff, diff_for, load_migrations, records,
     write_migration,
 };
-pub use query::{Column, Delete, Expr, Insert, Order, Query, Update};
+pub use query::{Column, Delete, Expr, Insert, MinMax, Order, Query, Select, Subquery, Summable, Update};
 pub use redirect::{Redirect, ViewOrRedirect};
 pub use rel::{Append, BoxFuture, HasRel, HasRelation, Loaded, RelSet, Relation};
 pub use rich_text::RichText;
 pub use routing::{Param, PathArg, RouteDef, routes, routes_table};
 pub use schema::{ColumnSchema, TableSchema};
 pub use session::{Current, Flash, SecretKey, Session};
+pub use sql::{FromSqlRow, Sql};
 pub use storage::{Attachment, Storage};
 pub use turbo::{Turbo, TurboStream};
 pub use types::{FromColumn, Id, SqlType, Timestamp, ToValue, Value};
