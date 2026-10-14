@@ -314,7 +314,8 @@ impl<T: Record, R> Query<T, R> {
         match (self.limit, self.offset) {
             (Some(l), Some(o)) => sql.push_str(&format!(" LIMIT {l} OFFSET {o}")),
             (Some(l), None) => sql.push_str(&format!(" LIMIT {l}")),
-            (None, Some(o)) => sql.push_str(&format!(" LIMIT -1 OFFSET {o}")),
+            // SQLite needs a LIMIT before OFFSET, and Postgres refuses SQLite's `LIMIT -1`.
+            (None, Some(o)) => sql.push_str(&format!(" LIMIT {} OFFSET {o}", i64::MAX)),
             (None, None) => {}
         }
         (sql, binds)
