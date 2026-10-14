@@ -1,0 +1,18 @@
+error[E0277]: `Post` isn't joined into this `blog::records::Comment` query
+ --> tests/ui/unjoined_table_filter.rs:6:80
+  |
+6 |     Comment::query().join(comment::author).filter(user::name.eq("Ada")).filter(post::title.eq("Hi")).all(db).await
+  |                                                                         ------ ^^^^^^^^^^^^^^^^^^^^ this is a column of `Post`
+  |                                                                         |
+  |                                                                         required by a bound introduced by this call
+  |
+  = help: the trait `InScope<blog::records::Comment, (kiln::join::Inner<User>,), _>` is not implemented for `Post`
+  = note: add `.join(..)` with the `belongs_to`/`has_one` relation leading to `Post` (e.g. `.join(repository::namespace)` before using `namespace::path`); to filter through a `has_many`, use `.in_query(..)`
+note: required by a bound in `Query::<T, R, J>::filter`
+ --> $WORKSPACE/crates/kiln/src/query.rs
+  |
+  |     pub fn filter<U, I>(mut self, expr: Expr<U>) -> Self
+  |            ------ required by a bound in this associated function
+  |     where
+  |         U: InScope<T, J, I>,
+  |            ^^^^^^^^^^^^^^^^ required by this bound in `Query::<T, R, J>::filter`

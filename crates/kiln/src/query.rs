@@ -1,7 +1,11 @@
 use std::marker::PhantomData;
 
 use crate::{
-    Db, Error, FromColumn, Id, Record, Result, Timestamp, ToValue, Value, rel::Append, rel::RelSet, rel::Relation,
+    Db, Error, FromColumn, Id, Record, Result, Timestamp, ToValue, Value,
+    join::{self, AddJoin, InScope, Inner, Join, Left, Selectable},
+    rel::Append,
+    rel::RelSet,
+    rel::Relation,
 };
 
 /// A typed column of record `T` holding values of type `V`.
@@ -27,17 +31,25 @@ impl<T, V> Column<T, V> {
     pub const fn name(&self) -> &'static str {
         self.name
     }
+}
+
+impl<T: Record, V> Column<T, V> {
+    /// `"table"."column"`. Always qualified, so a joined table's `id` or `created_at`
+    /// can't make a name ambiguous.
+    fn sql(&self) -> String {
+        format!("\"{}\".\"{}\"", T::TABLE, self.name)
+    }
 
     pub fn asc(self) -> Order<T> {
-        Order::new(format!("\"{}\" ASC", self.name))
+        Order::new(format!("{} ASC", self.sql()))
     }
 
     pub fn desc(self) -> Order<T> {
-        Order::new(format!("\"{}\" DESC", self.name))
+        Order::new(format!("{} DESC", self.sql()))
     }
 
     fn compare(self, op: &str, value: Value) -> Expr<T> {
-        Expr::new(format!("\"{}\" {op} ?", self.name), vec![value])
+        Expr::new(format!("{} {op} ?", self.sql()), vec![value])
     }
 
     /// The column's value is among the subquery's rows: the typed way to filter through
@@ -53,7 +65,7 @@ impl<T, V> Column<T, V> {
     /// ```
     pub fn in_query(self, subquery: impl Subquery<V>) -> Expr<T> {
         let (sql, binds) = subquery.into_sql();
-        Expr::new(format!("\"{}\" IN ({sql})", self.name), binds)
+        Expr::new(format!("{} IN ({sql})", self.sql()), binds)
     }
 
     /// The column's value is not among the subquery's rows. Rows where this column is NULL
@@ -61,11 +73,11 @@ impl<T, V> Column<T, V> {
     /// empty the result.
     pub fn not_in_query(self, subquery: impl Subquery<V>) -> Expr<T> {
         let (sql, binds) = subquery.into_sql();
-        Expr::new(format!("\"{}\" NOT IN ({sql})", self.name), binds)
+        Expr::new(format!("{} NOT IN ({sql})", self.sql()), binds)
     }
 }
 
-impl<T, V: ToValue> Column<T, V> {
+impl<T: Record, V: ToValue> Column<T, V> {
     pub fn eq(self, value: impl Into<V>) -> Expr<T> {
         self.compare("=", value.into().to_value())
     }
@@ -100,28 +112,28 @@ impl<T, V: ToValue> Column<T, V> {
             return Expr::new("0 = 1".to_owned(), vec![]);
         }
         let marks = vec!["?"; binds.len()].join(", ");
-        Expr::new(format!("\"{}\" IN ({marks})", self.name), binds)
+        Expr::new(format!("{} IN ({marks})", self.sql()), binds)
     }
 }
 
-impl<T, V> Column<T, Option<V>> {
+impl<T: Record, V> Column<T, Option<V>> {
     pub fn is_null(self) -> Expr<T> {
-        Expr::new(format!("\"{}\" IS NULL", self.name), vec![])
+        Expr::new(format!("{} IS NULL", self.sql()), vec![])
     }
 
     pub fn is_not_null(self) -> Expr<T> {
-        Expr::new(format!("\"{}\" IS NOT NULL", self.name), vec![])
+        Expr::new(format!("{} IS NOT NULL", self.sql()), vec![])
     }
 }
 
-impl<T> Column<T, String> {
+impl<T: Record> Column<T, String> {
     pub fn like(self, pattern: &str) -> Expr<T> {
         self.compare("LIKE", Value::Text(pattern.to_owned()))
     }
 }
 
 /// A boolean SQL expression over record `T`. Filtering a `Query<Post>` with a
-/// `Comment` column is a type error.
+/// `Comment` column is a type error, unless the query joins `Comment`.
 pub struct Expr<T> {
     sql: String,
     binds: Vec<Value>,
@@ -150,6 +162,10 @@ impl<T> Expr<T> {
         self.binds.extend(other.binds);
         Expr::new(format!("({}) {op} ({})", self.sql, other.sql), self.binds)
     }
+
+    fn erase(self) -> Clause {
+        Clause { sql: self.sql, binds: self.binds }
+    }
 }
 
 pub struct Order<T> {
@@ -163,18 +179,31 @@ impl<T> Order<T> {
     }
 }
 
-/// A query for records of type `T` with preloaded relations `R`.
+/// A filter once it's in a query: its record type was checked on the way in.
+#[derive(Clone)]
+struct Clause {
+    sql: String,
+    binds: Vec<Value>,
+}
+
+/// The query's type parameters, held as a `fn` so they needn't be `Send`, `Sync` or `Clone`.
+type QueryTypes<T, R, J> = fn() -> (T, R, J);
+
+/// A query for records of type `T` with preloaded relations `R`, joining tables `J`.
 ///
 /// `R` is a tuple of relation markers (`(post::author, post::comments)`). It only changes
 /// through [`Query::preload`], and it decides the row type: plain `T` when nothing is
-/// preloaded, `Loaded<T, R>` otherwise.
-pub struct Query<T, R = ()> {
-    filters: Vec<Expr<T>>,
-    orders: Vec<Order<T>>,
+/// preloaded, `Loaded<T, R>` otherwise. `J` only changes through [`Query::join`] and
+/// [`Query::left_join`], and decides which tables' columns the query accepts.
+pub struct Query<T, R = (), J = ()> {
+    filters: Vec<Clause>,
+    orders: Vec<String>,
+    /// `(table, JOIN clause)`.
+    joins: Vec<(&'static str, String)>,
     limit: Option<u64>,
     offset: Option<u64>,
     lock: bool,
-    _rels: PhantomData<fn() -> R>,
+    _marker: PhantomData<QueryTypes<T, R, J>>,
 }
 
 // By hand: derives would require `T: Clone` and `R: Clone`, which the markers don't need.
@@ -191,15 +220,16 @@ impl<T> Clone for Order<T> {
 }
 
 /// A base query can be reused, e.g. for several aggregates over the same rows.
-impl<T, R> Clone for Query<T, R> {
+impl<T, R, J> Clone for Query<T, R, J> {
     fn clone(&self) -> Self {
         Self {
             filters: self.filters.clone(),
             orders: self.orders.clone(),
+            joins: self.joins.clone(),
             limit: self.limit,
             offset: self.offset,
             lock: self.lock,
-            _rels: PhantomData,
+            _marker: PhantomData,
         }
     }
 }
@@ -212,16 +242,34 @@ impl<T: Record, R> Default for Query<T, R> {
 
 impl<T: Record, R> Query<T, R> {
     pub fn new() -> Self {
-        Self { filters: vec![], orders: vec![], limit: None, offset: None, lock: false, _rels: PhantomData }
+        Self {
+            filters: vec![],
+            orders: vec![],
+            joins: vec![],
+            limit: None,
+            offset: None,
+            lock: false,
+            _marker: PhantomData,
+        }
     }
+}
 
-    pub fn filter(mut self, expr: Expr<T>) -> Self {
-        self.filters.push(expr);
+impl<T: Record, R, J> Query<T, R, J> {
+    /// Keeps the rows matching `expr`, a condition on `T` or on a joined table.
+    pub fn filter<U, I>(mut self, expr: Expr<U>) -> Self
+    where
+        U: InScope<T, J, I>,
+    {
+        self.filters.push(expr.erase());
         self
     }
 
-    pub fn order(mut self, order: Order<T>) -> Self {
-        self.orders.push(order);
+    /// Sorts by a column of `T` or of a joined table; several orders apply in turn.
+    pub fn order<U, I>(mut self, order: Order<U>) -> Self
+    where
+        U: InScope<T, J, I>,
+    {
+        self.orders.push(order.sql);
         self
     }
 
@@ -241,28 +289,70 @@ impl<T: Record, R> Query<T, R> {
     }
 
     /// Adds a relation to load alongside the records, in one extra query per relation.
-    pub fn preload<X>(self, _relation: X) -> Query<T, R::Output>
+    pub fn preload<X>(self, _relation: X) -> Query<T, R::Output, J>
     where
         X: Relation<T>,
         R: Append<X>,
     {
-        self.with_rels()
+        self.retype()
     }
 
-    fn with_rels<N>(self) -> Query<T, N> {
+    /// Joins a `belongs_to` or `has_one` relation's table (SQL `INNER JOIN`), so filters,
+    /// orders and `select` can use its columns. Rows without a match are left out; the
+    /// rows are still plain `T` records, one per record.
+    ///
+    /// ```ignore
+    /// Repository::query()
+    ///     .join(repository::namespace)
+    ///     .filter(namespace::path.eq("afomera"))
+    ///     .order(namespace::path.asc())
+    /// // A relation of a joined table joins too:
+    /// Issue::query().join(issue::repository).join(repository::namespace)
+    /// ```
+    ///
+    /// A `has_many` doesn't join (it would repeat rows): filter through it with
+    /// [`Column::in_query`]. Each table joins once; a query can't join its own table.
+    pub fn join<X, I>(self, _relation: X) -> Query<T, R, J::Output>
+    where
+        X: Join,
+        X::Owner: InScope<T, J, I>,
+        J: AddJoin<Inner<X::Target>>,
+    {
+        self.add_join::<X, _>("INNER")
+    }
+
+    /// Like [`Query::join`], but keeps rows without a match (SQL `LEFT JOIN`), e.g. through
+    /// an optional `belongs_to`. The joined columns are NULL on those rows: a filter on them
+    /// doesn't match, and they can't be read with `select`.
+    pub fn left_join<X, I>(self, _relation: X) -> Query<T, R, J::Output>
+    where
+        X: Join,
+        X::Owner: InScope<T, J, I>,
+        J: AddJoin<Left<X::Target>>,
+    {
+        self.add_join::<X, _>("LEFT")
+    }
+
+    fn add_join<X: Join, N>(mut self, kind: &str) -> Query<T, R, N> {
+        self.joins.push((<X::Target as Record>::TABLE, join::clause::<X>(kind)));
+        self.retype()
+    }
+
+    fn retype<R2, J2>(self) -> Query<T, R2, J2> {
         Query {
             filters: self.filters,
             orders: self.orders,
+            joins: self.joins,
             limit: self.limit,
             offset: self.offset,
             lock: self.lock,
-            _rels: PhantomData,
+            _marker: PhantomData,
         }
     }
 
     /// Locks the rows `all`/`one`/`one_or_404` read until the transaction ends, so a
     /// read-then-write (handing out the next issue number) can't race. Only inside
-    /// [`Db::transaction`]; preloaded relations aren't locked.
+    /// [`Db::transaction`]; preloaded relations and joined tables aren't locked.
     ///
     /// Postgres: `SELECT .. FOR UPDATE`. SQLite has no row locks; it takes the database's
     /// write lock instead (a no-op write first), which other writers wait on just the same.
@@ -280,10 +370,43 @@ impl<T: Record, R> Query<T, R> {
         self
     }
 
-    /// One column of the matching rows: run it with [`Select::all`], or pass it to
-    /// [`Column::in_query`] as a subquery.
-    pub fn select<V>(self, column: Column<T, V>) -> Select<T, V> {
-        Select { query: self.with_rels(), column: column.name(), _marker: PhantomData }
+    /// One column of the matching rows, of `T` or of a joined table: run it with
+    /// [`Select::all`], or pass it to [`Column::in_query`] as a subquery.
+    pub fn select<U, V, I>(self, column: Column<U, V>) -> Select<T, V, J>
+    where
+        U: Record + Selectable<T, J, I>,
+    {
+        self.select_sql(column.sql(), column.name())
+    }
+
+    fn select_sql<V>(self, sql: String, name: &'static str) -> Select<T, V, J> {
+        Select { query: self.retype(), sql, name, _marker: PhantomData }
+    }
+
+    /// Joins are checked when the query runs: two tables of the same name would make
+    /// every column of that table ambiguous.
+    fn check_joins(&self) -> Result<()> {
+        let mut tables = vec![T::TABLE];
+        for (table, _) in &self.joins {
+            if tables.contains(table) {
+                return Err(Error::Config(format!(
+                    "a query on `{}` joins `{table}` twice (or joins its own table); join each table once, filter through the other relation with `.in_query(..)`, or write the query with `db.sql(..)`",
+                    T::TABLE
+                )));
+            }
+            tables.push(table);
+        }
+        Ok(())
+    }
+
+    /// `FROM` with the joins, and `WHERE`.
+    fn push_from_where(&self, sql: &mut String, binds: &mut Vec<Value>) {
+        sql.push_str(&format!(" FROM \"{}\"", T::TABLE));
+        for (_, clause) in &self.joins {
+            sql.push(' ');
+            sql.push_str(clause);
+        }
+        self.where_sql(sql, binds);
     }
 
     fn where_sql(&self, sql: &mut String, binds: &mut Vec<Value>) {
@@ -299,16 +422,15 @@ impl<T: Record, R> Query<T, R> {
     }
 
     fn to_sql(&self, select: &str, ordered: bool) -> (String, Vec<Value>) {
-        let mut sql = format!("SELECT {select} FROM \"{}\"", T::TABLE);
+        let mut sql = format!("SELECT {select}");
         let mut binds = Vec::new();
-        self.where_sql(&mut sql, &mut binds);
+        self.push_from_where(&mut sql, &mut binds);
         if ordered {
             sql.push_str(" ORDER BY ");
             if self.orders.is_empty() {
-                sql.push_str("\"id\" ASC");
+                sql.push_str(&format!("\"{}\".\"id\" ASC", T::TABLE));
             } else {
-                let orders: Vec<&str> = self.orders.iter().map(|o| o.sql.as_str()).collect();
-                sql.push_str(&orders.join(", "));
+                sql.push_str(&self.orders.join(", "));
             }
         }
         match (self.limit, self.offset) {
@@ -322,6 +444,7 @@ impl<T: Record, R> Query<T, R> {
     }
 
     pub async fn count(self, db: &Db) -> Result<i64> {
+        self.check_joins()?;
         let (sql, binds) = self.to_sql("COUNT(*)", false);
         let rows = db.fetch_all(&sql, binds).await?;
         let row = rows.first().ok_or(Error::NotFound)?;
@@ -332,61 +455,88 @@ impl<T: Record, R> Query<T, R> {
         Ok(self.limit(1).count(db).await? > 0)
     }
 
-    /// Matching rows counted per value of `column`, in the column's order (NULL first):
+    /// Matching rows counted per value of `column` (of `T` or a joined table), in the
+    /// column's order (NULL first):
     /// `Reaction::query().filter(..).count_by(reaction::emoji, &db)` gives `[("+1", 3), ..]`.
     /// Order, limit and offset are ignored.
-    pub async fn count_by<V: FromColumn>(self, column: Column<T, V>, db: &Db) -> Result<Vec<(V, i64)>> {
-        let name = column.name();
-        let mut sql = format!("SELECT \"{name}\" AS \"key\", COUNT(*) AS \"count\" FROM \"{}\"", T::TABLE);
+    pub async fn count_by<U, V: FromColumn, I>(self, column: Column<U, V>, db: &Db) -> Result<Vec<(V, i64)>>
+    where
+        U: Record + Selectable<T, J, I>,
+    {
+        self.check_joins()?;
+        let key = column.sql();
+        let mut sql = format!("SELECT {key} AS \"key\", COUNT(*) AS \"count\"");
         let mut binds = Vec::new();
-        self.where_sql(&mut sql, &mut binds);
+        self.push_from_where(&mut sql, &mut binds);
         // SQLite sorts NULL first and Postgres last; pin it so results match.
-        sql.push_str(&format!(" GROUP BY \"{name}\" ORDER BY \"{name}\" NULLS FIRST"));
+        sql.push_str(&format!(" GROUP BY {key} ORDER BY {key} NULLS FIRST"));
         let rows = db.fetch_all(&sql, binds).await?;
         let pairs = rows.iter().map(|row| Ok((V::from_column(row, "key")?, i64::from_column(row, "count")?)));
         pairs.collect::<std::result::Result<_, sqlx::Error>>().map_err(Error::from)
     }
 
     /// Sum of `column` over the matching rows; 0 when none match (NULLs are skipped).
-    pub async fn sum<V: Summable>(self, column: Column<T, V>, db: &Db) -> Result<V::Total> {
+    pub async fn sum<U, V: Summable, I>(self, column: Column<U, V>, db: &Db) -> Result<V::Total>
+    where
+        U: Record + InScope<T, J, I>,
+    {
         // Postgres sums integers as NUMERIC, which sqlx's `Any` driver can't read: cast back.
-        let select = format!("CAST(COALESCE(SUM(\"{}\"), 0) AS {}) AS \"total\"", column.name(), V::CAST);
+        let select = format!("CAST(COALESCE(SUM({}), 0) AS {}) AS \"total\"", column.sql(), V::CAST);
         self.aggregate(&select, db).await
     }
 
     /// Largest value of `column` among the matching rows; `None` when none match.
-    pub async fn max<V: MinMax>(self, column: Column<T, V>, db: &Db) -> Result<Option<V::Value>> {
-        self.aggregate(&format!("MAX(\"{}\") AS \"total\"", column.name()), db).await
+    pub async fn max<U, V: MinMax, I>(self, column: Column<U, V>, db: &Db) -> Result<Option<V::Value>>
+    where
+        U: Record + InScope<T, J, I>,
+    {
+        self.aggregate(&format!("MAX({}) AS \"total\"", column.sql()), db).await
     }
 
     /// Smallest value of `column` among the matching rows; `None` when none match.
-    pub async fn min<V: MinMax>(self, column: Column<T, V>, db: &Db) -> Result<Option<V::Value>> {
-        self.aggregate(&format!("MIN(\"{}\") AS \"total\"", column.name()), db).await
+    pub async fn min<U, V: MinMax, I>(self, column: Column<U, V>, db: &Db) -> Result<Option<V::Value>>
+    where
+        U: Record + InScope<T, J, I>,
+    {
+        self.aggregate(&format!("MIN({}) AS \"total\"", column.sql()), db).await
     }
 
     async fn aggregate<V: FromColumn>(self, select: &str, db: &Db) -> Result<V> {
-        let mut sql = format!("SELECT {select} FROM \"{}\"", T::TABLE);
+        self.check_joins()?;
+        let mut sql = format!("SELECT {select}");
         let mut binds = Vec::new();
-        self.where_sql(&mut sql, &mut binds);
+        self.push_from_where(&mut sql, &mut binds);
         let rows = db.fetch_all(&sql, binds).await?;
         Ok(V::from_column(rows.first().ok_or(Error::NotFound)?, "total")?)
     }
 
-    /// Deletes every matching row and returns how many. Order and limit are ignored.
-    pub async fn delete_all(self, db: &Db) -> Result<u64> {
+    /// Deletes every matching row of `T` (never of a joined table) and returns how many.
+    /// Order and limit are ignored.
+    pub async fn delete_all(mut self, db: &Db) -> Result<u64> {
+        self.check_joins()?;
         let mut sql = format!("DELETE FROM \"{}\"", T::TABLE);
         let mut binds = Vec::new();
-        self.where_sql(&mut sql, &mut binds);
+        if self.joins.is_empty() {
+            self.where_sql(&mut sql, &mut binds);
+        } else {
+            // DELETE can't join portably; pick the rows with a subquery instead.
+            let id = format!("\"{}\".\"id\"", T::TABLE);
+            (self.limit, self.offset) = (None, None);
+            let (select, select_binds) = self.to_sql(&id, false);
+            sql.push_str(&format!(" WHERE {id} IN ({select})"));
+            binds = select_binds;
+        }
         sql.push_str(" RETURNING \"id\"");
         Ok(db.fetch_all(&sql, binds).await?.len() as u64)
     }
 }
 
-impl<T: Record, R: RelSet<T>> Query<T, R> {
+impl<T: Record, R: RelSet<T>, J> Query<T, R, J> {
     /// Runs the query plus one query per preloaded relation (never one per row).
     pub async fn all(self, db: &Db) -> Result<Vec<R::Row>> {
-        let select = quoted_columns::<T>();
-        let (mut sql, binds) = self.to_sql(&select, true);
+        self.check_joins()?;
+        let select = T::COLUMNS.iter().map(|c| format!("\"{}\".\"{c}\" AS \"{c}\"", T::TABLE)).collect::<Vec<_>>();
+        let (mut sql, binds) = self.to_sql(&select.join(", "), true);
         if self.lock {
             lock_rows::<T>(db, &mut sql).await?;
         }
@@ -426,32 +576,35 @@ async fn lock_rows<T: Record>(db: &Db, sql: &mut String) -> Result<()> {
     if let Some(write_lock) = db.dialect().write_lock(T::TABLE) {
         db.fetch_all(&write_lock, vec![]).await?;
     }
-    sql.push_str(db.dialect().row_lock());
+    sql.push_str(&db.dialect().row_lock(T::TABLE));
     Ok(())
 }
 
 /// One column of a query's rows, from [`Query::select`].
-pub struct Select<T, V> {
-    query: Query<T>,
-    column: &'static str,
+pub struct Select<T, V, J = ()> {
+    query: Query<T, (), J>,
+    /// The qualified column.
+    sql: String,
+    name: &'static str,
     _marker: PhantomData<fn() -> V>,
 }
 
-impl<T: Record, V: FromColumn> Select<T, V> {
+impl<T: Record, V: FromColumn, J> Select<T, V, J> {
     /// The column's values, in the query's order (`pluck`).
     pub async fn all(self, db: &Db) -> Result<Vec<V>> {
-        let (sql, binds) = self.query.to_sql(&format!("\"{}\"", self.column), true);
+        self.query.check_joins()?;
+        let (sql, binds) = self.query.to_sql(&format!("{} AS \"{}\"", self.sql, self.name), true);
         let rows = db.fetch_all(&sql, binds).await?;
-        rows.iter().map(|row| V::from_column(row, self.column).map_err(Error::from)).collect()
+        rows.iter().map(|row| V::from_column(row, self.name).map_err(Error::from)).collect()
     }
 }
 
-impl<U: Record, V> Select<U, V> {
-    fn subquery_sql(self) -> (String, Vec<Value>) {
-        let query = self.query.filter(Expr::new(format!("\"{}\" IS NOT NULL", self.column), vec![]));
+impl<U: Record, V, J> Select<U, V, J> {
+    fn subquery_sql(mut self) -> (String, Vec<Value>) {
+        self.query.filters.push(Clause { sql: format!("{} IS NOT NULL", self.sql), binds: vec![] });
         // Order only matters when it picks which rows a limit keeps.
-        let ordered = query.limit.is_some() || query.offset.is_some();
-        query.to_sql(&format!("\"{}\"", self.column), ordered)
+        let ordered = self.query.limit.is_some() || self.query.offset.is_some();
+        self.query.to_sql(&self.sql, ordered)
     }
 }
 
@@ -463,33 +616,33 @@ pub trait Subquery<V> {
     fn into_sql(self) -> (String, Vec<Value>);
 }
 
-impl<U: Record, V> Subquery<V> for Select<U, V> {
+impl<U: Record, V, J> Subquery<V> for Select<U, V, J> {
     fn into_sql(self) -> (String, Vec<Value>) {
         self.subquery_sql()
     }
 }
 
-impl<U: Record, V> Subquery<Option<V>> for Select<U, V> {
+impl<U: Record, V, J> Subquery<Option<V>> for Select<U, V, J> {
     fn into_sql(self) -> (String, Vec<Value>) {
         self.subquery_sql()
     }
 }
 
-impl<U: Record, V> Subquery<V> for Select<U, Option<V>> {
+impl<U: Record, V, J> Subquery<V> for Select<U, Option<V>, J> {
     fn into_sql(self) -> (String, Vec<Value>) {
         self.subquery_sql()
     }
 }
 
-impl<U: Record, R> Subquery<Id<U>> for Query<U, R> {
+impl<U: Record, R, J> Subquery<Id<U>> for Query<U, R, J> {
     fn into_sql(self) -> (String, Vec<Value>) {
-        self.select(Column::<U, Id<U>>::new("id")).subquery_sql()
+        self.select_sql::<Id<U>>(Column::<U, Id<U>>::new("id").sql(), "id").subquery_sql()
     }
 }
 
-impl<U: Record, R> Subquery<Option<Id<U>>> for Query<U, R> {
+impl<U: Record, R, J> Subquery<Option<Id<U>>> for Query<U, R, J> {
     fn into_sql(self) -> (String, Vec<Value>) {
-        self.select(Column::<U, Id<U>>::new("id")).subquery_sql()
+        self.select_sql::<Id<U>>(Column::<U, Id<U>>::new("id").sql(), "id").subquery_sql()
     }
 }
 

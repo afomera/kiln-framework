@@ -17,18 +17,32 @@ enum RelKind {
     HasOne,
 }
 
-struct RelSpec {
-    name: Ident,
-    target: Path,
+/// One item inside `has_many(..)` and friends: a relation, or an option (`through = ..`,
+/// `source = ..`) for the relation before it.
+enum RelItem {
+    Rel { name: Ident, target: Path },
+    Option { key: Ident, value: Ident },
 }
 
-impl Parse for RelSpec {
+impl Parse for RelItem {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let name = input.parse()?;
+        let name: Ident = input.parse()?;
+        if input.peek(Token![=]) {
+            input.parse::<Token![=]>()?;
+            return Ok(Self::Option { key: name, value: input.parse()? });
+        }
         input.parse::<Token![:]>()?;
-        let target = input.parse()?;
-        Ok(Self { name, target })
+        Ok(Self::Rel { name, target: input.parse()? })
     }
+}
+
+/// `has_many(members: User, through = memberships)`: reached through another `has_many`.
+struct Through {
+    /// The `has_many` on the same record leading to the join records.
+    via: Ident,
+    /// The join record's `belongs_to` leading to the target, whose key is `{source}_id`;
+    /// by default the target's name (`user` for `User`).
+    source: Option<Ident>,
 }
 
 struct Rel {
@@ -37,6 +51,12 @@ struct Rel {
     target: Path,
     /// `belongs_to` whose foreign key is `Option<Id<T>>`.
     optional: bool,
+    through: Option<Through>,
+}
+
+/// `User` for `crate::records::User`.
+fn last_ident(path: &Path) -> String {
+    path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()
 }
 
 fn is_option(ty: &Type) -> bool {
@@ -149,8 +169,43 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             };
             let content;
             syn::parenthesized!(content in meta.input);
-            for spec in Punctuated::<RelSpec, Token![,]>::parse_terminated(&content)? {
-                rels.push(Rel { kind, name: spec.name, target: spec.target, optional: false });
+            let first = rels.len();
+            for item in Punctuated::<RelItem, Token![,]>::parse_terminated(&content)? {
+                let (key, value) = match item {
+                    RelItem::Rel { name, target } => {
+                        rels.push(Rel { kind, name, target, optional: false, through: None });
+                        continue;
+                    }
+                    RelItem::Option { key, value } => (key, value),
+                };
+                let rel = if kind == RelKind::HasMany && rels.len() > first { rels.last_mut() } else { None };
+                let Some(rel) = rel else {
+                    return Err(Error::new_spanned(
+                        &key,
+                        format!(
+                            "`{key} = ..` follows a relation inside `has_many(..)`: `has_many(members: User, through = memberships)`"
+                        ),
+                    ));
+                };
+                match (key.to_string().as_str(), &mut rel.through) {
+                    ("through", None) => rel.through = Some(Through { via: value, source: None }),
+                    ("source", Some(through)) if through.source.is_none() => through.source = Some(value),
+                    ("source", _) => {
+                        return Err(Error::new_spanned(
+                            &key,
+                            "`source = ..` goes once, after `through = ..`: `has_many(members: User, through = memberships, source = user)`",
+                        ));
+                    }
+                    ("through", Some(_)) => {
+                        return Err(Error::new_spanned(&key, "a relation goes through one other relation"));
+                    }
+                    _ => {
+                        return Err(Error::new_spanned(
+                            &key,
+                            format!("unknown relation option `{key}`; expected `through = ..` or `source = ..`"),
+                        ));
+                    }
+                }
             }
             Ok(())
         })?;
@@ -244,6 +299,23 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 &rel.name,
                 format!("relation `{}` has the same name as a column", rel.name),
             ));
+        }
+        if let Some(through) = &rel.through {
+            let via = rels.iter().find(|r| r.name == through.via);
+            if !via.is_some_and(|v| v.kind == RelKind::HasMany && v.through.is_none()) {
+                let what = match via {
+                    Some(_) => format!("`{}` isn't a plain `has_many` on `{name}`", through.via),
+                    None => format!("`{name}` has no relation `{}`", through.via),
+                };
+                return Err(Error::new_spanned(
+                    &through.via,
+                    format!(
+                        "{what}; `through` names the `has_many` leading to the join records, e.g. `has_many(memberships: Membership, {}: {}, through = memberships)`",
+                        rel.name,
+                        last_ident(&rel.target)
+                    ),
+                ));
+            }
         }
     }
 
@@ -343,18 +415,15 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         (quote! {}, quote! {}, quote! {})
     };
 
-    let relations = rels.iter().map(|rel| relation_items(name, vis, rel));
+    let relations = rels.iter().map(|rel| relation_items(name, vis, rel, &rels));
     let relation_specs: Vec<TokenStream> = rels
         .iter()
         .map(|rel| {
-            let kind = match rel.kind {
-                RelKind::BelongsTo => "belongs_to",
-                RelKind::HasMany => "has_many",
-                RelKind::HasOne => "has_one",
-            };
+            let kind = kind_name(rel);
             let rel_name = rel.name.to_string();
-            let target = rel.target.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
-            quote! { (#kind, #rel_name, #target) }
+            let target = last_ident(&rel.target);
+            let through = rel.through.as_ref().map(|t| t.via.to_string()).unwrap_or_default();
+            quote! { (#kind, #rel_name, #target, #through) }
         })
         .collect();
 
@@ -467,10 +536,62 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     })
 }
 
-fn relation_items(owner: &Ident, vis: &syn::Visibility, rel: &Rel) -> TokenStream {
+fn kind_name(rel: &Rel) -> &'static str {
+    match rel.kind {
+        RelKind::BelongsTo => "belongs_to",
+        RelKind::HasMany if rel.through.is_some() => "has_many_through",
+        RelKind::HasMany => "has_many",
+        RelKind::HasOne => "has_one",
+    }
+}
+
+fn relation_items(owner: &Ident, vis: &syn::Visibility, rel: &Rel, rels: &[Rel]) -> TokenStream {
     let (rname, target) = (&rel.name, &rel.target);
     let span = rname.span();
+    // `belongs_to` and `has_one` match one row per owner, so they can be joined.
+    let join_on = match rel.kind {
+        RelKind::BelongsTo => {
+            let fk = format!("{rname}_id");
+            Some(quote! { ::kiln::join::JoinOn::BelongsTo(#fk) })
+        }
+        RelKind::HasOne => {
+            let fk = format!("{}_id", snake_case(&owner.to_string()));
+            Some(quote! { ::kiln::join::JoinOn::HasOne(#fk) })
+        }
+        RelKind::HasMany => None,
+    };
+    let join_impl = join_on.map(|on| {
+        quote! {
+            impl<__KilnN> ::kiln::join::Join for #rname<__KilnN> {
+                type Owner = #owner;
+                type Target = #target;
+                const ON: ::kiln::join::JoinOn = #on;
+            }
+        }
+    });
     let (out, loader) = match rel.kind {
+        RelKind::HasMany if rel.through.is_some() => {
+            let through = rel.through.as_ref().expect("checked above");
+            // Checked in `expand`: a plain `has_many` on this record.
+            let via = rels.iter().find(|r| r.name == through.via).expect("`through` relation checked in expand");
+            let mid = &via.target;
+            let owner_fk = format_ident!("{}_id", snake_case(&owner.to_string()));
+            let source = through.source.as_ref().map_or_else(|| snake_case(&last_ident(target)), Ident::to_string);
+            let source_span = through.source.as_ref().map_or(span, Ident::span);
+            let target_fk = format_ident!("{}_id", source, span = source_span);
+            (
+                quote! { ::std::vec::Vec<<__KilnN as ::kiln::RelSet<#target>>::Row> },
+                quote_spanned! {span=>
+                    ::kiln::rel::load_has_many_through::<#owner, #mid, #target, __KilnN, _, _>(
+                        __kiln_owners,
+                        ::kiln::Column::<#mid, ::kiln::Id<#owner>>::new(stringify!(#owner_fk)),
+                        |__kiln_link: &#mid| ::kiln::rel::ForeignKey::<#owner>::key(&__kiln_link.#owner_fk),
+                        |__kiln_link: &#mid| ::kiln::rel::ForeignKey::<#target>::key(&__kiln_link.#target_fk),
+                        __kiln_db,
+                    )
+                },
+            )
+        }
         RelKind::BelongsTo if rel.optional => {
             let fk = format_ident!("{}_id", rname);
             (
@@ -528,15 +649,17 @@ fn relation_items(owner: &Ident, vis: &syn::Visibility, rel: &Rel) -> TokenStrea
             )
         }
     };
-    let kind = match rel.kind {
-        RelKind::BelongsTo => "belongs_to",
-        RelKind::HasMany => "has_many",
-        RelKind::HasOne => "has_one",
+    let kind = kind_name(rel).replace('_', " ");
+    let doc = match rel.kind {
+        RelKind::HasMany => format!(
+            "Relation `{owner}::{rname}` ({kind} `{}`). Pass to `.preload(..)`; nest with `{rname}.preload(..)`.",
+            quote!(#target)
+        ),
+        _ => format!(
+            "Relation `{owner}::{rname}` ({kind} `{}`). Pass to `.preload(..)` or `.join(..)`; nest with `{rname}.preload(..)`.",
+            quote!(#target)
+        ),
     };
-    let doc = format!(
-        "Relation `{owner}::{rname}` ({kind} `{}`). Pass to `.preload(..)`; nest with `{rname}.preload(..)`.",
-        quote!(#target)
-    );
 
     quote! {
         #[doc = #doc]
@@ -584,5 +707,7 @@ fn relation_items(owner: &Ident, vis: &syn::Visibility, rel: &Rel) -> TokenStrea
                 ::std::boxed::Box::pin(#loader)
             }
         }
+
+        #join_impl
     }
 }

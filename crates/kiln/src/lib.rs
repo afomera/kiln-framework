@@ -24,6 +24,7 @@ mod files;
 pub mod form;
 pub mod http;
 pub mod jobs;
+pub mod join;
 pub mod lint;
 pub mod mail;
 pub mod markdown;

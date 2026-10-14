@@ -247,7 +247,8 @@ fn summary(report: &Value) -> String {
             .collect();
         let _ = writeln!(out, "  {} ({})  {}", s(&r["name"]), s(&r["table"]), columns.join(", "));
         for rel in r["relations"].as_array().into_iter().flatten() {
-            let _ = writeln!(out, "    {} {} -> {}", s(&rel["kind"]), s(&rel["name"]), s(&rel["target"]));
+            let through = rel["through"].as_str().map(|t| format!(" (through {t})")).unwrap_or_default();
+            let _ = writeln!(out, "    {} {} -> {}{through}", s(&rel["kind"]), s(&rel["name"]), s(&rel["target"]));
         }
         for index in r["indexes"].as_array().into_iter().flatten() {
             let columns: Vec<String> = index["columns"].as_array().into_iter().flatten().map(s).collect();

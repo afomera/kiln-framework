@@ -322,6 +322,11 @@ where
 
 /// A child's foreign key to `O`: `Id<O>`, or `Option<Id<O>>` when the child may belong to
 /// something else instead (`#[record(one_of(..))]`).
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` isn't a key to `{O}`",
+    label = "a relation leading to `{O}` reads this field",
+    note = "`has_many` reads the child's `{{owner}}_id`; `has_many(.., through = ..)` reads the join record's `{{target}}_id` (or `{{source}}_id` with `source = ..`). Make the field `Id<{O}>` or `Option<Id<{O}>>`, or point the relation at the right record"
+)]
 pub trait ForeignKey<O> {
     fn key(&self) -> Option<Id<O>>;
 }
@@ -392,4 +397,47 @@ where
         }
     }
     Ok(owners.iter().map(|owner| by_owner.get(&owner.id()).cloned()).collect())
+}
+
+/// Loader behind generated `has_many(.., through = ..)` relations: the owners' join
+/// records (`memberships`) in one query, then the records they point at (`users`) in
+/// another. Each owner gets one row per join record, in the join records' order.
+pub async fn load_has_many_through<O, M, T, N, F, G>(
+    owners: &[O],
+    owner_column: Column<M, Id<O>>,
+    owner_key: F,
+    target_key: G,
+    db: &Db,
+) -> Result<Vec<Vec<N::Row>>>
+where
+    O: Record,
+    M: Record,
+    T: Record,
+    N: RelSet<T>,
+    F: Fn(&M) -> Option<Id<O>> + Send + Sync,
+    G: Fn(&M) -> Option<Id<T>> + Send + Sync,
+{
+    if owners.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids: Vec<Id<O>> = owners.iter().map(Record::id).collect();
+    let links = Query::<M>::new().filter(owner_column.is_in(ids)).all(db).await?;
+    let mut target_ids: Vec<Id<T>> = links.iter().filter_map(&target_key).collect();
+    target_ids.sort();
+    target_ids.dedup();
+    let rows = if target_ids.is_empty() {
+        vec![]
+    } else {
+        Query::<T, N>::new().filter(Column::<T, Id<T>>::new("id").is_in(target_ids)).all(db).await?
+    };
+    let by_id: HashMap<Id<T>, N::Row> = rows.into_iter().map(|row| (N::record(&row).id(), row)).collect();
+    let mut groups: HashMap<Id<O>, Vec<N::Row>> = HashMap::new();
+    for link in &links {
+        let (Some(owner), Some(target)) = (owner_key(link), target_key(link)) else { continue };
+        let row = by_id.get(&target).cloned().ok_or_else(|| {
+            Error::Integrity(format!("{} {} points at missing {} {}", M::TABLE, link.id(), T::TABLE, target))
+        })?;
+        groups.entry(owner).or_default().push(row);
+    }
+    Ok(owners.iter().map(|owner| groups.get(&owner.id()).cloned().unwrap_or_default()).collect())
 }

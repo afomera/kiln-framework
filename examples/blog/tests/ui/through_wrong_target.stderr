@@ -1,0 +1,14 @@
+error[E0277]: `kiln::Id<team::Team>` isn't a key to `person::Person`
+ --> tests/ui/through_wrong_target.rs:8:65
+  |
+8 |     #[record(table = "teams", has_many(memberships: Membership, members: Person, through = memberships))]
+  |                                                                 ^^^^^^^ a relation leading to `person::Person` reads this field
+  |
+  = note: `has_many` reads the child's `{owner}_id`; `has_many(.., through = ..)` reads the join record's `{target}_id` (or `{source}_id` with `source = ..`). Make the field `Id<person::Person>` or `Option<Id<person::Person>>`, or point the relation at the right record
+help: the trait `ForeignKey<person::Person>` is not implemented for `kiln::Id<team::Team>`
+      but trait `ForeignKey<team::Team>` is implemented for it
+ --> $WORKSPACE/crates/kiln/src/rel.rs
+  |
+  | impl<O> ForeignKey<O> for Id<O> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: for that trait implementation, expected `team::Team`, found `person::Person`

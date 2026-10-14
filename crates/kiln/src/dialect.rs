@@ -43,9 +43,10 @@ pub trait Dialect: Send + Sync + 'static {
     }
 
     /// Appended to a `SELECT` whose rows stay locked until the transaction ends
-    /// (`Query::for_update`). Empty when the backend has no row locks.
-    fn row_lock(&self) -> &'static str {
-        ""
+    /// (`Query::for_update`), locking `table`'s rows only, not a joined table's. Empty
+    /// when the backend has no row locks.
+    fn row_lock(&self, _table: &str) -> String {
+        String::new()
     }
 
     /// Run before a `for_update` read on a backend without row locks: a write that takes
@@ -181,8 +182,9 @@ impl Dialect for Postgres {
         " FOR UPDATE SKIP LOCKED"
     }
 
-    fn row_lock(&self) -> &'static str {
-        " FOR UPDATE"
+    fn row_lock(&self, table: &str) -> String {
+        // `OF`: a joined table isn't locked, and the nullable side of a LEFT JOIN can't be.
+        format!(" FOR UPDATE OF \"{table}\"")
     }
 
     fn serialize_claims(&self) -> Option<&'static str> {

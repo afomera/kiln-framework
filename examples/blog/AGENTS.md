@@ -105,7 +105,9 @@ generated tests passing.
 
 - **Relations:** `#[record(belongs_to(author: User), has_many(comments: Comment), has_one(profile: Profile))]`;
   `has_many`/`has_one` expect `{record}_id` on the other table (`comments.post_id`), which may
-  be `Option<Id<..>>` (with `one_of`). `has_one` gives an `Option`.
+  be `Option<Id<..>>` (with `one_of`). `has_one` gives an `Option`. Through a join record:
+  `has_many(memberships: Membership, members: User, through = memberships)` reads `memberships.user_id`
+  (`source = invited_by` for `invited_by_id`); it preloads in two queries.
 - **Relations exist only when preloaded:** `.preload(post::author)` before `post.author()`,
   and the view's field type lists them: `Loaded<Post, (post::author,)>`. Templates read
   `post.author.name`.
@@ -359,15 +361,19 @@ generated tests passing.
   `.delete_all` (each takes `&ctx.db`). A request that clashes with a record's state (already sent) is
   `Err(Error::Conflict("Already sent.".into()))`: a 409. For a browser, turn it into a flash:
   `Redirect::to(back).notice_or_alert(ops::send(&ctx, x).await, "Sent.")`.
-  - Through another table (no joins; a typed semi-join): `repository::namespace_id.in_query(Namespace::query().filter(namespace::path.eq(p)))`
-    (a `Query<U>` yields its ids), or `.in_query(Member::query().filter(..).select(member::org_id))` for another
-    column; `not_in_query` too. Union access rules with `.or(..)`. `.select(col).all(&db)` plucks one column.
+  - Joins, through a `belongs_to`/`has_one`: `Repository::query().join(repository::namespace).filter(namespace::path.eq(p))
+    .order(namespace::path.asc())` still gives `Repository` rows; chain `.join(issue::repository).join(repository::namespace)`;
+    `.left_join(..)` keeps rows without a match. Only joined tables' columns compile. `.or(..)` combines one table's
+    conditions; `.filter` again for another's.
+  - Through a `has_many` (no join, it would repeat rows): `post::id.in_query(Comment::query().filter(..).select(comment::post_id))`,
+    or `repository::namespace_id.in_query(Namespace::query().filter(..))` (a `Query<U>` yields its ids); `not_in_query`
+    too. Union access rules with `.or(..)`. `.select(col).all(&db)` plucks one column (of a joined table too).
   - Aggregates: `.count_by(reaction::emoji, &db)` → `Vec<(String, i64)>`; `.sum(col, &db)` (0 when empty),
     `.max(col, &db)` / `.min(..)` → `Option`. Queries are `Clone` to reuse a base scope.
   - Counters: `Repository::update(id).increment(repository::issue_count, 1).run(&tx).await?.issue_count` is
     atomic and returns the new value. To read then write: `Repository::find(id).for_update().one_or_404(&tx)`
     inside `db.transaction`, as its first query (Postgres `FOR UPDATE`; SQLite takes its write lock).
-  - Raw SQL, the escape hatch (ordering by a joined column, reports): `db.sql("SELECT .. WHERE \"path\" = ?").bind(p)`
+  - Raw SQL, the escape hatch (several columns across tables, reports): `db.sql("SELECT .. WHERE \"path\" = ?").bind(p)`
     then `.records::<Repository>()`, `.all::<(String, i64)>()`, `.one::<i64>()`, `.json()` or `.run()` (rows
     affected); works on `&tx` too. Same portability rules as above.
 - **Errors are reports** with stable codes (`K1003`, `K0202`, ...). Fetch any failing URL

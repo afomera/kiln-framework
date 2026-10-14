@@ -1,0 +1,5 @@
+error: `Team` has no relation `memberships`; `through` names the `has_many` leading to the join records, e.g. `has_many(memberships: Membership, members: Person, through = memberships)`
+ --> tests/ui/through_unknown.rs:5:63
+  |
+5 | #[record(table = "teams", has_many(members: Person, through = memberships))]
+  |                                                               ^^^^^^^^^^^

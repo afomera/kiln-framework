@@ -1,0 +1,24 @@
+error[E0277]: `blog::records::post::comments` can't be joined: it can match many rows per record
+ --> tests/ui/join_has_many.rs:6:24
+  |
+6 |     Post::query().join(post::comments).all(db).await
+  |                   ---- ^^^^^^^^^^^^^^ only `belongs_to` and `has_one` relations join
+  |                   |
+  |                   required by a bound introduced by this call
+  |
+  = help: the trait `kiln::join::Join` is not implemented for `blog::records::post::comments`
+  = note: joining a `has_many` would repeat each record once per child; filter through it with a subquery instead: `post::id.in_query(Comment::query().filter(..).select(comment::post_id))`
+  = help: the following other types implement trait `kiln::join::Join`:
+            blog::records::comment::author<__KilnN>
+            blog::records::comment::post<__KilnN>
+            blog::records::post::author<__KilnN>
+            editor<__KilnN>
+            owner<__KilnN>
+note: required by a bound in `Query::<T, R, J>::join`
+ --> $WORKSPACE/crates/kiln/src/query.rs
+  |
+  |     pub fn join<X, I>(self, _relation: X) -> Query<T, R, J::Output>
+  |            ---- required by a bound in this associated function
+  |     where
+  |         X: Join,
+  |            ^^^^ required by this bound in `Query::<T, R, J>::join`
