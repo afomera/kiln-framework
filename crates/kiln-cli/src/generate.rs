@@ -102,6 +102,14 @@ pub enum Generate {
         #[arg(long)]
         force: bool,
     },
+    /// Personal access tokens for `User`: a `/settings/api_tokens` page to create (shown
+    /// once) and revoke them, a `GET /api/me` route they authenticate, and tests. Tokens
+    /// live in Kiln's `kiln_api_tokens` table, so there's no migration. Needs `kiln g auth`.
+    #[command(name = "api_tokens", alias = "api-tokens")]
+    ApiTokens {
+        #[arg(long)]
+        force: bool,
+    },
     /// One of the app's own `kiln check` rules in src/lints, with tests:
     /// `kiln g lint no_unwrap_in_actions`. Gets the next free `A` code unless `--code`.
     Lint {
@@ -171,6 +179,7 @@ impl Generate {
             Generate::Auth { no_migration, force } => {
                 (auth(app, force)?, force, (!no_migration).then(|| "add_passwords_to_users".to_owned()))
             }
+            Generate::ApiTokens { force } => (api_tokens(app)?, force, None),
         };
         for line in plan.apply(&app.root, force)? {
             println!("{line}");
@@ -1746,6 +1755,62 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
                 manifest.trim_end()
             ),
         );
+    }
+    Ok(plan)
+}
+
+macro_rules! api_token_files {
+    ($($path:literal),* $(,)?) => {
+        &[$(($path, include_str!(concat!("../templates/api_tokens/", $path)))),*]
+    };
+}
+
+const API_TOKEN_FILES: &[(&str, &str)] = api_token_files![
+    "src/actions/api/me/show.rs",
+    "src/actions/api_tokens/create.rs",
+    "src/actions/api_tokens/destroy.rs",
+    "src/actions/api_tokens/index.rs",
+    "src/forms/api_token_form.rs",
+    "src/views/api_tokens/created.rs",
+    "src/views/api_tokens/index.rs",
+    "templates/api_tokens/created.html.jinja",
+    "templates/api_tokens/index.html.jinja",
+    "tests/api_tokens.rs",
+];
+
+/// `kiln g api_tokens`
+fn api_tokens(app: &App) -> Result<Plan, String> {
+    let read = |path: &str| std::fs::read_to_string(app.path(path)).ok();
+    if !read("src/records/user.rs").is_some_and(|user| user.contains("password_digest")) {
+        return Err("`kiln g api_tokens` builds on password sign-in for `User`; run `kiln g auth` first".into());
+    }
+    let mut plan = Plan::default();
+    let krate = app.crate_name();
+    for (path, contents) in API_TOKEN_FILES {
+        plan.file(*path, fill(contents, &[("krate", &krate)]));
+    }
+    // Linked from the sign-ins page `kiln g auth` made, once.
+    let anchor = "<p><a href=\"{{ path(\"password_settings::edit\") }}\">Change your password</a></p>";
+    if let Some(page) = read("templates/sign_ins/index.html.jinja").filter(|p| !p.contains("api_tokens::index")) {
+        let link = format!("{anchor}\n<p><a href=\"{{{{ path(\"api_tokens::index\") }}}}\">API tokens</a></p>");
+        let updated = page.replacen(anchor, &link, 1);
+        if updated != page {
+            plan.replace("templates/sign_ins/index.html.jinja", updated);
+        }
+    }
+    plan.module("src/forms/mod.rs", "mod api_token_form;");
+    plan.module("src/forms/mod.rs", "pub use api_token_form::{API_SCOPES, ApiTokenForm};");
+    plan.module("src/actions/mod.rs", "pub mod api;");
+    plan.module("src/actions/api/mod.rs", "pub mod me;");
+    plan.module("src/actions/api/me/mod.rs", "pub mod show;");
+    plan.module("src/actions/mod.rs", "pub mod api_tokens;");
+    for verb in ["index", "create", "destroy"] {
+        plan.module("src/actions/api_tokens/mod.rs", format!("pub mod {verb};"));
+    }
+    plan.module("src/views/mod.rs", "pub mod api_tokens;");
+    for (file, name) in [("index", "Index"), ("created", "Created")] {
+        plan.module("src/views/api_tokens/mod.rs", format!("mod {file};"));
+        plan.module("src/views/api_tokens/mod.rs", format!("pub use {file}::{name};"));
     }
     Ok(plan)
 }

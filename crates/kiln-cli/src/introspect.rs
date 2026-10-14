@@ -168,6 +168,12 @@ fn summary(report: &Value) -> String {
         if let Some(user) = r["signed_in"].as_str() {
             extras.push(format!("signed in: {user}"));
         }
+        if r["accepts_api_tokens"].as_bool() == Some(true) {
+            extras.push("api tokens".to_owned());
+        }
+        if r["rate_limited"].as_bool() == Some(true) {
+            extras.push("rate limited".to_owned());
+        }
         if let Some(form) = r["form"].as_str() {
             extras.push(format!("form: {form}"));
         }

@@ -160,6 +160,14 @@ impl TestApp {
         client
     }
 
+    /// A client authenticated as `record` by a new API token with `scopes`, as an API client
+    /// is: `app.api_client(&user, &["repo:read"]).await?.get(..)`. Only `pipeline = Api`
+    /// routes accept it.
+    pub async fn api_client<U: Record>(&self, record: &U, scopes: &[&str]) -> Result<TestClient> {
+        let issued = crate::auth::create_api_token(&self.db, record, "test token", scopes, None).await?;
+        Ok(self.client().bearer(issued.secret.expose()))
+    }
+
     /// Signed-out GET, as an agent or script would send it.
     pub async fn get(&self, path: impl AsRef<str>) -> TestResponse {
         self.client().get(path).await
@@ -321,6 +329,8 @@ pub struct TestClient {
     db: Db,
     session: Mutex<Map<String, Value>>,
     pending_sign_in: Mutex<Option<(&'static str, i64)>>,
+    /// Sent with every request: `bearer`, `basic`, `header`.
+    headers: Vec<(String, String)>,
 }
 
 const TEST_CSRF: &str = "test-csrf-token";
@@ -333,7 +343,30 @@ impl TestClient {
             db: app.ctx().db.clone(),
             session: Mutex::default(),
             pending_sign_in: Mutex::default(),
+            headers: vec![],
         }
+    }
+
+    /// Sends `Authorization: Bearer <token>` with every request, as an API client does:
+    /// `app.client().bearer(issued.secret.expose())`.
+    pub fn bearer(self, token: &str) -> Self {
+        self.header("authorization", &format!("Bearer {token}"))
+    }
+
+    /// Sends HTTP Basic credentials with every request, as git does with an API token as
+    /// the password: `app.client().basic("ada", token)`.
+    pub fn basic(self, username: &str, password: &str) -> Self {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+        self.header("authorization", &format!("Basic {encoded}"))
+    }
+
+    /// Sends a header with every request, e.g. `.header("x-forwarded-for", "203.0.113.9")`.
+    /// Replaces an earlier value for the same header.
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+        self.headers.push((name.to_owned(), value.to_owned()));
+        self
     }
 
     /// Signs in the `table` row `id` on the next request (`<app> request --as`).
@@ -530,6 +563,11 @@ impl TestClient {
         self.send(Method::POST, path.as_ref(), None, Some(("application/json", Body::from(body.to_string())))).await
     }
 
+    /// Any method with a JSON body: `client.send_json(Method::PATCH, path, &json!({ .. }))`.
+    pub async fn send_json(&self, method: Method, path: impl AsRef<str>, body: &serde_json::Value) -> TestResponse {
+        self.send(method, path.as_ref(), None, Some(("application/json", Body::from(body.to_string())))).await
+    }
+
     async fn send(&self, method: Method, path: &str, accept: Option<&str>, body: Option<(&str, Body)>) -> TestResponse {
         self.send_with(method, path, accept, body, &[]).await
     }
@@ -596,6 +634,9 @@ impl TestClient {
         let mut builder = Request::builder().method(method).uri(path).header(header::USER_AGENT, "kiln test client");
         if let Some(accept) = accept {
             builder = builder.header(header::ACCEPT, accept);
+        }
+        for (name, value) in &self.headers {
+            builder = builder.header(name.as_str(), value.as_str());
         }
         for (name, value) in headers {
             builder = builder.header(*name, *value);

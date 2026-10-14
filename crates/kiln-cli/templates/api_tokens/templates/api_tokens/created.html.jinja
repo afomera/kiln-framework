@@ -1,0 +1,6 @@
+{% set title = "Token created" %}
+<h1>Token created</h1>
+<p>Copy <strong>{{ token.name }}</strong> now. It won't be shown again; if you lose it, revoke it and create another.</p>
+<p><code id="api_token_secret">{{ secret }}</code></p>
+<p><small>{% if token.scopes %}Scopes: {{ token.scopes | join(" ") }}{% else %}No scopes{% endif %}{% if token.expires_at %} · expires {{ token.expires_at | datetime }}{% endif %}</small></p>
+<p><a href="{{ path("api_tokens::index") }}">Back to your tokens</a></p>

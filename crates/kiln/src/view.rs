@@ -474,9 +474,15 @@ mod forms {
         let class: Option<String> = kwargs.get("class")?;
         // `multipart=true` for forms with file fields.
         let multipart: Option<bool> = kwargs.get("multipart")?;
+        // `turbo=false` submits as a full page load, for a response page that must not be a
+        // redirect (one showing a new API token once).
+        let turbo: Option<bool> = kwargs.get("turbo")?;
         let mut extra = confirm_attributes(&kwargs)?;
         if multipart == Some(true) {
             extra.push_str(" enctype=\"multipart/form-data\"");
+        }
+        if turbo == Some(false) {
+            extra.push_str(" data-turbo=\"false\"");
         }
         kwargs.assert_all_used()?;
         Ok(Value::from_safe_string(form_open(&action, method.as_deref(), class.as_deref(), &extra)?))
