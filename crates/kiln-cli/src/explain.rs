@@ -439,7 +439,10 @@ fn app_rules(app: &App) -> Result<Option<Vec<serde_json::Value>>, String> {
 
 fn first_line(rule: &serde_json::Value) -> String {
     let doc = rule["doc"].as_str().unwrap_or_default();
-    let sentence = doc.split(". ").next().unwrap_or(doc).replace('\n', " ");
+    // The first sentence of the first paragraph, which may wrap across lines.
+    let paragraph = doc.split("\n\n").next().unwrap_or(doc).split_whitespace().collect::<Vec<_>>().join(" ");
+    let sentence = paragraph.split_once(". ").map_or(paragraph.as_str(), |(first, _)| first).trim_end_matches('.');
+    let sentence = sentence.to_owned();
     if sentence.is_empty() { rule["name"].as_str().unwrap_or_default().to_owned() } else { sentence }
 }
 
@@ -448,6 +451,14 @@ mod tests {
     use std::{collections::BTreeSet, path::Path};
 
     use super::*;
+
+    #[test]
+    fn app_rules_list_their_first_sentence() {
+        let rule = serde_json::json!({ "name": "r", "doc": "No unwrap in\nactions. A panic is a 500.\n\nMore." });
+        assert_eq!(first_line(&rule), "No unwrap in actions");
+        let rule = serde_json::json!({ "name": "r", "doc": "One line.\nThen another." });
+        assert_eq!(first_line(&rule), "One line");
+    }
 
     /// Every `"Kdddd"` in Kiln's source has an explanation, and every explanation is used.
     #[test]

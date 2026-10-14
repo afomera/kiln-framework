@@ -59,7 +59,7 @@ pub use redirect::{Redirect, ViewOrRedirect};
 pub use rel::{Append, BoxFuture, HasRel, HasRelation, Loaded, RelSet, Relation};
 pub use rich_text::RichText;
 pub use routing::{Param, PathArg, RouteDef, routes, routes_table};
-pub use schema::{ColumnSchema, TableSchema};
+pub use schema::{ColumnSchema, IndexSchema, TableSchema};
 pub use session::{Current, Flash, SecretKey, Session};
 pub use storage::{Attachment, Storage};
 pub use turbo::{Turbo, TurboStream};

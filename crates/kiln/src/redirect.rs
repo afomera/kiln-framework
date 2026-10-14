@@ -32,6 +32,22 @@ impl Redirect {
         self.flash("alert", message)
     }
 
+    /// After an op that may refuse with `Error::Conflict("Sorry, this event is full.")`:
+    /// `notice` when it worked, the refusal as an alert when it didn't. Other errors pass
+    /// through.
+    ///
+    /// ```ignore
+    /// let back = Redirect::to(events::show::path(event.id));
+    /// back.notice_or_alert(ops::create_rsvp(&ctx, new).await, "You're going!")
+    /// ```
+    pub fn notice_or_alert<T>(self, outcome: crate::Result<T>, notice: impl Into<String>) -> crate::Result<Self> {
+        match outcome {
+            Ok(_) => Ok(self.notice(notice)),
+            Err(crate::Error::Conflict(reason)) => Ok(self.alert(reason)),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn flash(mut self, kind: &str, message: impl Into<String>) -> Self {
         self.flash.0.insert(kind.to_owned(), message.into());
         self
@@ -68,5 +84,19 @@ impl<V: IntoResponse> IntoResponse for ViewOrRedirect<V> {
             ViewOrRedirect::View(view) => view.into_response(),
             ViewOrRedirect::Redirect(redirect) => redirect.into_response(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conflicts_become_alerts() {
+        let ok = Redirect::to("/").notice_or_alert(Ok(()), "Done.").unwrap();
+        assert_eq!(ok.flash.0.get("notice").map(String::as_str), Some("Done."));
+        let full = Redirect::to("/").notice_or_alert::<()>(Err(crate::Error::Conflict("Full.".into())), "Done.");
+        assert_eq!(full.unwrap().flash.0.get("alert").map(String::as_str), Some("Full."));
+        assert!(Redirect::to("/").notice_or_alert::<()>(Err(crate::Error::NotFound), "Done.").is_err());
     }
 }

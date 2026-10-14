@@ -32,6 +32,10 @@ use crate::{
 };
 
 /// Implemented by `#[derive(Job)]`.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` isn't a job (`#[derive(Job)]`)",
+    note = "for a notification, test with `app.assert_notified::<{Self}>(&recipient, 1).await?` or `app.notified::<{Self}>()`; for mail sent later, `app.perform_enqueued_jobs()` then `app.assert_mailed(..)`"
+)]
 pub trait JobInfo: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Stable name stored with each job; the struct's name.
     const NAME: &'static str;
@@ -713,7 +717,10 @@ async fn work_one(ctx: &Ctx, all: bool) -> Result<Worked> {
             Ok(payload) => {
                 // Spawned so a panic fails the job instead of the worker, and so the watcher
                 // can stop it: dropping a future ends it at its next `.await`.
-                let run = CURRENT_BATCH.scope(job.batch, (def.run)(ctx.clone(), payload));
+                // The logging of whoever runs it follows too (`request --perform-jobs` keeps
+                // stdout for its JSON).
+                use tracing::instrument::WithSubscriber;
+                let run = CURRENT_BATCH.scope(job.batch, (def.run)(ctx.clone(), payload)).with_current_subscriber();
                 // A test's moved clock (`app.travel`) follows the job into its task.
                 let handle = match crate::types::CLOCK_OFFSET.try_with(Clone::clone) {
                     Ok(clock) => tokio::spawn(crate::types::CLOCK_OFFSET.scope(clock, run)),

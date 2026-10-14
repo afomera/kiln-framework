@@ -11,6 +11,8 @@ pub struct Plan {
     pub mod_lines: Vec<(String, String)>,
     /// Text appended to a file (created with `header` if missing).
     pub appends: Vec<(String, String, String)>,
+    /// What to do next, printed after everything is written (and migrated).
+    pub notes: Vec<String>,
 }
 
 impl Plan {
@@ -34,6 +36,10 @@ impl Plan {
 
     pub fn module(&mut self, path: impl Into<String>, line: impl Into<String>) {
         self.mod_lines.push((path.into(), line.into()));
+    }
+
+    pub fn note(&mut self, text: impl Into<String>) {
+        self.notes.push(text.into());
     }
 
     pub fn append(&mut self, path: impl Into<String>, header: impl Into<String>, text: impl Into<String>) {

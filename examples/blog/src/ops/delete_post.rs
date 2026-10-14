@@ -1,14 +1,8 @@
 use kiln::{policy::Delete, prelude::*};
 
-use crate::records::{Comment, Post, comment};
+use crate::records::Post;
 
-/// Deletes the post and its comments together.
+/// Deletes the post; its comments go with it (`#[on_delete(cascade)]`).
 pub async fn delete_post(ctx: &Ctx, post: Authorized<Delete, Post>) -> Result {
-    let id = post.id;
-    ctx.db
-        .transaction(|tx| async move {
-            Comment::query().filter(comment::post_id.eq(id)).delete_all(&tx).await?;
-            Post::delete(id).run(&tx).await
-        })
-        .await
+    Post::delete(post.id).run(&ctx.db).await
 }

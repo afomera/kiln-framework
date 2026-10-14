@@ -320,6 +320,24 @@ where
         .collect()
 }
 
+/// A child's foreign key to `O`: `Id<O>`, or `Option<Id<O>>` when the child may belong to
+/// something else instead (`#[record(one_of(..))]`).
+pub trait ForeignKey<O> {
+    fn key(&self) -> Option<Id<O>>;
+}
+
+impl<O> ForeignKey<O> for Id<O> {
+    fn key(&self) -> Option<Id<O>> {
+        Some(*self)
+    }
+}
+
+impl<O> ForeignKey<O> for Option<Id<O>> {
+    fn key(&self) -> Option<Id<O>> {
+        *self
+    }
+}
+
 /// Loader behind generated `has_many` relations.
 pub async fn load_has_many<O, T, N, F>(
     owners: &[O],
@@ -331,7 +349,7 @@ where
     O: Record,
     T: Record,
     N: RelSet<T>,
-    F: Fn(&T) -> Id<O> + Send + Sync,
+    F: Fn(&T) -> Option<Id<O>> + Send + Sync,
 {
     if owners.is_empty() {
         return Ok(vec![]);
@@ -340,7 +358,38 @@ where
     let rows = Query::<T, N>::new().filter(fk_column.is_in(ids)).all(db).await?;
     let mut groups: HashMap<Id<O>, Vec<N::Row>> = HashMap::new();
     for row in rows {
-        groups.entry(fk(N::record(&row))).or_default().push(row);
+        if let Some(owner) = fk(N::record(&row)) {
+            groups.entry(owner).or_default().push(row);
+        }
     }
     Ok(owners.iter().map(|owner| groups.get(&owner.id()).cloned().unwrap_or_default()).collect())
+}
+
+/// Loader behind generated `has_one` relations: the child pointing at each owner, if any.
+/// Should several, the oldest (lowest id) wins; a unique index on the key prevents that.
+pub async fn load_has_one<O, T, N, F>(
+    owners: &[O],
+    fk_column: Column<T, Id<O>>,
+    fk: F,
+    db: &Db,
+) -> Result<Vec<Option<N::Row>>>
+where
+    O: Record,
+    T: Record,
+    N: RelSet<T>,
+    F: Fn(&T) -> Option<Id<O>> + Send + Sync,
+{
+    if owners.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids: Vec<Id<O>> = owners.iter().map(Record::id).collect();
+    let rows =
+        Query::<T, N>::new().filter(fk_column.is_in(ids)).order(Column::<T, Id<T>>::new("id").asc()).all(db).await?;
+    let mut by_owner: HashMap<Id<O>, N::Row> = HashMap::new();
+    for row in rows {
+        if let Some(owner) = fk(N::record(&row)) {
+            by_owner.entry(owner).or_insert(row);
+        }
+    }
+    Ok(owners.iter().map(|owner| by_owner.get(&owner.id()).cloned()).collect())
 }

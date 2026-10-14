@@ -237,8 +237,7 @@ pub(crate) async fn store(
     bytes: Bytes,
 ) -> Result<Attachment> {
     let filename = clean_filename(filename);
-    let content_type = sniff(&bytes).unwrap_or(declared).to_owned();
-    let content_type = if content_type.is_empty() { "application/octet-stream".to_owned() } else { content_type };
+    let content_type = real_type(&bytes, declared).to_owned();
     let key = new_key();
     let checksum = {
         use base64::{Engine, engine::general_purpose::STANDARD};
@@ -330,6 +329,31 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
         None
     }
 }
+
+/// The type to keep for an upload: what the bytes are, when Kiln can tell, else what the
+/// browser said. A claim Kiln could check but the bytes don't back up (a "PNG" that isn't
+/// one) is dropped, so `accept = "image/*"` rejects it and nothing tries to resize it.
+fn real_type<'a>(bytes: &[u8], declared: &'a str) -> &'a str {
+    match sniff(bytes) {
+        // The magic bytes alone are easy to fake: an image must have a readable header too.
+        Some(image) if image.starts_with("image/") && !has_dimensions(bytes) => "application/octet-stream",
+        Some(real) => real,
+        None if declared.is_empty() || SNIFFED.contains(&declared) => "application/octet-stream",
+        None => declared,
+    }
+}
+
+/// Whether an image's header says how big it is (it's read, the pixels aren't).
+fn has_dimensions(bytes: &[u8]) -> bool {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .is_some()
+}
+
+/// The types [`sniff`] recognizes.
+const SNIFFED: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"];
 
 /// Types shown in the browser; everything else downloads. HTML and SVG never render
 /// inline, since an uploaded page could run script on the app's origin.
@@ -565,9 +589,19 @@ pub(crate) async fn serve_variant(ctx: &Ctx, key: &SecretKey, path: &str) -> Opt
     Some(match make_variant(ctx, key, id, variant).await {
         Ok(response) => response,
         Err(Error::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        // The bytes aren't an image Kiln can read (uploaded straight to the store, so never
+        // checked): the original, like any other file Kiln doesn't resize.
+        Err(Error::BadRequest(reason)) => {
+            tracing::warn!(target: "kiln::storage", blob = id, "{reason}; serving the original");
+            match blob(&ctx.db, id).await {
+                Ok(Some(original)) => redirect(&original.url_signed(key)),
+                _ => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
         Err(e) => {
             tracing::error!(target: "kiln::storage", error = %e, blob = id, "making an image variant failed");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, "making this image variant failed; the log has the error")
+                .into_response()
         }
     })
 }
@@ -802,7 +836,8 @@ pub(crate) async fn receive_direct_upload(ctx: &Ctx, path: &str, body: axum::bod
             return Err(Error::BadRequest(format!("expected {} bytes, got {}", file.byte_size, bytes.len())));
         }
         // The bytes are here, so the real type can be read from them.
-        if let Some(real) = sniff(&bytes).filter(|real| *real != file.content_type) {
+        let real = real_type(&bytes, &file.content_type);
+        if real != file.content_type {
             ctx.db
                 .fetch_all(
                     "UPDATE \"kiln_blobs\" SET \"content_type\" = ? WHERE \"id\" = ? RETURNING \"id\"",
@@ -983,6 +1018,11 @@ mod tests {
     fn content_is_sniffed_and_scripts_download() {
         assert_eq!(sniff(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
         assert_eq!(sniff(b"<html>"), None);
+        assert_eq!(real_type(b"fake", "image/png"), "application/octet-stream");
+        assert_eq!(real_type(b"\x89PNG\r\n\x1a\nrest", "image/png"), "application/octet-stream");
+        assert_eq!(real_type(&crate::testing::Upload::png("a.png").bytes, "text/plain"), "image/png");
+        assert_eq!(real_type(b"hello", "text/plain"), "text/plain");
+        assert_eq!(real_type(b"hello", ""), "application/octet-stream");
         assert!(inline("image/png"));
         assert!(!inline("image/svg+xml"));
         assert!(!inline("text/html"));

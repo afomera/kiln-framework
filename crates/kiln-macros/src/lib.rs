@@ -28,11 +28,17 @@ mod view;
 /// - a `New{Name}` insert struct and `impl kiln::Record`.
 ///
 /// `#[hidden]` on a field (a password digest) keeps it out of serialization: templates,
-/// JSON and broadcasts never see it.
+/// JSON and broadcasts never see it. `#[on_delete(cascade)]` / `#[on_delete(set_null)]` on
+/// a `belongs_to` foreign key deletes (or unlinks) rows when the row they point at goes.
+///
+/// Table-level options: `#[record(unique(event_id, user_id))]` and `index(a, b)` cover
+/// several columns; `where = ".."` makes either partial (`unique(email, where =
+/// "deleted_at IS NULL")`); `one_of(work_item_id, commit_id)` requires exactly one of
+/// those nullable columns to be set.
 ///
 /// Because columns and relations are emitted as module items, each record lives in its own
 /// file named after it (`records/post.rs`).
-#[proc_macro_derive(Record, attributes(record, index, hidden))]
+#[proc_macro_derive(Record, attributes(record, index, hidden, on_delete))]
 pub fn derive_record(input: TokenStream) -> TokenStream {
     record::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
 }

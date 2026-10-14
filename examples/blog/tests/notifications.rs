@@ -22,7 +22,9 @@ async fn comment_on_ada_post(app: &TestApp) -> Result<(User, Post)> {
 async fn a_comment_lands_in_the_inbox_and_the_mailbox(app: TestApp) -> Result {
     let (ada, post) = comment_on_ada_post(&app).await?;
     assert_eq!(app.db.unread_notifications(&ada).await?, 0, "delivered by a job");
+    app.assert_notified::<CommentPosted>(&ada, 1).await?;
     app.perform_enqueued_jobs().await?;
+    app.assert_notified::<CommentPosted>(&ada, 0).await?;
 
     let inbox = app.db.inbox(&ada, 10).await?;
     assert_eq!(inbox.len(), 1);

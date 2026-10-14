@@ -1,6 +1,6 @@
 {
   "backend": "sqlite",
-  "migration": "20261013040730",
+  "migration": "20261014044942",
   "tables": {
     "bookmarks": {
       "columns": [
@@ -67,7 +67,8 @@
           "sql_type": "INTEGER",
           "nullable": false,
           "indexed": true,
-          "references": "posts"
+          "references": "posts",
+          "on_delete": "CASCADE"
         },
         {
           "name": "author_id",

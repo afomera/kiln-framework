@@ -76,6 +76,11 @@ enum Command {
     /// The whole app at a glance: routes, records, views, forms, policies, ops, jobs, mail,
     /// config and templates, with file:line. `--json` for agents.
     Introspect {
+        /// Only this part: routes, records, views, forms, policies, ops, jobs, mail, ...
+        section: Option<String>,
+        /// Only items mentioning this text (a record, a path, a file): `--find Event`.
+        #[arg(long)]
+        find: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -159,7 +164,9 @@ fn main() -> ExitCode {
                 app.run_binary(&[&["batches"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
             }
             Command::Routes { json } => app.run_binary(if json { &["routes", "--json"] } else { &["routes"] }),
-            Command::Introspect { json } => introspect::run(&app, json),
+            Command::Introspect { section, find, json } => {
+                introspect::run(&app, section.as_deref(), find.as_deref(), json)
+            }
             Command::Mcp { write } => mcp::run(&app, write),
             Command::Check { format } => check::run(&app, format == "json"),
             Command::Build { docker } => release::run(&app, docker),

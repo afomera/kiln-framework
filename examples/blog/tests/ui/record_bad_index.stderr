@@ -1,0 +1,11 @@
+error: `Rsvp` has no field `usr_id`
+ --> tests/ui/record_bad_index.rs:5:44
+  |
+5 | #[record(table = "rsvps", unique(event_id, usr_id))]
+  |                                            ^^^^^^
+
+error: `one_of` columns are nullable (only one is set): make it `post_id: Option<..>`
+  --> tests/ui/record_bad_index.rs:13:38
+   |
+13 | #[record(table = "reactions", one_of(post_id, comment_id))]
+   |                                      ^^^^^^^

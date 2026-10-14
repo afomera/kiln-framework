@@ -223,6 +223,47 @@ impl TestApp {
         }
     }
 
+    /// Notifications of type `N` sent and not yet delivered (each `notify` queues one
+    /// delivery), oldest first, with the recipient's id. `perform_enqueued_jobs` delivers them.
+    pub async fn notified<N: crate::notify::Notify>(&self) -> Result<Vec<(i64, N)>> {
+        use crate::jobs::JobInfo;
+        let mut out = vec![];
+        for payload in self.db.queued_payloads(crate::notify::DeliverNotification::NAME).await? {
+            let job: crate::notify::DeliverNotification =
+                serde_json::from_str(&payload).map_err(|e| crate::Error::BadRequest(e.to_string()))?;
+            if job.name == N::NAME && job.to_table == <N::To as Record>::TABLE {
+                let notification =
+                    serde_json::from_value(job.payload).map_err(|e| crate::Error::BadRequest(e.to_string()))?;
+                out.push((job.to_id, notification));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Asserts `to` was sent exactly `count` notifications of type `N` (not yet delivered):
+    /// `app.assert_notified::<RsvpReceived>(&organizer, 1).await?`.
+    #[track_caller]
+    pub fn assert_notified<'a, N: crate::notify::Notify>(
+        &'a self,
+        to: &'a N::To,
+        count: usize,
+    ) -> impl Future<Output = Result> + 'a {
+        let caller = std::panic::Location::caller();
+        async move {
+            let sent: Vec<i64> = self.notified::<N>().await?.into_iter().map(|(id, _)| id).collect();
+            let to_id = to.id().get();
+            let mine = sent.iter().filter(|id| **id == to_id).count();
+            assert_eq!(
+                mine,
+                count,
+                "{caller}: expected {count} `{}` notification(s) to {} #{to_id}; queued for: {sent:?}",
+                N::NAME,
+                <N::To as Record>::TABLE
+            );
+            Ok(())
+        }
+    }
+
     /// Renders one mail's preview: `app.render_mail_preview::<WelcomeEmail>()`.
     pub async fn render_mail_preview<M: crate::mail::Preview>(&self) -> Result<crate::mail::Message> {
         M::preview(self.app.ctx()).await?.message()
@@ -496,6 +537,12 @@ impl TestClient {
         fields: &[(&str, &str)],
         files: &[(&str, Upload)],
     ) -> TestResponse {
+        let (content_type, body) = self.multipart_body(fields, files);
+        self.send(method, path, None, Some((&content_type, Body::from(body)))).await
+    }
+
+    /// The `multipart/form-data` body for `fields` and `files`, with the session's CSRF token.
+    pub(crate) fn multipart_body(&self, fields: &[(&str, &str)], files: &[(&str, Upload)]) -> (String, Vec<u8>) {
         let token = {
             let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
             let token = session.entry("_csrf").or_insert(Value::from(TEST_CSRF));
@@ -521,8 +568,7 @@ impl TestClient {
             body.extend(b"\r\n");
         }
         body.extend(format!("--{boundary}--\r\n").as_bytes());
-        let content_type = format!("multipart/form-data; boundary={boundary}");
-        self.send(method, path, None, Some((&content_type, Body::from(body)))).await
+        (format!("multipart/form-data; boundary={boundary}"), body)
     }
 
     /// Sends a JSON body, as an API client does (no cookies or CSRF token needed).

@@ -26,8 +26,8 @@ Run them from the app directory.
 | Verify | `kiln check` (must end `0 errors`), then `kiln test` |
 | Understand a finding or an error page's code | `kiln explain K0301` (why the rule exists, how to fix it); `kiln explain` lists every code, the app's own included |
 | A team convention `kiln check` should enforce | `kiln g lint no_unwrap_in_actions` → `src/lints/` + tests; codes are `A0001`.. (never `K`) |
-| Orient | `kiln introspect` before changing an unfamiliar app: every route (args, pipeline, return type), record (columns, relations), view (template, fields), form, policy, op signature, job, mail and config, with `file:line`. `--json` for the full detail |
-| See it work | `kiln mcp` (in `.mcp.json`): `request` sends a request through the app as any user (`as: "User:1"` or an email) and returns the page as text, every SQL statement, the jobs enqueued and the mail sent; `query` runs read-only SQL on the dev database; also `introspect`, `mail`, `jobs`, `check`, `explain`, `test`. Non-GET requests need `kiln mcp --write`. Without MCP, the app binary does the same: `cargo run -- request POST /posts --as 1 --form title=Hi`, `cargo run -- db query "SELECT .."` |
+| Orient | `kiln introspect` before changing an unfamiliar app: every route (args, pipeline, return type), record (columns, relations), view (template, fields), form, policy, op signature, job, mail and config, with `file:line`. `--json` for the full detail; narrow with a section (`kiln introspect records`) or `--find Event` |
+| See it work | `kiln mcp` (in `.mcp.json`): `request` sends a request through the app as any user (`as: "User:1"` or an email) and returns the page as text, every SQL statement, the jobs enqueued and the mail sent (`perform_jobs: true` runs the queued jobs first, so mail sent later shows too; `files` uploads); `query` runs read-only SQL on the dev database; also `introspect`, `mail`, `jobs`, `check`, `explain`, `test`. Non-GET requests need `kiln mcp --write`. Without MCP, the app binary does the same: `cargo run -- request POST /posts --as 1 --form title=Hi --perform-jobs` (`request --help` for every option), `cargo run -- db query "SELECT .."` |
 | Routes | `kiln routes` |
 | Run | `kiln dev` (port 3000; `--port 4000` for another): runs `Procfile.dev`, rebuilds and restarts on src/ changes, restarts crashed processes. In a terminal it's a TUI (the `routes` entry lists the app's routes, refreshed on each build; `kiln routes` too): `1`-`9`/Tab select, `j`/`k` `g`/`G` scroll, `r` restart (on build: rebuild), `s` stop/start, `/` search (`n`/`N`), `f` filter, `m` all-output stream, `c` clear, `o` open /kiln, `K` check, `T` test, `q` quit. Piped, in CI or with `--inline` it prints `web \| ...` lines; `--json` prints NDJSON events (start, output, exit, restarting, failed, build, ready). Stopping it (q, Ctrl-C, SIGTERM) stops every process it started and frees the port. |
 | Jobs | `kiln jobs` (counts, queues, failures), `kiln jobs retry [id]`, `cancel <id>`, `run <id>`, `pause <queue>`, `resume <queue>`, `discard-failed` |
@@ -98,9 +98,20 @@ generated tests passing.
   (`MAX(a, b)`, `IFNULL`, `ILIKE`): `CASE WHEN`, `COALESCE`, `LOWER(..) LIKE LOWER(?)` work everywhere.
   Booleans are stored as 0/1 integers.
 
+- **Relations:** `#[record(belongs_to(author: User), has_many(comments: Comment), has_one(profile: Profile))]`;
+  `has_many`/`has_one` expect `{record}_id` on the other table (`comments.post_id`), which may
+  be `Option<Id<..>>` (with `one_of`). `has_one` gives an `Option`.
 - **Relations exist only when preloaded:** `.preload(post::author)` before `post.author()`,
   and the view's field type lists them: `Loaded<Post, (post::author,)>`. Templates read
   `post.author.name`.
+- **Constraints live on the record,** so `kiln db diff` writes them: `#[index]` /
+  `#[index(unique)]` on a field; `#[record(unique(event_id, user_id))]` or `index(a, b)` for
+  several columns, with `where = "deleted_at IS NULL"` for a partial index;
+  `#[on_delete(cascade)]` (or `set_null`) on a `belongs_to` key so rows go with their parent
+  instead of blocking its delete. No polymorphic `(type, id)` pairs: give each possible parent
+  its own nullable foreign key and `#[record(one_of(work_item_id, commit_id))]` (exactly one
+  is set), or give both kinds one shared parent (`namespaces` with `person_id`/`org_id` under `one_of`, and
+  `has_one(namespace: Namespace)` on each).
 - **Links are typed:** `posts::show::path(&post.slug)` in Rust,
   `{{ path("posts::show", slug=post.slug) }}` in templates.
 - **Permissions are policies:** `impl Allows<A, Post> for User` in `src/policies/post.rs`,
@@ -193,6 +204,18 @@ generated tests passing.
   `status` already counting the job that just ended: broadcast a progress bar from it.
 - **`/kiln` in production** is off unless `app.kiln_tools_for::<User>(|user| user.admin)` in `src/app.rs`;
   then only those users see it (others get a 404), and every control used is logged.
+- **Test helpers** (`kiln::testing`), all you need without reading the source:
+  `TestApp`: `create::<T>()`, `create_with::<T>(|n| ..)`, `sign_in_as(&user)` / `client()` (a
+  `TestClient`), `ctx()`, `perform_enqueued_jobs()`, `perform_due_jobs()`, `travel(..)`,
+  `run_schedules()`, `enqueued::<J>()` / `assert_enqueued::<J>(n)`, `notified::<N>()` /
+  `assert_notified::<N>(&to, n)`, `outbox()` / `assert_mailed(to, text)`,
+  `render_mail_previews()`, `broadcasts(stream)` / `assert_broadcast(stream, text)`.
+  `TestClient`: `get`, `get_html`, `post_form`, `patch_form`, `put_form`, `delete`,
+  `turbo_post_form`, `post_multipart(path, fields, &[("cover", Upload::png("c.png"))])`,
+  `patch_multipart`, `post_json`, `direct_upload(Upload)`, `request(Method, path, accept)`.
+  `TestResponse`: `assert_status`, `assert_contains`, `assert_not_contains`,
+  `assert_redirect`, `assert_flash`, `assert_streams_from`, `json()`, `.text`, `.flash`,
+  `.error_report` (a failing page's Markdown report: print it when a status is wrong).
 - **Testing jobs:** `app.assert_enqueued::<SendDigest>(1).await?`, `app.enqueued::<J>()`, then
   `app.perform_enqueued_jobs().await?` runs them all now, even ones scheduled for later (an error if
   one fails for good); `app.perform_due_jobs()` runs only those due.
@@ -225,7 +248,7 @@ generated tests passing.
   refresh the page (scroll kept), JS edits reload, and Rust edits reload once `kiln dev` restarts.
 - **Files:** `pub cover: Option<Attachment>` on the record and the form, with
   `#[validate(file(max_size = "5MB", accept = "image/*"))]`, and `form_start(.., multipart=true)` (the
-  generator does all three for `file`/`image` fields). With JavaScript, file fields upload straight to storage on submit (direct uploads: `POST /kiln/direct_uploads`, then a `PUT` to the store or, for local disk, to Kiln; S3/R2 buckets need CORS allowing `PUT` from the app's origin) and the form sends a token; without it they post as multipart and are stored as the request arrives. A form
+  generator does all three for `file`/`image` fields). With JavaScript, file fields upload straight to storage on submit (direct uploads: `POST /kiln/direct_uploads`, then a `PUT` to the store or, for local disk, to Kiln; S3/R2 buckets need CORS allowing `PUT` from the app's origin) and the form sends the blob's `upload_token` as the field's value; without it they post as multipart and are stored as the request arrives. Test either way: `client.post_multipart(..)`, or `let blob = client.direct_upload(Upload::png("c.png")).await;` then submit `("cover", blob["upload_token"].as_str().unwrap())` in `post_form`. From the CLI or MCP: `request POST /posts --form title=Hi --file cover=./c.png`. Uploads are typed by their bytes: a file claiming to be a PNG that isn't one fails `accept = "image/*"`. A form
   re-rendered with errors, and an edit form, keep the current file (a signed hidden field) unless a new
   one is chosen. Show with `{{ post.cover.url }}`, `.filename`, `.content_type`, `.byte_size`,
   `.is_image`; resized: `{{ post.cover | variant(width=400) }}`, `variant(width=200, height=200, crop=true)`
@@ -277,7 +300,8 @@ generated tests passing.
 - **Queries:** filters `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `like`, `is_null`, `is_not_null`, combined with
   `.and(..)` / `.or(..)`; then `.order(..)`, `.limit(n)`, and `.all`, `.one`, `.one_or_404`, `.count`, `.exists`,
   `.delete_all` (each takes `&ctx.db`). A request that clashes with a record's state (already sent) is
-  `Err(Error::Conflict("Already sent.".into()))`: a 409.
+  `Err(Error::Conflict("Already sent.".into()))`: a 409. For a browser, turn it into a flash:
+  `Redirect::to(back).notice_or_alert(ops::send(&ctx, x).await, "Sent.")`.
 - **Errors are reports** with stable codes (`K1003`, `K0202`, ...). Fetch any failing URL
   without `Accept: text/html` to get the report as Markdown. `kiln check` prints the first
   compiler error in full; fix that one first.

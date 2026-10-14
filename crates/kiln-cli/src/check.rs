@@ -409,12 +409,17 @@ fn lint_writes(file: &str, items: &[Item], guarded: &BTreeSet<String>, findings:
 fn check_write(file: &str, sig: &syn::Signature, body: &str, guarded: &BTreeSet<String>, findings: &mut Findings) {
     let params = sig.inputs.iter().map(|i| i.to_token_stream().to_string()).collect::<Vec<_>>().join(" ");
     for record in guarded {
-        let Some(write) = ["insert", "update", "delete"].iter().find(|w| body.contains(&format!("{record} :: {w} (")))
-        else {
-            continue;
-        };
+        let direct = ["insert", "update", "delete"].into_iter().find(|w| body.contains(&format!("{record} :: {w} (")));
+        // `Record::query().filter(..).delete_all(db)`, in one statement.
+        let bulk = body.split(';').any(|statement| {
+            statement.find(&format!("{record} :: query (")).is_some_and(|at| statement[at..].contains(". delete_all ("))
+        });
+        let Some(write) = direct.or(bulk.then_some("query().delete_all")) else { continue };
         let proven = params.contains("Authorized")
-            && (params.contains(&format!("{record} >")) || params.contains(&format!("New{record} >")));
+            && (direct.is_none()
+                // Deleting dependent rows (an event's RSVPs) under the parent's proof is fine.
+                || params.contains(&format!("{record} >"))
+                || params.contains(&format!("New{record} >")));
         if !proven {
             findings.error(
                 "K0301",
@@ -704,6 +709,25 @@ async fn op(ctx: &Ctx) -> Result {
         let mut findings = Findings::default();
         lint_transactions("src/ops/op.rs", &syn::parse_file(source).unwrap(), &mut findings);
         assert_eq!(codes(&findings), [("K0701".into(), Some(6)), ("K0701".into(), Some(7))]);
+    }
+
+    #[test]
+    fn bulk_deletes_need_a_proof() {
+        let source = r#"
+pub async fn action(ctx: Ctx, user: Current<User>) -> Result<Redirect> {
+    Rsvp::query().filter(rsvp::user_id.eq(user.id)).delete_all(&ctx.db).await?;
+    Ok(Redirect::to("/"))
+}
+pub async fn delete_event(ctx: &Ctx, event: Authorized<Delete, Event>) -> Result {
+    Rsvp::query().filter(rsvp::event_id.eq(event.id)).delete_all(&ctx.db).await?;
+    Event::delete(event.id).run(&ctx.db).await
+}
+"#;
+        let guarded: BTreeSet<String> = ["Rsvp".to_owned(), "Event".to_owned()].into();
+        let mut findings = Findings::default();
+        lint_writes("src/actions/rsvps/destroy.rs", &syn::parse_file(source).unwrap().items, &guarded, &mut findings);
+        assert_eq!(codes(&findings), [("K0301".into(), Some(2))]);
+        assert!(findings.0[0].message.contains("Rsvp::query().delete_all"), "{}", findings.0[0].message);
     }
 
     #[test]

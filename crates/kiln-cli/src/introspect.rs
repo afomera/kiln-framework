@@ -7,7 +7,8 @@
 //! - What only the source says: views and their templates, forms and their validations,
 //!   policies, ops, mail, parts, config, and the templates on disk.
 //!
-//! `--json` prints one JSON object; without it, a summary to read.
+//! `--json` prints one JSON object; without it, a summary to read. A section name
+//! (`kiln introspect routes`) or `--find Post` narrows either.
 
 use std::{fs, path::Path};
 
@@ -17,14 +18,37 @@ use syn::{Attribute, Fields, Item, spanned::Spanned};
 
 use crate::app::App;
 
-pub fn run(app: &App, json: bool) -> Result<bool, String> {
-    let report = report(app)?;
+pub fn run(app: &App, section: Option<&str>, find: Option<&str>, json: bool) -> Result<bool, String> {
+    let report = narrow(report(app)?, section, find)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report).expect("introspection serializes"));
     } else {
         print!("{}", summary(&report));
     }
     Ok(true)
+}
+
+/// Just one section, and/or the items that mention `find` (case-insensitive). The app's
+/// name and backend stay.
+pub fn narrow(mut report: Value, section: Option<&str>, find: Option<&str>) -> Result<Value, String> {
+    let Some(map) = report.as_object_mut() else { return Ok(report) };
+    if let Some(section) = section {
+        if !map.get(section).is_some_and(Value::is_array) {
+            let sections: Vec<&str> = map.iter().filter(|(_, v)| v.is_array()).map(|(k, _)| k.as_str()).collect();
+            return Err(format!("no section `{section}`; there are: {}", sections.join(", ")));
+        }
+        map.retain(|key, value| key == section || !value.is_array());
+    }
+    if let Some(find) = find.map(str::to_lowercase) {
+        for value in map.values_mut() {
+            if let Value::Array(items) = value {
+                items.retain(|item| item.to_string().to_lowercase().contains(&find));
+            }
+        }
+        // Sections with nothing left say nothing.
+        map.retain(|_, value| value.as_array().is_none_or(|items| !items.is_empty()));
+    }
+    Ok(report)
 }
 
 /// The binary's half and the source's half, merged.
@@ -162,11 +186,15 @@ fn summary(report: &Value) -> String {
 
     let routes = list("routes");
     let width = routes.iter().map(|r| s(&r["path"]).len()).max().unwrap_or(0) + 2;
-    let _ = writeln!(out, "\nroutes ({})", routes.len());
+    // A narrowed report (`--find`, a section) leaves out what has nothing to show.
+    if report.get("routes").is_some() {
+        let _ = writeln!(out, "\nroutes ({})", routes.len());
+    }
     for r in &routes {
         let mut extras = vec![];
         if let Some(user) = r["signed_in"].as_str() {
-            extras.push(format!("signed in: {user}"));
+            let optional = r["sign_in_required"] == Value::Bool(false);
+            extras.push(if optional { format!("signed in or out: {user}") } else { format!("signed in: {user}") });
         }
         if let Some(form) = r["form"].as_str() {
             extras.push(format!("form: {form}"));
@@ -183,7 +211,9 @@ fn summary(report: &Value) -> String {
     }
 
     let records = list("records");
-    let _ = writeln!(out, "\nrecords ({})", records.len());
+    if report.get("records").is_some() {
+        let _ = writeln!(out, "\nrecords ({})", records.len());
+    }
     for r in &records {
         let columns: Vec<String> = r["columns"]
             .as_array()
@@ -194,6 +224,16 @@ fn summary(report: &Value) -> String {
         let _ = writeln!(out, "  {} ({})  {}", s(&r["name"]), s(&r["table"]), columns.join(", "));
         for rel in r["relations"].as_array().into_iter().flatten() {
             let _ = writeln!(out, "    {} {} -> {}", s(&rel["kind"]), s(&rel["name"]), s(&rel["target"]));
+        }
+        for index in r["indexes"].as_array().into_iter().flatten() {
+            let columns: Vec<String> = index["columns"].as_array().into_iter().flatten().map(s).collect();
+            let kind = if index["unique"] == true { "unique" } else { "index" };
+            let condition = index["where"].as_str().map(|w| format!(" where {w}")).unwrap_or_default();
+            let _ = writeln!(out, "    {kind} ({}){condition}", columns.join(", "));
+        }
+        for group in r["one_of"].as_array().into_iter().flatten() {
+            let columns: Vec<String> = group.as_array().into_iter().flatten().map(s).collect();
+            let _ = writeln!(out, "    one_of ({})", columns.join(", "));
         }
     }
 
@@ -229,7 +269,10 @@ fn summary(report: &Value) -> String {
         format!("{}: {}", s(&v["name"]), s(&v["description"]))
     });
     simple(&mut out, "config", &list("config"), &|v| format!("{} ({})", s(&v["name"]), field_names(v)));
-    let _ = writeln!(out, "\n{} templates. `kiln introspect --json` has every detail.", list("templates").len());
+    if report.get("templates").is_some() {
+        let _ = writeln!(out, "\n{} templates.", list("templates").len());
+    }
+    out.push_str("\n`kiln introspect --json` has every detail; narrow it with a section (`kiln introspect routes`) or `--find Post`.\n");
     out
 }
 
@@ -413,5 +456,22 @@ mod tests {
         );
         assert_eq!(out["templates"][0], "posts/show.html.jinja");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reports_narrow_to_a_section_or_a_word() {
+        let report = json!({
+            "app": "gather",
+            "routes": [{ "path": "/events" }, { "path": "/posts" }],
+            "records": [{ "name": "Event" }, { "name": "User" }],
+        });
+        let routes = narrow(report.clone(), Some("routes"), None).unwrap();
+        assert_eq!(routes, json!({ "app": "gather", "routes": [{ "path": "/events" }, { "path": "/posts" }] }));
+        let events = narrow(report.clone(), None, Some("EVENT")).unwrap();
+        assert_eq!(
+            events,
+            json!({ "app": "gather", "routes": [{ "path": "/events" }], "records": [{ "name": "Event" }] })
+        );
+        assert!(narrow(report, Some("nope"), None).unwrap_err().contains("records, routes"));
     }
 }

@@ -66,6 +66,51 @@ impl Snapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TableSnapshot {
     pub columns: Vec<ColumnSnapshot>,
+    /// Indexes over several columns, or partial ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexes: Vec<IndexSnapshot>,
+    /// Column groups of which exactly one is set (`#[record(one_of(..))]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub one_of: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndexSnapshot {
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unique: bool,
+    /// The SQL condition of a partial index.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+}
+
+impl IndexSnapshot {
+    fn name(&self, table: &str) -> String {
+        let mut name = format!("idx_{table}_{}", self.columns.join("_"));
+        if self.condition.is_some() {
+            name.push_str("_partial");
+        }
+        name
+    }
+
+    fn create(&self, table: &str) -> String {
+        let columns: Vec<String> = self.columns.iter().map(|c| format!("\"{c}\"")).collect();
+        let condition = self.condition.as_ref().map(|c| format!(" WHERE {c}")).unwrap_or_default();
+        format!(
+            "CREATE {}INDEX \"{}\" ON \"{table}\" ({}){condition};",
+            if self.unique { "UNIQUE " } else { "" },
+            self.name(table),
+            columns.join(", ")
+        )
+    }
+}
+
+/// The CHECK for `one_of(a, b)`: exactly one of the columns is set.
+fn one_of_check(table: &str, columns: &[String]) -> (String, String) {
+    let name = format!("{table}_one_of_{}", columns.join("_"));
+    let terms: Vec<String> =
+        columns.iter().map(|c| format!("CASE WHEN \"{c}\" IS NOT NULL THEN 1 ELSE 0 END")).collect();
+    (name, format!("CHECK ({} = 1)", terms.join(" + ")))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,6 +126,9 @@ pub struct ColumnSnapshot {
     pub indexed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<String>,
+    /// `CASCADE` or `SET NULL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<String>,
 }
@@ -100,6 +148,7 @@ impl From<&ColumnSchema> for ColumnSnapshot {
             // Foreign keys are always indexed.
             indexed: !c.unique && (c.indexed || c.references.is_some()),
             references: c.references.map(str::to_owned),
+            on_delete: c.on_delete.map(str::to_owned),
             variants: c.variants.iter().map(|v| (*v).to_owned()).collect(),
         }
     }
@@ -107,7 +156,19 @@ impl From<&ColumnSchema> for ColumnSnapshot {
 
 impl From<&TableSchema> for TableSnapshot {
     fn from(t: &TableSchema) -> Self {
-        Self { columns: t.columns.iter().map(ColumnSnapshot::from).collect() }
+        Self {
+            columns: t.columns.iter().map(ColumnSnapshot::from).collect(),
+            indexes: t
+                .indexes
+                .iter()
+                .map(|i| IndexSnapshot {
+                    columns: i.columns.iter().map(|c| (*c).to_owned()).collect(),
+                    unique: i.unique,
+                    condition: i.condition.map(str::to_owned),
+                })
+                .collect(),
+            one_of: t.one_of.iter().map(|g| g.iter().map(|c| (*c).to_owned()).collect()).collect(),
+        }
     }
 }
 
@@ -154,6 +215,9 @@ impl ColumnSnapshot {
         }
         if let Some(table) = &self.references {
             sql.push_str(&format!(" REFERENCES \"{table}\" (\"id\")"));
+            if let Some(action) = &self.on_delete {
+                sql.push_str(&format!(" ON DELETE {action}"));
+            }
         }
         if !self.variants.is_empty() {
             let values: Vec<String> = self.variants.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect();
@@ -168,6 +232,7 @@ impl ColumnSnapshot {
             && self.nullable == other.nullable
             && self.primary_key == other.primary_key
             && self.references == other.references
+            && self.on_delete == other.on_delete
             && self.variants == other.variants
     }
 
@@ -205,10 +270,25 @@ fn index_name(table: &str, column: &str) -> String {
 
 impl TableSnapshot {
     fn create_statements(&self, table: &str, d: &dyn Dialect) -> Vec<String> {
-        let definitions: Vec<String> = self.columns.iter().map(|c| c.definition(d)).collect();
+        let mut definitions: Vec<String> = self.columns.iter().map(|c| c.definition(d)).collect();
+        for group in &self.one_of {
+            let (name, check) = one_of_check(table, group);
+            definitions.push(format!("CONSTRAINT \"{name}\" {check}"));
+        }
         let mut statements = vec![format!("CREATE TABLE \"{table}\" (\n  {}\n);", definitions.join(",\n  "))];
-        statements.extend(self.columns.iter().filter_map(|c| c.index_statement(table)));
+        statements.extend(self.index_statements(table));
         statements
+    }
+
+    /// Every index: the columns' own, then the table's.
+    fn index_statements(&self, table: &str) -> Vec<String> {
+        let own = self.columns.iter().filter_map(|c| c.index_statement(table));
+        own.chain(self.indexes.iter().map(|i| i.create(table))).collect()
+    }
+
+    /// Table indexes in `self` but not `other`.
+    fn indexes_not_in<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = &'a IndexSnapshot> {
+        self.indexes.iter().filter(|i| !other.indexes.contains(i))
     }
 }
 
@@ -317,15 +397,21 @@ fn diff_table(table: &str, old: &TableSnapshot, new: &TableSnapshot, d: &dyn Dia
         .filter(|(o, c)| !o.same_shape(c))
         .collect();
 
-    // SQLite can only add nullable columns and drop plain ones in place.
+    // SQLite can only add nullable columns and drop plain ones in place, and can't change
+    // a table's CHECK constraints.
     let rebuild = !changed.is_empty()
-        || added.iter().any(|c| !c.nullable || c.primary_key)
-        || removed.iter().any(|c| c.references.is_some() || c.primary_key);
+        || added.iter().any(|c| !c.nullable || c.primary_key || c.on_delete.is_some())
+        || removed.iter().any(|c| c.references.is_some() || c.primary_key)
+        || old.one_of != new.one_of;
     if rebuild {
         rebuild_table(table, old, new, &old_cols, d, diff);
         return;
     }
 
+    // Before columns go: SQLite won't drop a column an index still covers.
+    for index in old.indexes_not_in(new) {
+        diff.statements.push(format!("DROP INDEX \"{}\";", index.name(table)));
+    }
     for c in &removed {
         if c.has_index() {
             diff.statements.push(format!("DROP INDEX \"{}\";", index_name(table, &c.name)));
@@ -352,6 +438,7 @@ fn diff_table(table: &str, old: &TableSnapshot, new: &TableSnapshot, d: &dyn Dia
             diff.statements.extend(c.index_statement(table));
         }
     }
+    diff.statements.extend(new.indexes_not_in(old).map(|i| i.create(table)));
 }
 
 fn rebuild_table(
@@ -364,7 +451,7 @@ fn rebuild_table(
 ) {
     diff.rebuilds = true;
     let staging = format!("{table}__kiln_new");
-    let mut statements = TableSnapshot { columns: new.columns.clone() }.create_statements(&staging, d);
+    let mut statements = new.create_statements(&staging, d);
     statements.truncate(1); // indexes are created after the rename
 
     let mut columns = Vec::new();
@@ -399,7 +486,7 @@ fn rebuild_table(
     ));
     statements.push(format!("DROP TABLE \"{table}\";"));
     statements.push(format!("ALTER TABLE \"{staging}\" RENAME TO \"{table}\";"));
-    statements.extend(new.columns.iter().filter_map(|c| c.index_statement(table)));
+    statements.extend(new.index_statements(table));
     diff.statements.extend(statements);
 }
 
@@ -410,6 +497,14 @@ fn alter_table(table: &str, old: &TableSnapshot, new: &TableSnapshot, d: &dyn Di
     let new_cols: BTreeMap<&str, &ColumnSnapshot> = new.columns.iter().map(|c| (c.name.as_str(), c)).collect();
     let added: Vec<&ColumnSnapshot> = new.columns.iter().filter(|c| !old_cols.contains_key(c.name.as_str())).collect();
     let alter = |sql: String| format!("ALTER TABLE \"{table}\" {sql};");
+
+    // First, while every column they cover still exists.
+    for index in old.indexes_not_in(new) {
+        diff.statements.push(format!("DROP INDEX \"{}\";", index.name(table)));
+    }
+    for group in old.one_of.iter().filter(|g| !new.one_of.contains(g)) {
+        diff.statements.push(alter(format!("DROP CONSTRAINT \"{}\"", one_of_check(table, group).0)));
+    }
 
     for c in old.columns.iter().filter(|c| !new_cols.contains_key(c.name.as_str())) {
         diff.statements.push(alter(format!("DROP COLUMN \"{}\"", c.name)));
@@ -459,12 +554,13 @@ fn alter_table(table: &str, old: &TableSnapshot, new: &TableSnapshot, d: &dyn Di
                 ));
             }
         }
-        if o.references != c.references {
+        if o.references != c.references || o.on_delete != c.on_delete {
             let name = format!("{table}_{column}_fkey");
             diff.statements.push(alter(format!("DROP CONSTRAINT IF EXISTS \"{name}\"")));
             if let Some(target) = &c.references {
+                let on_delete = c.on_delete.as_ref().map(|a| format!(" ON DELETE {a}")).unwrap_or_default();
                 diff.statements.push(alter(format!(
-                    "ADD CONSTRAINT \"{name}\" FOREIGN KEY (\"{column}\") REFERENCES \"{target}\" (\"id\")"
+                    "ADD CONSTRAINT \"{name}\" FOREIGN KEY (\"{column}\") REFERENCES \"{target}\" (\"id\"){on_delete}"
                 )));
             }
         }
@@ -483,6 +579,11 @@ fn alter_table(table: &str, old: &TableSnapshot, new: &TableSnapshot, d: &dyn Di
             }
             diff.statements.extend(c.index_statement(table));
         }
+    }
+    diff.statements.extend(new.indexes_not_in(old).map(|i| i.create(table)));
+    for group in new.one_of.iter().filter(|g| !old.one_of.contains(g)) {
+        let (name, check) = one_of_check(table, group);
+        diff.statements.push(alter(format!("ADD CONSTRAINT \"{name}\" {check}")));
     }
 }
 
@@ -736,6 +837,7 @@ mod tests {
             unique: false,
             indexed: false,
             references: None,
+            on_delete: None,
             variants: vec![],
         }
     }
@@ -744,7 +846,7 @@ mod tests {
         Snapshot {
             backend: None,
             migration: None,
-            tables: BTreeMap::from([("posts".to_owned(), TableSnapshot { columns })]),
+            tables: BTreeMap::from([("posts".to_owned(), TableSnapshot { columns, indexes: vec![], one_of: vec![] })]),
         }
     }
 
@@ -843,12 +945,101 @@ mod tests {
         let mut author = col("author_id", "INTEGER", false);
         author.references = Some("users".into());
         let mut new = snapshot(vec![col("id", "INTEGER", false), author]);
-        new.tables.insert("users".into(), TableSnapshot { columns: vec![col("id", "INTEGER", false)] });
+        new.tables.insert(
+            "users".into(),
+            TableSnapshot { columns: vec![col("id", "INTEGER", false)], indexes: vec![], one_of: vec![] },
+        );
         let d = diff_for(&Snapshot::default(), &new, &crate::dialect::Postgres);
         let users = d.statements.iter().position(|s| s.starts_with("CREATE TABLE \"users\"")).unwrap();
         let posts = d.statements.iter().position(|s| s.starts_with("CREATE TABLE \"posts\"")).unwrap();
         assert!(users < posts, "{:?}", d.statements);
         assert!(d.statements[posts].contains("BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY"));
+    }
+
+    fn rsvps(indexes: Vec<IndexSnapshot>, one_of: Vec<Vec<String>>) -> Snapshot {
+        let mut event = col("event_id", "INTEGER", true);
+        event.references = Some("events".into());
+        event.on_delete = Some("CASCADE".into());
+        let columns = vec![col("id", "INTEGER", false), event, col("user_id", "INTEGER", true)];
+        Snapshot {
+            backend: None,
+            migration: None,
+            tables: BTreeMap::from([("rsvps".into(), TableSnapshot { columns, indexes, one_of })]),
+        }
+    }
+
+    fn pair(unique: bool, condition: Option<&str>) -> IndexSnapshot {
+        IndexSnapshot {
+            columns: vec!["event_id".into(), "user_id".into()],
+            unique,
+            condition: condition.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn tables_get_their_indexes_checks_and_cascades() {
+        let new = rsvps(vec![pair(true, None)], vec![vec!["event_id".into(), "user_id".into()]]);
+        let d = diff(&Snapshot::default(), &new);
+        assert!(d.statements[0].contains("REFERENCES \"events\" (\"id\") ON DELETE CASCADE"), "{}", d.statements[0]);
+        assert!(d.statements[0].contains(
+            "CONSTRAINT \"rsvps_one_of_event_id_user_id\" CHECK (CASE WHEN \"event_id\" IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN \"user_id\" IS NOT NULL THEN 1 ELSE 0 END = 1)"
+        ));
+        assert_eq!(
+            d.statements.last().unwrap(),
+            "CREATE UNIQUE INDEX \"idx_rsvps_event_id_user_id\" ON \"rsvps\" (\"event_id\", \"user_id\");"
+        );
+        // The snapshot round-trips, and an unchanged schema diffs to nothing.
+        let json = serde_json::to_string(&new).unwrap();
+        assert!(json.contains("\"on_delete\":\"CASCADE\""), "{json}");
+        assert!(diff(&serde_json::from_str(&json).unwrap(), &new).is_empty());
+    }
+
+    #[test]
+    fn table_indexes_change_in_place() {
+        let old = rsvps(vec![pair(false, None)], vec![]);
+        let new = rsvps(vec![pair(true, Some("\"user_id\" IS NOT NULL"))], vec![]);
+        for d in [diff(&old, &new), diff_for(&old, &new, &crate::dialect::Postgres)] {
+            assert_eq!(
+                d.statements,
+                [
+                    "DROP INDEX \"idx_rsvps_event_id_user_id\";",
+                    "CREATE UNIQUE INDEX \"idx_rsvps_event_id_user_id_partial\" ON \"rsvps\" (\"event_id\", \"user_id\") WHERE \"user_id\" IS NOT NULL;",
+                ]
+            );
+        }
+        // SQLite rebuilds for a new CHECK; Postgres adds the constraint.
+        let checked = rsvps(vec![pair(false, None)], vec![vec!["event_id".into(), "user_id".into()]]);
+        let d = diff(&old, &checked);
+        assert!(d.rebuilds);
+        assert!(
+            d.statements.iter().any(|s| s.starts_with("CREATE INDEX \"idx_rsvps_event_id_user_id\"")),
+            "{:?}",
+            d.statements
+        );
+        let d = diff_for(&old, &checked, &crate::dialect::Postgres);
+        assert_eq!(d.statements.len(), 1);
+        assert!(
+            d.statements[0].starts_with("ALTER TABLE \"rsvps\" ADD CONSTRAINT \"rsvps_one_of_event_id_user_id\" CHECK")
+        );
+    }
+
+    #[tokio::test]
+    async fn cascades_and_checks_hold_in_sqlite() {
+        let db = Db::memory().await.unwrap();
+        let mut events = snapshot(vec![col("id", "INTEGER", false)]);
+        events.tables = BTreeMap::from([("events".into(), events.tables.remove("posts").unwrap())]);
+        let mut both = rsvps(vec![pair(true, None)], vec![vec!["event_id".into(), "user_id".into()]]);
+        both.tables.extend(events.tables);
+        for statement in diff(&Snapshot::default(), &both).statements {
+            db.execute(&statement).await.unwrap();
+        }
+        db.execute("INSERT INTO events (id) VALUES (1)").await.unwrap();
+        db.execute("INSERT INTO rsvps (event_id) VALUES (1)").await.unwrap();
+        assert!(db.execute("INSERT INTO rsvps (event_id, user_id) VALUES (1, 2)").await.is_err(), "one_of holds");
+        assert!(db.execute("INSERT INTO rsvps (user_id) VALUES (NULL)").await.is_err(), "one_of needs one");
+        db.execute("DELETE FROM events WHERE id = 1").await.unwrap();
+        let left = db.fetch_all("SELECT COUNT(*) FROM rsvps", vec![]).await.unwrap();
+        assert_eq!(left[0].get::<i64, _>(0), 0, "the RSVP went with its event");
     }
 
     fn temp_dir(name: &str) -> PathBuf {

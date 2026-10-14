@@ -14,7 +14,7 @@ pub enum Generate {
     /// A CRUD resource: record, migration, form, policy, ops, actions, views, templates,
     /// factory and tests. Fields: `title:string body:text published_at:timestamp?
     /// owner:ref:User`. Types: string, text, rich_text, integer, float, bool, timestamp,
-    /// ref:<Record>; a trailing `?` makes a field optional, and `:internal`
+    /// file, image (an upload, checked to really be an image), ref:<Record>; a trailing `?` makes a field optional, and `:internal`
     /// (`sent_at:timestamp?:internal`) keeps a field the app sets off the form. The first required ref to a record people sign
     /// in as (registered with `signs_in::<..>` in src/app.rs, e.g. `owner:ref:User` or
     /// `seller:ref:Merchant`) is the owner: set from the signed-in record. Owned resources
@@ -41,12 +41,17 @@ pub enum Generate {
         #[arg(long)]
         force: bool,
     },
-    /// One action: `kiln g action posts publish POST /posts/{slug}/publish`.
+    /// One action: `kiln g action posts publish POST /posts/{slug}/publish`. With an `{id}`
+    /// of an existing record it loads and authorizes it: `Read` for GET, `Update` otherwise.
+    /// Pass `--authorize read` for something anyone who can see the record may do (RSVP,
+    /// like, bookmark), or `--authorize delete`.
     Action {
         resource: String,
         name: String,
         method: String,
         path: String,
+        #[arg(long, value_parser = ["read", "update", "delete"])]
+        authorize: Option<String>,
         #[arg(long)]
         force: bool,
     },
@@ -141,8 +146,8 @@ impl Generate {
                 r.factory(&mut plan);
                 (plan, force, (!no_migration).then(|| format!("create_{}", r.plural)))
             }
-            Generate::Action { resource, name, method, path, force } => {
-                (action(app, &resource, &name, &method, &path)?, force, None)
+            Generate::Action { resource, name, method, path, authorize, force } => {
+                (action(app, &resource, &name, &method, &path, authorize.as_deref())?, force, None)
             }
             Generate::Dockerfile { force } => {
                 let written = crate::release::write_deploy_files(&app.root, &app.package, force)?;
@@ -187,6 +192,9 @@ impl Generate {
                     "the app didn't compile or the diff failed; fix the errors above, then run `kiln db diff`".into()
                 );
             }
+        }
+        for note in &plan.notes {
+            println!("\n{note}");
         }
         Ok(())
     }
@@ -1065,7 +1073,14 @@ fn snake_of(pascal_name: &str) -> String {
 }
 
 /// `kiln g action posts publish POST /posts/{slug}/publish`
-fn action(app: &App, resource: &str, name: &str, method: &str, path: &str) -> Result<Plan, String> {
+fn action(
+    app: &App,
+    resource: &str,
+    name: &str,
+    method: &str,
+    path: &str,
+    authorize: Option<&str>,
+) -> Result<Plan, String> {
     if !is_snake(resource) || !is_snake(name) {
         return Err(
             "resource and action names are snake_case, e.g. `kiln g action posts publish POST /posts/{slug}/publish`"
@@ -1089,7 +1104,7 @@ fn action(app: &App, resource: &str, name: &str, method: &str, path: &str) -> Re
             .filter_map(|e| e.file_name().to_str()?.strip_suffix(".rs").map(str::to_owned))
             .find(|r| r != "mod" && plural(r) == resource);
         if let Some(record) = record {
-            return record_action(app, resource, &record, name, &method, path, &captures[1..]);
+            return record_action(app, resource, &record, name, &method, path, &captures[1..], authorize);
         }
     }
     let mut args = vec!["_ctx: Ctx".to_owned()];
@@ -1109,8 +1124,9 @@ fn action(app: &App, resource: &str, name: &str, method: &str, path: &str) -> Re
 }
 
 /// `kiln g action issues send POST /issues/{id}/send` when `Issue` exists: the action loads
-/// the record, authorizes the signed-in user (`Read` for GET, `Update` otherwise), and has a
-/// view (GET) or a redirect, plus tests.
+/// the record, authorizes the signed-in user (`Read` for GET, `Update` otherwise, or
+/// `--authorize`), and has a view (GET) or a redirect, plus tests.
+#[allow(clippy::too_many_arguments)]
 fn record_action(
     app: &App,
     resource: &str,
@@ -1119,6 +1135,7 @@ fn record_action(
     method: &str,
     path: &str,
     other_captures: &[&str],
+    authorize: Option<&str>,
 ) -> Result<Plan, String> {
     let record_pascal = pascal(record);
     let mut signs_in = signs_in_records(app);
@@ -1128,7 +1145,13 @@ fn record_action(
     let actor = signs_in[0].clone();
     let actor_snake = snake_of(&actor);
     let get = method == "GET";
-    let permission = if get { "Read" } else { "Update" };
+    let permission = match authorize {
+        Some("read") => "Read",
+        Some("delete") => "Delete",
+        Some(_) => "Update",
+        None if get => "Read",
+        None => "Update",
+    };
     let has_policy = app.path(&format!("src/policies/{record}.rs")).exists();
     let has_show = app.path(&format!("src/actions/{resource}/show.rs")).exists();
     let record_source = std::fs::read_to_string(app.path(&format!("src/records/{record}.rs"))).unwrap_or_default();
@@ -1219,16 +1242,17 @@ fn record_action(
         "PUT" => format!("put_form({call}, &[]).await"),
         _ => format!("post_form({call}, &[]).await"),
     };
+    let a = article(record);
     let happy = match &owner {
         Some(rel) => format!(
-            "\n#[kiln::test]\nasync fn the_owner_can_{name}_a_{record}(app: TestApp) -> Result {{\n    let {record} = app.create::<{record_pascal}>().await?;\n    let owner = {actor}::find({record}.{rel}_id).one_or_404(&app.db).await?;\n    app.sign_in_as(&owner).{request};\n    Ok(())\n}}\n"
+            "\n#[kiln::test]\nasync fn the_owner_can_{name}_{a}_{record}(app: TestApp) -> Result {{\n    let {record} = app.create::<{record_pascal}>().await?;\n    let owner = {actor}::find({record}.{rel}_id).one_or_404(&app.db).await?;\n    app.sign_in_as(&owner).{request};\n    Ok(())\n}}\n"
         ),
         None => String::new(),
     };
     plan.file(
         format!("tests/{resource}_{name}.rs"),
         format!(
-            "use {krate}::{{actions::{resource}, records::*}};\nuse kiln::{{prelude::*, testing::TestApp}};\n{happy}\n#[kiln::test]\nasync fn signed_out_people_cannot_{name}_a_{record}(app: TestApp) -> Result {{\n    let {record} = app.create::<{record_pascal}>().await?;\n    app.client().{signed_out}.assert_status(401);\n    Ok(())\n}}\n",
+            "use {krate}::{{actions::{resource}, records::*}};\nuse kiln::{{prelude::*, testing::TestApp}};\n{happy}\n#[kiln::test]\nasync fn signed_out_people_cannot_{name}_{a}_{record}(app: TestApp) -> Result {{\n    let {record} = app.create::<{record_pascal}>().await?;\n    app.client().{signed_out}.assert_status(401);\n    Ok(())\n}}\n",
             krate = app.crate_name()
         ),
     );
@@ -1249,7 +1273,10 @@ fn check_verb_noun(app: &App, name: &str, what: &str, example: &str) -> Result<(
         .filter(|n| n != "mod")
         .collect();
     let noun = |w: &str| records.iter().any(|r| r == w || format!("{r}s") == w);
-    if noun(first) && !noun(rest) {
+    // `rsvp_to_event`: a record name used as the verb, followed by its object.
+    let preposition = ["to", "for", "from", "on", "in", "at", "with", "into", "as", "by"]
+        .contains(&rest.split('_').next().unwrap_or_default());
+    if noun(first) && !noun(rest) && !preposition {
         return Err(format!("{what} are named `verb_noun`, so the verb comes first: `{rest}_{first}`, not `{name}`"));
     }
     Ok(())
@@ -1343,7 +1370,7 @@ fn job(app: &App, name: &str) -> Result<Plan, String> {
     plan.file(
         format!("src/jobs/{name}.rs"),
         fill(
-            "use kiln::prelude::*;\nuse serde::{Deserialize, Serialize};\n\n/// Enqueue it with `@@Name@@ { .. }.enqueue(&ctx.db).await?` (inside the write's\n/// transaction, so it runs only if the write commits). Fields are stored as JSON: pass ids,\n/// not records, and load fresh data in `perform`. It may run more than once, so make it\n/// safe to repeat.\n#[derive(Job, Serialize, Deserialize, Debug)]\n#[job(queue = \"default\", attempts = 5)]\npub struct @@Name@@ {}\n\nimpl Perform for @@Name@@ {\n    async fn perform(self, ctx: &Ctx) -> Result {\n        let _ = ctx;\n        todo!(\"implement @@Name@@\")\n    }\n}\n",
+            "use kiln::prelude::*;\nuse serde::{Deserialize, Serialize};\n\n/// Enqueue it with `@@Name@@ { .. }.enqueue(&ctx.db).await?` (inside the write's\n/// transaction, so it runs only if the write commits). Fields are stored as JSON: pass ids,\n/// not records, and load fresh data in `perform`. It may run more than once, so make it\n/// safe to repeat.\n#[derive(Job, Serialize, Deserialize, Debug)]\n#[job(queue = \"default\", attempts = 5)]\npub struct @@Name@@ {}\n\nimpl Perform for @@Name@@ {\n    async fn perform(self, ctx: &Ctx) -> Result {\n        // Load what the fields point at, then do the work.\n        let _ = ctx;\n        Ok(())\n    }\n}\n",
             &[("Name", &pascal)],
         ),
     );
@@ -1641,6 +1668,10 @@ fn auth(app: &App, force: bool) -> Result<Plan, String> {
                 plan.replace(path, add_to_struct_literals(&source, "NewUser {", value));
             }
         }
+        plan.note(
+            "Users already in the database have no password. Run `kiln db migrate`, then `kiln db reset` \
+             to recreate the development database from src/seed.rs (seeded users get the password \"password\").",
+        );
     }
     let krate = app.crate_name();
     for (path, contents) in AUTH_FILES {

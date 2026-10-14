@@ -75,6 +75,16 @@ async fn covers_must_be_images_and_the_form_keeps_a_good_one(app: TestApp) -> Re
         .await
         .assert_status(422)
         .assert_contains("Cover must be image/*");
+    // Named and labelled as a PNG, but it isn't one: the bytes decide.
+    client
+        .post_multipart(
+            posts::create::path(),
+            &[("title", "Fake image"), ("body", "<p>x</p>")],
+            &[("cover", Upload::new("fake.png", "image/png", b"nope".to_vec()))],
+        )
+        .await
+        .assert_status(422)
+        .assert_contains("Cover must be image/*");
 
     // A valid file survives a re-render for another field's error: no re-upload needed.
     let page = client

@@ -20,10 +20,12 @@ impl EmailConfirmation {
     }
 }
 
-/// Previewed with the first user (`kiln db seed` creates some).
+/// Previewed with the first user (`kiln db seed` creates some), or a made-up one.
 impl Preview for EmailConfirmation {
     async fn preview(ctx: &Ctx) -> Result<Self> {
-        let user = User::query().one(&ctx.db).await?.ok_or_else(|| Error::BadRequest("create a user to preview this mail".into()))?;
-        Ok(Self::for_user(ctx, &user))
+        Ok(match User::query().one(&ctx.db).await? {
+            Some(user) => Self::for_user(ctx, &user),
+            None => Self { to: "ada@example.com".into(), name: "Ada Lovelace".into(), token: "preview".into() },
+        })
     }
 }

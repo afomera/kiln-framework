@@ -58,7 +58,8 @@ Commands:
   manifest            Routes and records as JSON
 
 For agents (`kiln mcp`; debug builds, not in production), all JSON:
-  request <METHOD> <path> [--as User:1|<email>] [--form k=v].. [--json BODY] [--accept html|json|turbo] [--follow]
+  request <METHOD> <path> [--as User:1|<email>] [--form k=v].. [--file field=path].. [--json BODY]
+          [--accept html|json|turbo] [--follow] [--perform-jobs] [--body text|html|none]
                       A request through the app, with the SQL it ran and the jobs and mail it caused
   db query \"<SQL>\" [--limit N] [--database queue|cache|streams]
                       Read-only SQL
@@ -206,6 +207,16 @@ impl Cli {
             [] | ["serve"] => self.serve().await,
             ["health"] => health(),
             // For agents (`kiln mcp`): development builds only, never in production.
+            #[cfg(debug_assertions)]
+            ["request", rest @ ..] if rest.is_empty() || rest.iter().any(|a| matches!(*a, "--help" | "-h")) => {
+                println!("{}", crate::agent::USAGE);
+                println!(
+                    "\nRuns in-process against the development database. --as signs in (User:3, 3 or an email);\n\
+                     --file uploads (multipart); --perform-jobs runs queued jobs afterwards, so mail they send\n\
+                     shows in mail_sent; --body html keeps the raw HTML (default: readable text)."
+                );
+                Ok(())
+            }
             #[cfg(debug_assertions)]
             ["request", rest @ ..] => {
                 refuse_in_production("request")?;
@@ -477,6 +488,7 @@ impl Cli {
                             "unique": c.unique,
                             "indexed": c.indexed,
                             "references": c.references,
+                            "on_delete": c.on_delete,
                             "variants": c.variants,
                             "attachment": c.attachment,
                             "rich_text": c.rich_text,
@@ -488,7 +500,19 @@ impl Cli {
                     .iter()
                     .map(|(kind, name, target)| json!({ "kind": kind, "name": name, "target": target }))
                     .collect();
-                json!({ "name": r.name, "table": r.table, "columns": columns, "relations": relations })
+                let indexes: Vec<_> = schema
+                    .indexes
+                    .iter()
+                    .map(|i| json!({ "columns": i.columns, "unique": i.unique, "where": i.condition }))
+                    .collect();
+                json!({
+                    "name": r.name,
+                    "table": r.table,
+                    "columns": columns,
+                    "relations": relations,
+                    "indexes": indexes,
+                    "one_of": schema.one_of,
+                })
             })
             .collect();
         let mut jobs: Vec<_> = inventory::iter::<crate::jobs::JobDef>

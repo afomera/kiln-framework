@@ -14,6 +14,7 @@ const AUTO_FIELDS: [&str; 3] = ["id", "created_at", "updated_at"];
 enum RelKind {
     BelongsTo,
     HasMany,
+    HasOne,
 }
 
 struct RelSpec {
@@ -49,10 +50,19 @@ enum Index {
     Unique,
 }
 
+/// `#[record(unique(a, b))]`, `index(a, b, where = "..")`.
+struct TableIndex {
+    columns: Vec<Ident>,
+    unique: bool,
+    condition: Option<LitStr>,
+}
+
 struct Field<'a> {
     ident: &'a Ident,
     ty: &'a Type,
     index: Index,
+    /// `#[on_delete(cascade)]`: `CASCADE` or `SET NULL`.
+    on_delete: Option<(&'static str, proc_macro2::Span)>,
     /// `#[hidden]`: stored, but never serialized (templates, JSON, broadcasts).
     hidden: bool,
 }
@@ -80,6 +90,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut table = None;
     let mut parts = false;
     let mut rels = Vec::new();
+    let mut indexes: Vec<TableIndex> = Vec::new();
+    let mut one_of: Vec<Vec<Ident>> = Vec::new();
     for attr in input.attrs.iter().filter(|a| a.path().is_ident("record")) {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("table") {
@@ -91,13 +103,48 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 parts = true;
                 return Ok(());
             }
+            if meta.path.is_ident("unique") || meta.path.is_ident("index") || meta.path.is_ident("one_of") {
+                let kind = meta.path.get_ident().map(Ident::to_string).unwrap_or_default();
+                let mut columns = Vec::new();
+                let mut condition = None;
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("where") && kind != "one_of" {
+                        condition = Some(inner.value()?.parse::<LitStr>()?);
+                    } else if let Some(column) = inner.path.get_ident() {
+                        columns.push(column.clone());
+                    } else {
+                        return Err(inner.error("expected a column name"));
+                    }
+                    Ok(())
+                })?;
+                let needed = if kind == "one_of" || condition.is_none() { 2 } else { 1 };
+                if columns.len() < needed {
+                    let hint = if kind == "one_of" {
+                        "`one_of` takes two or more nullable columns: `one_of(work_item_id, commit_id)`".to_owned()
+                    } else {
+                        format!(
+                            "`{kind}(..)` here covers several columns (`{kind}(event_id, user_id)`) or is partial (`{kind}(email, where = \"deleted_at IS NULL\")`); for one column, put `#[index{}]` on the field",
+                            if kind == "unique" { "(unique)" } else { "" }
+                        )
+                    };
+                    return Err(meta.error(hint));
+                }
+                if kind == "one_of" {
+                    one_of.push(columns);
+                } else {
+                    indexes.push(TableIndex { columns, unique: kind == "unique", condition });
+                }
+                return Ok(());
+            }
             let kind = if meta.path.is_ident("belongs_to") {
                 RelKind::BelongsTo
             } else if meta.path.is_ident("has_many") {
                 RelKind::HasMany
+            } else if meta.path.is_ident("has_one") {
+                RelKind::HasOne
             } else {
                 return Err(meta.error(
-                    "unknown `record` option; expected `table = \"..\"`, `belongs_to(..)`, `has_many(..)` or `parts`",
+                    "unknown `record` option; expected `table = \"..\"`, `belongs_to(..)`, `has_many(..)`, `has_one(..)`, `unique(..)`, `index(..)`, `one_of(..)` or `parts`",
                 ));
             };
             let content;
@@ -128,7 +175,27 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         }
         let hidden = f.attrs.iter().any(|a| a.path().is_ident("hidden"));
-        fields.push(Field { ident, ty: &f.ty, index, hidden });
+        let mut on_delete = None;
+        for attr in f.attrs.iter().filter(|a| a.path().is_ident("on_delete")) {
+            attr.parse_nested_meta(|meta| {
+                let action = if meta.path.is_ident("cascade") {
+                    "CASCADE"
+                } else if meta.path.is_ident("set_null") {
+                    if !is_option(&f.ty) {
+                        return Err(meta.error(format!(
+                            "`set_null` needs a nullable foreign key: `{ident}: Option<Id<..>>`, or use `cascade`"
+                        )));
+                    }
+                    "SET NULL"
+                } else {
+                    return Err(meta.error("expected `cascade` or `set_null`"));
+                };
+                on_delete =
+                    Some((action, attr.path().get_ident().map_or_else(proc_macro2::Span::call_site, Ident::span)));
+                Ok(())
+            })?;
+        }
+        fields.push(Field { ident, ty: &f.ty, index, on_delete, hidden });
     }
 
     if !fields.iter().any(|f| f.ident == "id") {
@@ -143,6 +210,33 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             ));
         };
         rel.optional = is_option(field.ty);
+    }
+    for field in fields.iter().filter(|f| f.on_delete.is_some()) {
+        let is_fk =
+            rels.iter().any(|r| r.kind == RelKind::BelongsTo && field.ident == format!("{}_id", r.name).as_str());
+        if !is_fk {
+            let span = field.on_delete.map(|(_, span)| span).unwrap_or_else(|| field.ident.span());
+            return Err(Error::new(
+                span,
+                format!(
+                    "`#[on_delete]` goes on a `belongs_to` foreign key; add `belongs_to({}: ..)` to `#[record(..)]`",
+                    field.ident.to_string().trim_end_matches("_id")
+                ),
+            ));
+        }
+    }
+    for column in indexes.iter().flat_map(|i| &i.columns).chain(one_of.iter().flatten()) {
+        if !fields.iter().any(|f| f.ident == column) {
+            return Err(Error::new_spanned(column, format!("`{name}` has no field `{column}`")));
+        }
+    }
+    for column in one_of.iter().flatten() {
+        if fields.iter().any(|f| f.ident == column && !is_option(f.ty)) {
+            return Err(Error::new_spanned(
+                column,
+                format!("`one_of` columns are nullable (only one is set): make it `{column}: Option<..>`"),
+            ));
+        }
     }
     for rel in &rels {
         if fields.iter().any(|f| *f.ident == rel.name) {
@@ -202,6 +296,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 quote! { ::core::option::Option::Some(<#target as ::kiln::Record>::TABLE) }
             })
             .unwrap_or_else(|| quote! { ::core::option::Option::None });
+        let on_delete = match f.on_delete {
+            Some((action, _)) => quote! { ::core::option::Option::Some(#action) },
+            None => quote! { ::core::option::Option::None },
+        };
         quote! {
             ::kiln::ColumnSchema {
                 name: stringify!(#ident),
@@ -211,12 +309,24 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 unique: #unique,
                 indexed: #indexed,
                 references: #references,
+                on_delete: #on_delete,
                 variants: <#ty as ::kiln::SqlType>::VARIANTS,
                 attachment: <#ty as ::kiln::SqlType>::ATTACHMENT,
                 rich_text: <#ty as ::kiln::SqlType>::RICH_TEXT,
             }
         }
     });
+
+    let index_schemas = indexes.iter().map(|i| {
+        let columns = &i.columns;
+        let unique = i.unique;
+        let condition = match &i.condition {
+            Some(c) => quote! { ::core::option::Option::Some(#c) },
+            None => quote! { ::core::option::Option::None },
+        };
+        quote! { ::kiln::IndexSchema { columns: &[#( stringify!(#columns) ),*], unique: #unique, condition: #condition } }
+    });
+    let one_of_groups = &one_of;
 
     let serialize_fields = fields.iter().filter(|f| !f.hidden).map(|f| {
         let ident = f.ident;
@@ -239,7 +349,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         .map(|rel| {
             let kind = match rel.kind {
                 RelKind::BelongsTo => "belongs_to",
-                _ => "has_many",
+                RelKind::HasMany => "has_many",
+                RelKind::HasOne => "has_one",
             };
             let rel_name = rel.name.to_string();
             let target = rel.target.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
@@ -325,7 +436,12 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
 
             fn schema() -> ::kiln::TableSchema {
-                ::kiln::TableSchema { table: #table, columns: ::std::vec![#( #column_schemas ),*] }
+                ::kiln::TableSchema {
+                    table: #table,
+                    columns: ::std::vec![#( #column_schemas ),*],
+                    indexes: ::std::vec![#( #index_schemas ),*],
+                    one_of: ::std::vec![#( &[#( stringify!(#one_of_groups) ),*] ),*],
+                }
             }
         }
 
@@ -390,7 +506,22 @@ fn relation_items(owner: &Ident, vis: &syn::Visibility, rel: &Rel) -> TokenStrea
                     ::kiln::rel::load_has_many::<#owner, #target, __KilnN, _>(
                         __kiln_owners,
                         ::kiln::Column::<#target, ::kiln::Id<#owner>>::new(stringify!(#fk)),
-                        |__kiln_child: &#target| __kiln_child.#fk,
+                        |__kiln_child: &#target| ::kiln::rel::ForeignKey::<#owner>::key(&__kiln_child.#fk),
+                        __kiln_db,
+                    )
+                },
+            )
+        }
+        RelKind::HasOne => {
+            // Like `has_many`: the other table holds `{owner}_id`, e.g. `namespaces.user_id`.
+            let fk = format_ident!("{}_id", snake_case(&owner.to_string()));
+            (
+                quote! { ::core::option::Option<<__KilnN as ::kiln::RelSet<#target>>::Row> },
+                quote_spanned! {span=>
+                    ::kiln::rel::load_has_one::<#owner, #target, __KilnN, _>(
+                        __kiln_owners,
+                        ::kiln::Column::<#target, ::kiln::Id<#owner>>::new(stringify!(#fk)),
+                        |__kiln_child: &#target| ::kiln::rel::ForeignKey::<#owner>::key(&__kiln_child.#fk),
                         __kiln_db,
                     )
                 },
@@ -400,6 +531,7 @@ fn relation_items(owner: &Ident, vis: &syn::Visibility, rel: &Rel) -> TokenStrea
     let kind = match rel.kind {
         RelKind::BelongsTo => "belongs_to",
         RelKind::HasMany => "has_many",
+        RelKind::HasOne => "has_one",
     };
     let doc = format!(
         "Relation `{owner}::{rname}` ({kind} `{}`). Pass to `.preload(..)`; nest with `{rname}.preload(..)`.",

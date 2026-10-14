@@ -96,8 +96,11 @@ fn tools(write: bool) -> Vec<Value> {
     vec![
         json!({
             "name": "introspect",
-            "description": "The whole app: every route (method, path, action, file:line, pipeline, params, signed-in record, form, argument and return types), record (columns, relations), view (template, fields), form (fields, validations), policy, op signature, part, job, schedule, mail, notification, config, template and lint rule. Call it before changing an unfamiliar app.",
-            "inputSchema": object(json!({}), &[]),
+            "description": "The whole app: every route (method, path, action, file:line, pipeline, params, signed-in record, form, argument and return types), record (columns, relations), view (template, fields), form (fields, validations), policy, op signature, part, job, schedule, mail, notification, config, template and lint rule. Call it before changing an unfamiliar app. The whole report is large: narrow it with `section` and/or `find`.",
+            "inputSchema": object(json!({
+                "section": { "type": "string", "description": "Only this part: routes, records, views, forms, policies, ops, parts, jobs, schedules, mail, notifications, config, templates, lints" },
+                "find": { "type": "string", "description": "Only items mentioning this text, case-insensitive: a record (`Event`), a path (`/events`), a file" },
+            }), &[]),
             "annotations": { "readOnlyHint": true },
         }),
         json!({
@@ -113,14 +116,16 @@ fn tools(write: bool) -> Vec<Value> {
                 "form": { "type": "object", "description": "Form fields, as a browser submits them: {\"title\": \"Hi\"}", "additionalProperties": { "type": "string" } },
                 "json": { "description": "A JSON body instead of a form" },
                 "accept": { "type": "string", "enum": ["html", "json", "turbo"], "description": "What the client accepts (default html)" },
+                "files": { "type": "object", "description": "Files to upload, field to local path: {\"cover\": \"/tmp/cover.png\"} (sent as multipart, with `form`)", "additionalProperties": { "type": "string" } },
                 "follow": { "type": "boolean", "description": "Follow redirects (up to 5), reporting each" },
+                "perform_jobs": { "type": "boolean", "description": "Afterwards, run every queued job (mail sent with deliver_later and notifications then shows in mail_sent)" },
                 "body": { "type": "string", "enum": ["text", "html", "none"], "description": "How to return an HTML body: readable text (default), the raw HTML, or not at all" },
             }), &["path"]),
             "annotations": { "readOnlyHint": !write },
         }),
         json!({
             "name": "query",
-            "description": "Run read-only SQL against the development database (the connection refuses writes). Kiln's own tables: kiln_jobs, kiln_mail, kiln_sessions, kiln_blobs, kiln_cache, kiln_streams.",
+            "description": "Run read-only SQL against the development database (the connection refuses writes). Kiln's own tables: kiln_jobs, kiln_mail, kiln_notifications, kiln_sessions, kiln_blobs, kiln_cache, kiln_streams. Integer `*_at` columns (microseconds since 1970) come back as ISO 8601 times.",
             "inputSchema": object(json!({
                 "sql": { "type": "string" },
                 "limit": { "type": "integer", "description": "Rows to return (default 100)" },
@@ -164,7 +169,11 @@ fn tools(write: bool) -> Vec<Value> {
 fn call(app: &App, write: bool, name: &str, args: &Value) -> Result<String, String> {
     let s = |key: &str| args[key].as_str().map(str::to_owned);
     match name {
-        "introspect" => pretty(&crate::introspect::report(app)?),
+        "introspect" => pretty(&crate::introspect::narrow(
+            crate::introspect::report(app)?,
+            s("section").as_deref(),
+            s("find").as_deref(),
+        )?),
         "request" => {
             let method = s("method").unwrap_or_else(|| "GET".into()).to_ascii_uppercase();
             let path = s("path").ok_or("`path` is required")?;
@@ -187,22 +196,19 @@ fn call(app: &App, write: bool, name: &str, args: &Value) -> Result<String, Stri
             if let Some(accept) = s("accept") {
                 argv.extend(["--accept".into(), accept]);
             }
+            for (field, path) in args["files"].as_object().into_iter().flatten() {
+                argv.extend(["--file".into(), format!("{field}={}", path.as_str().unwrap_or_default())]);
+            }
             if args["follow"].as_bool() == Some(true) {
                 argv.push("--follow".into());
             }
-            let mut response = binary_json(app, &argv)?;
-            let html = response["content_type"].as_str().is_some_and(|t| t.starts_with("text/html"));
-            match s("body").as_deref() {
-                Some("none") => response["body"] = Value::Null,
-                Some("html") => {}
-                // A development error page: its Markdown report says it better.
-                _ if response["error_report"].is_string() => {
-                    response["body"] = Value::Null;
-                }
-                _ if html => response["body"] = json!(html_to_text(response["body"].as_str().unwrap_or_default())),
-                _ => {}
+            if args["perform_jobs"].as_bool() == Some(true) {
+                argv.push("--perform-jobs".into());
             }
-            pretty(&response)
+            if let Some(body) = s("body") {
+                argv.extend(["--body".into(), body]);
+            }
+            pretty(&binary_json(app, &argv)?)
         }
         "query" => {
             let mut argv = vec!["db".to_owned(), "query".into(), s("sql").ok_or("`sql` is required")?];
@@ -294,154 +300,9 @@ fn binary_json(app: &App, args: &[String]) -> Result<Value, String> {
     Err(tail)
 }
 
-/// An HTML page as text an agent can read cheaply: headings, paragraphs, list items, links
-/// as `[text](href)`, forms and their fields, buttons; scripts, styles and SVG dropped.
-pub fn html_to_text(html: &str) -> String {
-    let mut out = String::new();
-    let mut rest = html;
-    let mut link: Option<String> = None;
-    let mut in_button = false;
-    while let Some(start) = rest.find('<') {
-        let text = decode(&rest[..start]);
-        // A button's label stays on one line.
-        out.push_str(&if in_button { text.split_whitespace().collect::<Vec<_>>().join(" ") } else { text });
-        let Some(end) = rest[start..].find('>') else { break };
-        let tag = &rest[start + 1..start + end];
-        rest = &rest[start + end + 1..];
-        let name = tag.trim_start_matches('/').split([' ', '\n', '\t', '/']).next().unwrap_or("").to_ascii_lowercase();
-        let closing = tag.starts_with('/');
-        if !closing && matches!(name.as_str(), "script" | "style" | "svg" | "head" | "template") {
-            let close = format!("</{name}");
-            rest = rest.find(&close).map_or("", |i| &rest[i..]);
-            rest = rest.find('>').map_or("", |i| &rest[i + 1..]);
-            continue;
-        }
-        let attr = |key: &str| attribute(tag, key);
-        match (name.as_str(), closing) {
-            ("br", _) | ("tr", false) => out.push('\n'),
-            (
-                "p" | "div" | "section" | "article" | "header" | "footer" | "main" | "nav" | "ul" | "ol" | "table"
-                | "figure",
-                _,
-            ) => out.push('\n'),
-            ("h1" | "h2" | "h3" | "h4" | "h5" | "h6", false) => {
-                let level = name[1..].parse().unwrap_or(1);
-                out.push_str(&format!("\n\n{} ", "#".repeat(level)));
-            }
-            ("h1" | "h2" | "h3" | "h4" | "h5" | "h6", true) => out.push('\n'),
-            ("li", false) => out.push_str("\n- "),
-            ("td" | "th", false) => out.push_str(" | "),
-            ("a", false) => {
-                link = attr("href");
-                out.push('[');
-            }
-            ("a", true) => {
-                out.push_str(&format!("]({})", link.take().unwrap_or_default()));
-            }
-            ("img", _) => out.push_str(&format!("[image: {}]", attr("alt").unwrap_or_default())),
-            ("form", false) => out.push_str(&format!(
-                "\n[form {} {}]\n",
-                attr("method").unwrap_or_else(|| "get".into()).to_uppercase(),
-                attr("action").unwrap_or_default()
-            )),
-            ("form", true) => out.push_str("\n[/form]\n"),
-            ("input" | "textarea" | "select", false) => {
-                let kind = attr("type").unwrap_or_else(|| name.clone());
-                if kind != "hidden" || attr("name").as_deref() == Some("_method") {
-                    let mut field = format!("[{kind} name={}", attr("name").unwrap_or_default());
-                    if let Some(value) = attr("value").filter(|v| !v.is_empty()) {
-                        field.push_str(&format!(" value={value:?}"));
-                    }
-                    out.push_str(&field);
-                    out.push(']');
-                }
-            }
-            ("button", false) => {
-                in_button = true;
-                out.push_str("[button: ");
-                if let Some(label) = attr("aria-label").or_else(|| attr("title")) {
-                    out.push_str(&label);
-                }
-            }
-            ("button", true) => {
-                in_button = false;
-                out.push(']');
-            }
-            _ => {}
-        }
-    }
-    out.push_str(&decode(rest));
-    // Collapse runs of spaces and blank lines.
-    let mut text = String::new();
-    let mut blank = 0;
-    for line in out.lines() {
-        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
-        if line.is_empty() {
-            blank += 1;
-            if blank > 1 {
-                continue;
-            }
-        } else {
-            blank = 0;
-        }
-        text.push_str(&line);
-        text.push('\n');
-    }
-    text.trim().to_owned()
-}
-
-fn attribute(tag: &str, key: &str) -> Option<String> {
-    let mut rest = tag;
-    while let Some(i) = rest.find(key) {
-        let before = rest[..i].chars().last();
-        let after = &rest[i + key.len()..];
-        if before.is_some_and(char::is_whitespace) && after.starts_with('=') {
-            let value = &after[1..];
-            let (quote, value) = match value.chars().next() {
-                Some(q @ ('"' | '\'')) => (q, &value[1..]),
-                _ => (' ', value),
-            };
-            let end = value.find(quote).unwrap_or(value.len());
-            return Some(decode(&value[..end]));
-        }
-        rest = after;
-    }
-    None
-}
-
-fn decode(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pages_read_as_text() {
-        let html = r#"<html><head><title>T</title><script>x()</script></head><body>
-            <h1>Posts</h1><ul><li><a href="/posts/a">A &amp; B</a></li></ul>
-            <form method="post" action="/session"><input type="hidden" name="_csrf" value="t">
-            <input type="hidden" name="_method" value="DELETE"><input name="email" type="email">
-            <button>Sign out</button></form><button aria-label="Dark theme">
-              <svg><path/></svg>
-            </button><svg><path d="M0"/></svg><p>Done</p></body></html>"#;
-        let text = html_to_text(html);
-        assert!(text.contains("# Posts"), "{text}");
-        assert!(text.contains("- [A & B](/posts/a)"), "{text}");
-        assert!(text.contains("[form POST /session]"), "{text}");
-        assert!(text.contains("[hidden name=_method value=\"DELETE\"]"), "{text}");
-        assert!(text.contains("[email name=email]"), "{text}");
-        assert!(text.contains("[button: Sign out]"), "{text}");
-        assert!(text.contains("[button: Dark theme]"), "{text}");
-        assert!(!text.contains("_csrf") && !text.contains("x()") && !text.contains("M0"), "{text}");
-    }
 
     #[test]
     fn speaks_json_rpc() {
