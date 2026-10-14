@@ -47,3 +47,4 @@ object_store.workspace = true
 multer.workspace = true
 bytes.workspace = true
 image.workspace = true
+reqwest.workspace = true

@@ -104,7 +104,13 @@ impl TestApp {
         }
         crate::config::set_root(root);
         // Files go to a store of the test's own, gone when it ends.
-        let app = configure(App::new(db.clone()).root(root).provide(crate::Storage::memory()))?;
+        // Webhooks are captured until a test answers them with `receive_webhooks`.
+        let app = configure(
+            App::new(db.clone())
+                .root(root)
+                .provide(crate::Storage::memory())
+                .provide(crate::webhooks::TestReceiver::default()),
+        )?;
         crate::jobs::sync_app(app.ctx()).await?;
         Ok(Self { app, db, sequence: AtomicU64::new(0), clock: Default::default() })
     }
@@ -308,6 +314,49 @@ impl TestApp {
                 String::new()
             };
             panic!("{caller}: expected mail to {to} containing {needle:?}{hint}; the outbox has {outbox:#?}")
+        }
+    }
+
+    /// Webhook delivery attempts so far (captured, or answered by `receive_webhooks`),
+    /// oldest first. `deliver_later` queues a job: run `app.perform_enqueued_jobs()` first.
+    pub async fn webhooks_sent(&self) -> Result<Vec<crate::webhooks::Delivery>> {
+        let mut sent = self.db.recent_webhook_deliveries("", i64::MAX).await?;
+        sent.reverse();
+        Ok(sent)
+    }
+
+    /// Asserts a webhook for `event` was delivered (or captured). Returns the latest one.
+    #[track_caller]
+    pub fn assert_webhook_sent<'a>(
+        &'a self,
+        event: &'a str,
+    ) -> impl Future<Output = Result<crate::webhooks::Delivery>> + 'a {
+        let caller = std::panic::Location::caller();
+        async move {
+            let sent = self.webhooks_sent().await?;
+            if let Some(found) = sent.iter().rev().find(|d| d.event == event) {
+                return Ok(found.clone());
+            }
+            let queued = self.db.queued_payloads("DeliverWebhook").await?.len();
+            let hint = if queued > 0 {
+                format!(" ({queued} queued; run `app.perform_enqueued_jobs().await?` first)")
+            } else {
+                String::new()
+            };
+            let events: Vec<&str> = sent.iter().map(|d| d.event.as_str()).collect();
+            panic!("{caller}: expected a `{event}` webhook{hint}; sent: {events:?}")
+        }
+    }
+
+    /// Sends this app's webhook deliveries to `receive` instead of capturing them: it gets
+    /// each signed request and answers with a status and body, so tests can exercise
+    /// verification, retries (any non-2xx) and `410 Gone` without a network.
+    pub fn receive_webhooks(
+        &self,
+        receive: impl Fn(&crate::webhooks::Received) -> (u16, String) + Send + Sync + 'static,
+    ) {
+        if let Some(receiver) = self.app.ctx().try_get::<crate::webhooks::TestReceiver>() {
+            receiver.set(std::sync::Arc::new(receive));
         }
     }
 
