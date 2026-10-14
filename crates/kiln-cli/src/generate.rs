@@ -121,6 +121,14 @@ pub enum Generate {
         #[arg(long)]
         force: bool,
     },
+    /// A Stimulus controller in assets/controllers (registered by itself):
+    /// `kiln g controller clipboard` is `data-controller="clipboard"`, `admin/users` is
+    /// `admin--users`, `bulk_edit` is `bulk-edit`.
+    Controller {
+        name: String,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 impl Generate {
@@ -158,6 +166,7 @@ impl Generate {
             }
             Generate::Op { name, force } => (op(app, &name)?, force, None),
             Generate::Part { record, force } => (part(app, &record)?, force, None),
+            Generate::Controller { name, force } => (controller(&name)?, force, None),
             Generate::Job { name, force } => (job(app, &name)?, force, None),
             Generate::Lint { name, code, warning, force } => (lint(app, &name, code, warning)?, force, None),
             Generate::Mail { name, force } => (mail(app, &name)?, force, None),
@@ -1317,6 +1326,25 @@ fn lint_codes(app: &App) -> Vec<String> {
         }
     }
     codes
+}
+
+/// `kiln g controller admin/users`: `assets/controllers/admin/users_controller.js`.
+fn controller(name: &str) -> Result<Plan, String> {
+    let path = name.trim_end_matches(".js").trim_end_matches("_controller").replace('-', "_");
+    if !path.split('/').all(is_snake) {
+        return Err(format!(
+            "controller names are snake_case, optionally in directories: `clipboard`, `admin/users` (got `{name}`)"
+        ));
+    }
+    let identifier = path.replace('/', "--").replace('_', "-");
+    let mut plan = Plan::default();
+    plan.file(
+        format!("assets/controllers/{path}_controller.js"),
+        format!(
+            "import {{ Controller }} from \"@hotwired/stimulus\"\n\n// <div data-controller=\"{identifier}\">: Kiln registers every file in assets/controllers/.\n// Targets are `data-{identifier}-target=\"name\"`, actions `data-action=\"click->{identifier}#method\"`.\nexport default class extends Controller {{\n  static targets = []\n\n  connect() {{\n  }}\n}}\n"
+        ),
+    );
+    Ok(plan)
 }
 
 /// `kiln g op publish_post`

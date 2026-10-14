@@ -4,11 +4,25 @@
 //!   (`{{ asset("app.css") }}` → `/assets/app-1a2b3c4d.css`) and cached forever.
 //! - `public/`: served as-is at the site root (`robots.txt`, `favicon.ico`) when no route
 //!   matches.
-//! - Kiln's own JavaScript (Turbo) at `/kiln/turbo-<version>-<hash>.js`, and the rich text
-//!   editor (Lexxy plus Kiln's setup and skin) at `/kiln/lexxy-*`, `/kiln/rich-text-*`.
+//! - Kiln's own JavaScript (Turbo, Stimulus) at `/kiln/turbo-<version>-<hash>.js` and
+//!   `/kiln/stimulus-*`, and the rich text editor (Lexxy plus Kiln's setup and skin) at
+//!   `/kiln/lexxy-*`, `/kiln/rich-text-*`.
 //!
 //! JavaScript loads through an import map (`{{ javascript_importmap() }}`), so there's no
-//! bundler or Node toolchain.
+//! bundler or Node toolchain. It maps every `assets/**/*.js` file by its path, Stimulus
+//! controllers included (`assets/controllers/hello_controller.js` registers itself as
+//! `data-controller="hello"`), plus the pins in `config/importmap.toml`:
+//!
+//! ```toml
+//! "@pierre/diffs" = "vendor/npm/@pierre/diffs@1.5.2.js"   # a file under assets/
+//! "canvas-confetti" = "https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/+esm"
+//! ```
+//!
+//! `kiln importmap pin <package>` downloads a package from jsDelivr into
+//! `assets/vendor/npm/`, which mirrors `cdn.jsdelivr.net/npm/`: `vendor/npm/shiki@4.5.0.js`
+//! is mapped as `/npm/shiki@4.5.0/+esm`, the path jsDelivr's builds import it by, so a
+//! package's dependencies load from the app too. Other files in `assets/vendor/` are only
+//! mapped through pins.
 
 use std::{
     collections::BTreeMap,
@@ -33,6 +47,16 @@ pub(crate) fn turbo_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
     URL.get_or_init(|| format!("/kiln/turbo-{TURBO_VERSION}-{}.js", short_hash(TURBO_JS)))
 }
+
+/// Stimulus, vendored (see `vendor/README.md`).
+const STIMULUS_VERSION: &str = "3.2.2";
+const STIMULUS_JS: &str = include_str!("../vendor/stimulus-3.2.2.js");
+const STIMULUS_LICENSE: &str = include_str!("../vendor/stimulus-MIT-LICENSE");
+/// Kiln's Stimulus setup: starts it and registers the import map's controllers.
+const STIMULUS_LOADER_JS: &str = include_str!("../assets/stimulus.js");
+
+/// Where an app pins import-map modules, relative to its root.
+pub(crate) const PINS_FILE: &str = "config/importmap.toml";
 
 /// Lexxy, vendored by `scripts/vendor-lexxy.sh` (see `vendor/README.md`), byte for byte.
 const LEXXY_JS: &str = include_str!("../vendor/lexxy/lexxy.min.js");
@@ -78,6 +102,55 @@ fn lexxy_js() -> &'static Served {
         );
         Served::new(&format!("lexxy-{version}"), "js", format!("{header}{LEXXY_JS}"))
     })
+}
+
+/// Upstream's banner has only the copyright line, so the served copy starts with the license.
+fn stimulus_js() -> &'static Served {
+    static SERVED: OnceLock<Served> = OnceLock::new();
+    SERVED.get_or_init(|| {
+        let header = format!(
+            "/*! Stimulus {STIMULUS_VERSION} | https://stimulus.hotwired.dev | vendored and served by Kiln, unmodified below this comment\n\n{}\n*/\n",
+            STIMULUS_LICENSE.trim()
+        );
+        Served::new(&format!("stimulus-{STIMULUS_VERSION}"), "js", format!("{header}{STIMULUS_JS}"))
+    })
+}
+
+fn stimulus_loader_js() -> &'static Served {
+    static SERVED: OnceLock<Served> = OnceLock::new();
+    SERVED.get_or_init(|| Served::new("kiln-stimulus", "js", STIMULUS_LOADER_JS.to_owned()))
+}
+
+/// The URLs of Stimulus and Kiln's setup for it, preloaded on pages with controllers.
+pub(crate) fn stimulus_urls() -> [&'static str; 2] {
+    [&stimulus_js().url, &stimulus_loader_js().url]
+}
+
+/// The `data-controller` name of a controller module: `controllers/admin/users_controller`
+/// → `admin--users`, `controllers/bulk_edit_controller` → `bulk-edit` (as Stimulus names
+/// them; `assets/stimulus.js` does the same in the browser).
+pub(crate) fn controller_identifier(module: &str) -> Option<String> {
+    let path = module.strip_prefix("controllers/")?.strip_suffix("_controller")?;
+    (!path.is_empty()).then(|| path.replace('/', "--").replace('_', "-"))
+}
+
+/// `config/importmap.toml`: a flat table of module names to files under `assets/` or URLs.
+fn parse_pins(text: &str) -> Result<BTreeMap<String, String>, String> {
+    let table: toml::Table = text.parse().map_err(|e| format!("{PINS_FILE} isn't valid TOML: {e}"))?;
+    table
+        .into_iter()
+        .map(|(name, value)| match value {
+            toml::Value::String(to) => Ok((name, to)),
+            other => Err(format!(
+                "{PINS_FILE}: `{name}` should be a string (a file under assets/ or a URL), not a {}",
+                other.type_str()
+            )),
+        })
+        .collect()
+}
+
+fn is_url(to: &str) -> bool {
+    to.starts_with("https://") || to.starts_with("http://")
 }
 
 fn rich_text_display_js() -> &'static Served {
@@ -184,12 +257,13 @@ fn file_hash(path: &Path) -> Option<String> {
 pub(crate) struct Assets {
     assets: PathBuf,
     public: PathBuf,
+    pins: PathBuf,
 }
 
 impl Assets {
     /// From the app's root directory (the crate with `templates/`, `assets/`, `public/`).
     pub fn at(root: &Path) -> Self {
-        Self { assets: root.join("assets"), public: root.join("public") }
+        Self { assets: root.join("assets"), public: root.join("public"), pins: root.join(PINS_FILE) }
     }
 
     /// From a `templates/` directory: assets live next to it.
@@ -209,11 +283,19 @@ impl Assets {
         Some(format!("/assets/{}", fingerprinted(name, &hash)))
     }
 
-    /// Every JavaScript file under `assets/`, as import-map entries: `application` →
-    /// `/assets/application-…js`, `controllers/hello` → `/assets/controllers/hello-…js`.
-    pub fn importmap(&self) -> BTreeMap<String, String> {
+    /// The pins in `config/importmap.toml` (none if there's no such file).
+    pub fn pins(&self) -> Result<BTreeMap<String, String>, String> {
+        crate::files::read_string(&self.pins).map_or_else(|| Ok(BTreeMap::new()), |text| parse_pins(&text))
+    }
+
+    /// Kiln's modules, every JavaScript file under `assets/` and the app's pins, as
+    /// import-map entries: `application` → `/assets/application-…js`,
+    /// `controllers/hello_controller` → `/assets/controllers/hello_controller-…js`.
+    pub fn importmap(&self) -> Result<BTreeMap<String, String>, String> {
         let mut imports = BTreeMap::from([
             ("@hotwired/turbo".to_owned(), turbo_url().to_owned()),
+            ("@hotwired/stimulus".to_owned(), stimulus_js().url.clone()),
+            ("kiln/stimulus".to_owned(), stimulus_loader_js().url.clone()),
             // Loaded only by pages with an editor (`{{ field(..) }}` on a `RichText`).
             ("lexxy".to_owned(), lexxy_js().url.clone()),
             // Lexxy uploads attachments through Active Storage's `DirectUpload`; Kiln's own.
@@ -227,11 +309,22 @@ impl Assets {
         for path in crate::files::walk(&self.assets) {
             let Ok(relative) = path.strip_prefix(&self.assets) else { continue };
             let name = relative.to_string_lossy().replace('\\', "/");
-            if let (Some(module), Some(url)) = (name.strip_suffix(".js"), self.url(&name)) {
+            let (Some(module), Some(url)) = (name.strip_suffix(".js"), self.url(&name)) else { continue };
+            if let Some(package) = module.strip_prefix("vendor/npm/") {
+                imports.insert(format!("/npm/{package}/+esm"), url);
+            } else if !module.starts_with("vendor/") {
                 imports.insert(module.to_owned(), url);
             }
         }
-        imports
+        for (name, to) in self.pins()? {
+            let url = if is_url(&to) {
+                to
+            } else {
+                self.url(&to).ok_or_else(|| format!("{PINS_FILE} pins `{name}` to `{to}`, which isn't in assets/"))?
+            };
+            imports.insert(name, url);
+        }
+        Ok(imports)
     }
 
     pub fn has_application_js(&self) -> bool {
@@ -268,6 +361,8 @@ pub(crate) fn serve_kiln(request_path: &str) -> Option<Response> {
     }
     [
         (lexxy_js(), "lexxy.js"),
+        (stimulus_js(), "stimulus.js"),
+        (stimulus_loader_js(), "kiln-stimulus.js"),
         (rich_text_js(), "rich-text.js"),
         (rich_text_display_js(), "rich-text-display.js"),
         (confirm_js(), "confirm.js"),
@@ -337,5 +432,111 @@ mod tests {
     fn turbo_url_is_fingerprinted() {
         assert!(turbo_url().starts_with("/kiln/turbo-8.0.12-"));
         assert!(serve_kiln(turbo_url()).is_some());
+    }
+
+    #[test]
+    fn stimulus_is_served_with_its_license() {
+        let [stimulus, loader] = stimulus_urls();
+        assert!(stimulus.starts_with("/kiln/stimulus-3.2.2-"), "{stimulus}");
+        let body = String::from_utf8(stimulus_js().body.clone()).unwrap();
+        assert!(body.starts_with("/*! Stimulus 3.2.2") && body.contains("Permission is hereby granted"));
+        assert!(body.contains("export { Application,"));
+        assert!(serve_kiln(stimulus).is_some() && serve_kiln(loader).is_some());
+    }
+
+    #[test]
+    fn controllers_are_named_as_stimulus_names_them() {
+        assert_eq!(controller_identifier("controllers/hello_controller").as_deref(), Some("hello"));
+        assert_eq!(controller_identifier("controllers/admin/users_controller").as_deref(), Some("admin--users"));
+        assert_eq!(controller_identifier("controllers/bulk_edit_controller").as_deref(), Some("bulk-edit"));
+        assert_eq!(controller_identifier("controllers/helpers"), None);
+        assert_eq!(controller_identifier("application"), None);
+        assert_eq!(controller_identifier("controllers/_controller"), None);
+    }
+
+    /// An app directory with `files` (path, contents), removed on drop.
+    struct TempApp(PathBuf);
+
+    impl TempApp {
+        fn new(name: &str, files: &[(&str, &str)]) -> Self {
+            let dir = std::env::temp_dir().join(format!("kiln-assets-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            for (path, contents) in files {
+                let path = dir.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, contents).unwrap();
+            }
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempApp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_import_map_has_controllers_vendored_packages_and_pins() {
+        let app = TempApp::new(
+            "map",
+            &[
+                ("assets/application.js", ""),
+                ("assets/controllers/hello_controller.js", "export default class {}"),
+                ("assets/controllers/admin/users_controller.js", "export default class {}"),
+                ("assets/vendor/npm/@pierre/diffs@1.5.2.js", "import \"/npm/shiki@4.5.0/+esm\""),
+                ("assets/vendor/npm/shiki@4.5.0.js", ""),
+                ("assets/vendor/npm/shiki@4.5.0/wasm.js", ""),
+                ("assets/vendor/sortable.js", ""),
+                (
+                    "config/importmap.toml",
+                    "# pins\n\"@pierre/diffs\" = \"vendor/npm/@pierre/diffs@1.5.2.js\"\nsortable = \"vendor/sortable.js\"\n\"canvas-confetti\" = \"https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/+esm\"\n",
+                ),
+            ],
+        );
+        let imports = Assets::at(&app.0).importmap().unwrap();
+        let url =
+            |name: &str| imports.get(name).map(String::as_str).unwrap_or_else(|| panic!("no `{name}`: {imports:?}"));
+        assert!(url("@hotwired/stimulus").starts_with("/kiln/stimulus-3.2.2-"));
+        assert!(url("kiln/stimulus").starts_with("/kiln/kiln-stimulus-"));
+        assert!(url("controllers/hello_controller").starts_with("/assets/controllers/hello_controller-"));
+        assert!(url("controllers/admin/users_controller").starts_with("/assets/controllers/admin/users_controller-"));
+        // jsDelivr's paths, so vendored packages find their dependencies.
+        assert!(url("/npm/shiki@4.5.0/+esm").starts_with("/assets/vendor/npm/shiki@4.5.0-"));
+        assert!(url("/npm/shiki@4.5.0/wasm/+esm").starts_with("/assets/vendor/npm/shiki@4.5.0/wasm-"));
+        assert!(url("@pierre/diffs").starts_with("/assets/vendor/npm/@pierre/diffs@1.5.2-"));
+        assert!(url("sortable").starts_with("/assets/vendor/sortable-"));
+        assert_eq!(url("canvas-confetti"), "https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/+esm");
+        // Vendored files are reached through pins, not by path.
+        assert!(!imports.keys().any(|k| k.starts_with("vendor/")), "{imports:?}");
+    }
+
+    #[test]
+    fn pages_start_stimulus_only_when_there_are_controllers() {
+        let without = TempApp::new("no-controllers", &[("assets/application.js", "")]);
+        let html = crate::view::javascript_importmap(&Assets::at(&without.0)).unwrap().to_string();
+        assert!(!html.contains("import \"kiln/stimulus\""), "{html}");
+        assert!(!html.contains("modulepreload\" href=\"/kiln/stimulus-"), "only mapped, not preloaded: {html}");
+
+        let with = TempApp::new("controllers", &[("assets/controllers/admin/users_controller.js", "")]);
+        let html = crate::view::javascript_importmap(&Assets::at(&with.0)).unwrap().to_string();
+        assert!(html.contains("import \"@hotwired/turbo\"; import \"kiln/confirm\";"), "{html}");
+        assert!(html.contains(" import \"kiln/stimulus\";</script>"), "{html}");
+        for url in stimulus_urls() {
+            assert!(html.contains(&format!("<link rel=\"modulepreload\" href=\"{url}\">")), "{html}");
+        }
+        assert!(html.contains("<link rel=\"modulepreload\" href=\"/assets/controllers/admin/users_controller-"));
+    }
+
+    #[test]
+    fn bad_pins_are_errors() {
+        let missing = TempApp::new("missing-pin", &[("config/importmap.toml", "diffs = \"vendor/diffs.js\"\n")]);
+        let error = Assets::at(&missing.0).importmap().unwrap_err();
+        assert!(error.contains("pins `diffs` to `vendor/diffs.js`, which isn't in assets/"), "{error}");
+        let table = TempApp::new("table-pin", &[("config/importmap.toml", "[diffs]\nto = \"x\"\n")]);
+        let error = Assets::at(&table.0).importmap().unwrap_err();
+        assert!(error.contains("`diffs` should be a string"), "{error}");
+        let none = TempApp::new("no-pins", &[]);
+        assert!(Assets::at(&none.0).pins().unwrap().is_empty());
     }
 }

@@ -45,3 +45,5 @@ object_store.workspace = true
 multer.workspace = true
 bytes.workspace = true
 image.workspace = true
+# `config/importmap.toml`: the app's import-map pins.
+toml.workspace = true

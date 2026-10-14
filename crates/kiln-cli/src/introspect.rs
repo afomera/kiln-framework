@@ -5,7 +5,8 @@
 //!   their arguments and pipelines, records with columns and relations, jobs, schedules,
 //!   notifications and mail previews.
 //! - What only the source says: views and their templates, forms and their validations,
-//!   policies, ops, mail, parts, config, and the templates on disk.
+//!   policies, ops, mail, parts, config, the templates on disk, Stimulus controllers and
+//!   import-map pins.
 //!
 //! `--json` prints one JSON object; without it, a summary to read.
 
@@ -140,6 +141,17 @@ pub fn scan(app: &App) -> Value {
         .into_iter()
         .filter_map(|p| p.strip_prefix(app.path("templates")).ok().map(|p| p.to_string_lossy().replace('\\', "/")))
         .collect();
+    let controllers: Vec<Value> = crate::importmap::controllers(&app.root)
+        .into_iter()
+        .map(|(identifier, file)| json!({ "identifier": identifier, "file": file }))
+        .collect();
+    let pins: Vec<Value> = fs::read_to_string(app.path(crate::importmap::PINS))
+        .ok()
+        .and_then(|text| crate::importmap::pins(&text).ok())
+        .into_iter()
+        .flatten()
+        .map(|(name, to)| json!({ "name": name, "to": to }))
+        .collect();
     json!({
         "views": views,
         "forms": forms,
@@ -149,6 +161,8 @@ pub fn scan(app: &App) -> Value {
         "mail": mail,
         "config": config,
         "templates": templates,
+        "stimulus_controllers": controllers,
+        "importmap_pins": pins,
     })
 }
 
@@ -229,6 +243,10 @@ fn summary(report: &Value) -> String {
         format!("{}: {}", s(&v["name"]), s(&v["description"]))
     });
     simple(&mut out, "config", &list("config"), &|v| format!("{} ({})", s(&v["name"]), field_names(v)));
+    simple(&mut out, "stimulus controllers", &list("stimulus_controllers"), &|v| {
+        format!("data-controller=\"{}\"  {}", s(&v["identifier"]), s(&v["file"]))
+    });
+    simple(&mut out, "import map pins", &list("importmap_pins"), &|v| format!("{} -> {}", s(&v["name"]), s(&v["to"])));
     let _ = writeln!(out, "\n{} templates. `kiln introspect --json` has every detail.", list("templates").len());
     out
 }
@@ -394,6 +412,8 @@ mod tests {
             "/// Makes one.\npub async fn create_post(ctx: &Ctx, input: Valid<PostForm>) -> Result<Post> { todo!() }\nfn helper() {}\n",
         );
         write("templates/posts/show.html.jinja", "");
+        write("assets/controllers/admin/users_controller.js", "");
+        write("config/importmap.toml", "\"@pierre/diffs\" = \"vendor/npm/@pierre/diffs@1.5.2.js\"\n");
         fs::create_dir_all(dir.join("src/actions")).unwrap();
         let app = App { root: dir.clone(), package: "demo".into() };
 
@@ -412,6 +432,9 @@ mod tests {
             "async fn create_post(ctx: &Ctx, input: Valid<PostForm>) -> Result<Post>"
         );
         assert_eq!(out["templates"][0], "posts/show.html.jinja");
+        assert_eq!(out["stimulus_controllers"][0]["identifier"], "admin--users");
+        assert_eq!(out["stimulus_controllers"][0]["file"], "assets/controllers/admin/users_controller.js");
+        assert_eq!(out["importmap_pins"][0]["name"], "@pierre/diffs");
         fs::remove_dir_all(dir).unwrap();
     }
 }

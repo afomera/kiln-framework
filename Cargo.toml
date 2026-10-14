@@ -45,6 +45,7 @@ object_store = { version = "0.14", default-features = false, features = ["aws", 
 multer = "3"
 bytes = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+toml = "1"
 
 # Debug builds keep file:line backtraces but not full debuginfo, and none for
 # dependencies: most of target/ was debuginfo object files.

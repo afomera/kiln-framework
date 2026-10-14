@@ -7,7 +7,15 @@ fn main() {
     if std::env::var("PROFILE").as_deref() != Ok("release") {
         return;
     }
-    for path in ["templates", "assets", "public", "db/migrations", "db/snapshot.json", "config/secrets.enc"] {
+    for path in [
+        "templates",
+        "assets",
+        "public",
+        "db/migrations",
+        "db/snapshot.json",
+        "config/secrets.enc",
+        "config/importmap.toml",
+    ] {
         if std::path::Path::new(path).exists() {
             println!("cargo:rerun-if-changed={path}");
         }

@@ -1855,6 +1855,7 @@ dependencies = [
  "syn 2.0.119",
  "thiserror 2.0.21",
  "tokio",
+ "toml",
  "tower",
  "tracing",
 ]
@@ -1872,6 +1873,7 @@ dependencies = [
  "ratatui",
  "serde_json",
  "syn 2.0.119",
+ "toml",
  "unicode-width",
 ]
 
