@@ -102,6 +102,7 @@ fn collect(app: &App) -> Result<(Findings, Vec<String>), String> {
             lint_transactions(&relative, &file, &mut findings);
         }
     }
+    lint_javascript(app, &mut findings);
 
     if compiled {
         eprintln!("kiln check: schema and templates");
@@ -648,6 +649,110 @@ fn app_lints(app: &App, findings: &mut Findings) -> Result<(), String> {
     Ok(())
 }
 
+/// K0404: every `data-controller` in a template names a Stimulus controller the app has.
+/// K0405: every pin in config/importmap.toml loads.
+fn lint_javascript(app: &App, findings: &mut Findings) {
+    let mut known: BTreeSet<String> =
+        crate::importmap::controllers(&app.root).into_iter().map(|(identifier, _)| identifier).collect();
+    // Controllers registered by hand: `application.register("sortable", Sortable)`.
+    for path in files_with(&app.path("assets"), ".js") {
+        if path.starts_with(app.path("assets/vendor")) {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        known.extend(registered_controllers(&text));
+    }
+    for path in files_with(&app.path("templates"), ".jinja") {
+        let relative = path.strip_prefix(&app.root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        for (i, line) in text.lines().enumerate() {
+            for identifier in data_controllers(line) {
+                if !known.contains(identifier) {
+                    let file =
+                        format!("assets/controllers/{}_controller.js", identifier.replace("--", "/").replace('-', "_"));
+                    findings.error(
+                        "K0404",
+                        format!(
+                            "`data-controller=\"{identifier}\"` has no controller; add {file} (`kiln g controller {}`)",
+                            identifier.replace("--", "/").replace('-', "_")
+                        ),
+                        Some(&relative),
+                        Some(i + 1),
+                    );
+                }
+            }
+        }
+    }
+    let pins_file = crate::importmap::PINS;
+    let Ok(text) = fs::read_to_string(app.path(pins_file)) else { return };
+    let table: toml::Table = match text.parse() {
+        Ok(table) => table,
+        Err(e) => {
+            findings.error("K0405", format!("{pins_file} isn't valid TOML: {}", e.message()), Some(pins_file), None);
+            return;
+        }
+    };
+    for (name, to) in table {
+        let line = text.lines().position(|l| l.contains(&name)).map(|i| i + 1);
+        match to.as_str() {
+            None => findings.error(
+                "K0405",
+                format!("`{name}` should be a string: a file under assets/ or a URL"),
+                Some(pins_file),
+                line,
+            ),
+            Some(to)
+                if !to.starts_with("https://")
+                    && !to.starts_with("http://")
+                    && !app.path("assets").join(to).is_file() =>
+            {
+                findings.error(
+                    "K0405",
+                    format!("`{name}` is pinned to `{to}`, which isn't in assets/"),
+                    Some(pins_file),
+                    line,
+                )
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+/// The names in a line's `data-controller="a b"` attributes. Values with template
+/// expressions aren't checked.
+fn data_controllers(line: &str) -> Vec<&str> {
+    let mut out = vec![];
+    let mut rest = line;
+    while let Some(start) = rest.find("data-controller=") {
+        let after = &rest[start + "data-controller=".len()..];
+        let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            rest = after;
+            continue;
+        };
+        let Some(end) = after[1..].find(quote) else { break };
+        let value = &after[1..1 + end];
+        if !value.contains('{') {
+            out.extend(value.split_whitespace());
+        }
+        rest = &after[1 + end..];
+    }
+    out
+}
+
+/// `register("name", ..)` calls in an app's own JavaScript.
+fn registered_controllers(source: &str) -> Vec<String> {
+    source
+        .split(".register(")
+        .skip(1)
+        .filter_map(|call| {
+            let call = call.trim_start();
+            let quote = call.chars().next().filter(|c| matches!(c, '"' | '\'' | '`'))?;
+            let end = call[1..].find(quote)?;
+            Some(call[1..1 + end].to_owned())
+        })
+        .collect()
+}
+
 /// Every `path("..")` in a template names a real route; every include/extends exists.
 fn lint_templates(app: &App, routes: &BTreeSet<String>, findings: &mut Findings) {
     let root = app.path("templates");
@@ -770,6 +875,47 @@ pub async fn delete_event(ctx: &Ctx, event: Authorized<Delete, Event>) -> Result
         lint_writes("src/actions/rsvps/destroy.rs", &syn::parse_file(source).unwrap().items, &guarded, &mut findings);
         assert_eq!(codes(&findings), [("K0301".into(), Some(2))]);
         assert!(findings.0[0].message.contains("Rsvp::query().delete_all"), "{}", findings.0[0].message);
+    }
+
+    #[test]
+    fn reads_stimulus_controller_names() {
+        assert_eq!(data_controllers(r#"<div data-controller="tabs admin--users" id="x">"#), ["tabs", "admin--users"]);
+        assert_eq!(data_controllers("<a data-controller='copy'>"), ["copy"]);
+        assert!(data_controllers(r#"<div data-controller="{{ name }}">"#).is_empty());
+        assert_eq!(
+            registered_controllers("application.register(\"sortable\", S)\nStimulus.register('x', X)"),
+            ["sortable", "x"]
+        );
+    }
+
+    #[test]
+    fn templates_name_controllers_that_exist_and_pins_load() {
+        let dir = std::env::temp_dir().join(format!("kiln-check-js-{}", std::process::id()));
+        let write = |path: &str, text: &str| {
+            let path = dir.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write("assets/controllers/admin/users_controller.js", "");
+        write(
+            "assets/application.js",
+            "import { application } from \"kiln/stimulus\"\napplication.register(\"sortable\", Sortable)\n",
+        );
+        write(
+            "templates/posts/index.html.jinja",
+            "<div data-controller=\"admin--users sortable\">\n<div data-controller=\"hello-world\">\n",
+        );
+        write("config/importmap.toml", "ok = \"https://esm.sh/ok@1\"\ngone = \"vendor/gone.js\"\n");
+        let app = App { root: dir.clone(), package: "demo".into() };
+        let mut findings = Findings::default();
+        lint_javascript(&app, &mut findings);
+        assert_eq!(codes(&findings), [("K0404".into(), Some(2)), ("K0405".into(), Some(2))]);
+        assert!(
+            findings.0[0].message.contains("assets/controllers/hello_world_controller.js"),
+            "{}",
+            findings.0[0].message
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

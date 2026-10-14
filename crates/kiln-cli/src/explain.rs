@@ -190,6 +190,31 @@ relative to templates/. This one isn't there, so the page would fail when it ren
 Check the path, including the `.html.jinja` extension, or create the template.",
     ),
     (
+        "K0404",
+        "A template uses a Stimulus controller that doesn't exist",
+        "Kiln registers every file in assets/controllers/ as a Stimulus controller, named after
+its path: `hello_controller.js` is `data-controller=\"hello\"`, `admin/users_controller.js`
+is `admin--users`, `bulk_edit_controller.js` is `bulk-edit`. This `data-controller` names
+none of them, so the element would silently do nothing.
+
+Fix the name, or create the controller with `kiln g controller <name>`. A controller
+registered by hand in the app's JavaScript (`application.register(\"sortable\", Sortable)`
+with `import { application } from \"kiln/stimulus\"`) counts too.",
+    ),
+    (
+        "K0405",
+        "An import-map pin won't load",
+        "config/importmap.toml maps module names to a file under assets/ or a URL:
+
+    \"@pierre/diffs\" = \"vendor/npm/@pierre/diffs@1.5.2.js\"
+    \"canvas-confetti\" = \"https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/+esm\"
+
+This entry isn't valid TOML, isn't a string, or points at a file that isn't there, so every
+page's `{{ javascript_importmap() }}` would fail to render. Re-run
+`kiln importmap pin <package>` to download the package again, fix the path, or remove the
+line (`kiln importmap unpin <package>`).",
+    ),
+    (
         "K0412",
         "A template reads a relation the view didn't load",
         "Relations are loaded only when the view's type says so, which is what makes N+1 queries

@@ -63,3 +63,18 @@ async fn turbo_ships_with_kiln_through_the_import_map(app: TestApp) -> Result {
     assert_eq!(res.headers["content-type"], "text/javascript; charset=utf-8");
     Ok(())
 }
+
+#[kiln::test]
+async fn stimulus_ships_with_kiln_through_the_import_map(app: TestApp) -> Result {
+    let page = app.get_html(posts::index::path()).await;
+    page.assert_contains(r#""@hotwired/stimulus":"/kiln/stimulus-3.2.2-"#)
+        .assert_contains(r#""kiln/stimulus":"/kiln/kiln-stimulus-"#);
+    // The blog has no controllers, so its pages don't start Stimulus.
+    page.assert_not_contains(r#"import "kiln/stimulus""#);
+    let stimulus = linked(&page.text, "/kiln/stimulus-");
+    let res = app.get(stimulus).await;
+    res.assert_status(200).assert_contains("Stimulus 3.2.2").assert_contains("MIT License");
+    assert_eq!(res.headers["content-type"], "text/javascript; charset=utf-8");
+    assert_eq!(res.headers["cache-control"], "public, max-age=31536000, immutable");
+    Ok(())
+}

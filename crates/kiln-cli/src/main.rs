@@ -9,6 +9,7 @@ mod dev;
 mod edit;
 mod explain;
 mod generate;
+mod importmap;
 mod introspect;
 mod mcp;
 mod names;
@@ -46,6 +47,10 @@ enum Command {
     /// Generate code in the app's conventional shape.
     #[command(visible_alias = "g", subcommand)]
     Generate(generate::Generate),
+    /// JavaScript packages for the import map: `importmap pin @pierre/diffs[@1.5.2]` downloads
+    /// one into assets/vendor/npm/ and pins it in config/importmap.toml; `importmap unpin`.
+    #[command(subcommand)]
+    Importmap(importmap::Importmap),
     /// Schema workflow: `db diff <name>`, `db migrate`, `db status`, `db seed`, `db reset`.
     Db {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -147,6 +152,7 @@ fn main() -> ExitCode {
         match cli.command {
             Command::New { .. } | Command::Explain { .. } => unreachable!("handled above"),
             Command::Generate(g) => g.run(&app).map(|()| true),
+            Command::Importmap(i) => i.run(&app).map(|()| true),
             Command::Db { args } => {
                 app.run_binary(&[&["db"], &args.iter().map(String::as_str).collect::<Vec<_>>()[..]].concat())
             }

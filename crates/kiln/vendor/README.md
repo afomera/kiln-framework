@@ -5,9 +5,10 @@ Served by kiln at fixed, fingerprinted URLs so apps need no Node toolchain or CD
 | File | Source | License |
 | --- | --- | --- |
 | `turbo-8.0.12.js` | `@hotwired/turbo@8.0.12`, `dist/turbo.es2017-esm.js` | MIT (`turbo-MIT-LICENSE`, from the hotwired/turbo repository) |
+| `stimulus-3.2.2.js` | `@hotwired/stimulus@3.2.2`, `dist/stimulus.js` (its banner says 3.2.1, as upstream's does) | MIT (`stimulus-MIT-LICENSE`, the package's `LICENSE.md`; Kiln prepends it when serving) |
 | `lexxy/` | The `lexxy` gem (Basecamp's rich text editor, on Lexical): `lexxy.min.js` and its three stylesheets, unmodified | MIT (`lexxy/MIT-LICENSE`, Copyright Jorge Manrubia), plus the libraries it bundles in `lexxy/THIRD-PARTY-NOTICES.md` |
 
-To upgrade Turbo, replace the file, update the version in `src/assets.rs`, and run the blog's tests.
+To upgrade Turbo or Stimulus, replace the file, update the version in `src/assets.rs`, and run the blog's tests.
 
 To upgrade Lexxy, run `make vendor-lexxy VERSION=x.y.z` (or `scripts/vendor-lexxy.sh x.y.z`): it verifies the gem
 against rubygems.org's checksum, copies the files, and writes `VERSION` and `SHA256SUMS`. Kiln reads the version from

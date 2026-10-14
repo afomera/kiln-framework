@@ -3,10 +3,10 @@ use quote::quote;
 
 /// What a deployed app reads at runtime, relative to its crate.
 const DIRS: &[&str] = &["templates", "assets", "public", "db/migrations"];
-const FILES: &[&str] = &["db/snapshot.json", "config/secrets.enc"];
+const FILES: &[&str] = &["db/snapshot.json", "config/secrets.enc", "config/importmap.toml"];
 
 /// `kiln::embedded_files!()`: the app's templates, assets, public files, migrations, schema
-/// snapshot and encrypted secrets, compiled into release builds (debug builds read from
+/// snapshot, encrypted secrets and import-map pins, compiled into release builds (debug builds read from
 /// disk, so they get nothing).
 pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     if !input.is_empty() {

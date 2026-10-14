@@ -18,6 +18,8 @@ Run them from the app directory.
 | Background job | `kiln g job send_digest` |
 | Email | `kiln g mail welcome_email` (with a preview at `/kiln/mail/previews`) |
 | Notification (inbox + email + live) | `kiln g notification comment_posted [--to User]` (adds the `/notifications` inbox and `/settings/notifications` the first time) |
+| Stimulus controller | `kiln g controller clipboard` → `assets/controllers/clipboard_controller.js` (`data-controller="clipboard"`; `admin/users` is `admin--users`) |
+| JavaScript package (no npm) | `kiln importmap pin @pierre/diffs[@1.5.2]` downloads it from jsDelivr into `assets/vendor/npm/` and pins it in `config/importmap.toml`; then `import { .. } from "@pierre/diffs"`. `--cdn` pins the CDN URL instead; `kiln importmap unpin <pkg>` |
 | Passwords, sign-up, resets, sign-in list | `kiln g auth` (once; replaces the demo sign-in) |
 | Schema change | edit the record struct → `kiln db diff <snake_case_name>` → review the SQL → `kiln db migrate` |
 | Redo a migration | `kiln db undo` (deletes the newest generated migration and restores the snapshot), then `kiln db diff` again. Never delete migration files by hand. |
@@ -82,6 +84,8 @@ generated tests passing.
 | JSON shape | `src/views/api/` | `#[derive(Serialize)]` struct; don't serialize records directly |
 | Partial (a fragment for Turbo Streams, broadcasts, includes) | `src/views/{resource}/{name}.rs` + `templates/{resource}/_{name}.html.jinja` | `#[derive(View)] #[view(template = "comments/_comment", layout = none)]` |
 | CSS, JS, images | `assets/` (JS entry point: `assets/application.js`) | linked with `{{ asset("app.css") }}`; JS modules load through the import map |
+| Stimulus controllers | `assets/controllers/{name}_controller.js` | `export default class extends Controller` (from `"@hotwired/stimulus"`); registered automatically as `data-controller="{name}"` (`_` → `-`, `/` → `--`) |
+| Import-map pins | `config/importmap.toml` | `"@pierre/diffs" = "vendor/npm/@pierre/diffs@1.5.2.js"` (a file under `assets/`) or `"x" = "https://.."`; written by `kiln importmap pin` |
 | Files served as-is | `public/` (`robots.txt`, `favicon.svg`) | served at the site root when no route matches |
 | Presentation methods | `src/parts/{record}.rs` | `#[part] impl Record` + `#[record(.., parts)]` |
 | Test data | `src/factories.rs` | `impl Factory for Record`; defaults are placeholders, override per test with `app.create_with::<T>(\|n\| n.field = ..)` |
@@ -167,6 +171,13 @@ generated tests passing.
   `prepend`, `replace`, `update`, `before`, `after`, `remove`, `refresh`. Give list items
   stable ids (`id="comment_{{ comment.id }}"`) so appends don't duplicate. Frame requests
   (`<turbo-frame id="new_comment">`) render pages without the layout.
+- **Stimulus is on** for pages once `assets/controllers/` has a controller: Kiln starts it and
+  registers each one from the import map, no `index.js` to maintain. `kiln check` flags a
+  `data-controller` with no file (K0404) and a pin that won't load (K0405). Register a
+  package's controller by hand with `import { application } from "kiln/stimulus"`. Pinned
+  packages are served from the app (`assets/vendor/npm/` mirrors jsDelivr's paths, so their
+  imports resolve there); only modules they load on demand go to jsDelivr, via the `"/npm/"`
+  pin. Don't edit `assets/vendor/npm/` by hand: `pin`/`unpin` delete files no pin reaches.
 - **Realtime:** in an op, `tx.broadcast(&post::stream_name(post.id), TurboStream::new().append(..))`
   inside the same `ctx.db.transaction` as the write (a rolled-back write never
   broadcasts); in the page, `{{ turbo_stream_from("post:" ~ post.id) }}` (it renders a signed

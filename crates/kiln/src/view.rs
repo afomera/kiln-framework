@@ -417,23 +417,38 @@ fn csrf_meta() -> std::result::Result<Value, minijinja::Error> {
     )))
 }
 
-/// `{{ javascript_importmap() }}`: in the layout's `<head>`. Maps `@hotwired/turbo` and
-/// every `assets/**/*.js` file, then loads Turbo and `assets/application.js`.
-fn javascript_importmap(assets: &crate::assets::Assets) -> Value {
-    let imports = assets.importmap();
+/// `{{ javascript_importmap() }}`: in the layout's `<head>`. Maps Kiln's modules, every
+/// `assets/**/*.js` file and the pins in `config/importmap.toml`, then loads Turbo, Stimulus
+/// (when there are controllers in `assets/controllers/`) and `assets/application.js`.
+pub(crate) fn javascript_importmap(assets: &crate::assets::Assets) -> std::result::Result<Value, minijinja::Error> {
+    let imports = assets.importmap().map_err(|e| minijinja::Error::new(ErrorKind::InvalidOperation, e))?;
     let json = serde_json::json!({ "imports": imports }).to_string().replace("</", "<\\/");
+    let controllers: Vec<&str> = imports
+        .iter()
+        .filter(|(name, _)| crate::assets::controller_identifier(name).is_some())
+        .map(|(_, url)| url.as_str())
+        .collect();
+    let mut preload = vec![crate::assets::turbo_url(), crate::assets::confirm_url()];
+    if !controllers.is_empty() {
+        preload.extend(crate::assets::stimulus_urls());
+        preload.extend(&controllers);
+    }
     let mut html = format!("<script type=\"importmap\">{json}</script>\n");
-    html.push_str(&format!("<link rel=\"modulepreload\" href=\"{}\">\n", crate::assets::turbo_url()));
-    html.push_str(&format!("<link rel=\"modulepreload\" href=\"{}\">\n", crate::assets::confirm_url()));
+    for url in preload {
+        html.push_str(&format!("<link rel=\"modulepreload\" href=\"{}\">\n", escape_attribute(url)));
+    }
     html.push_str("<script type=\"module\">import \"@hotwired/turbo\"; import \"kiln/confirm\";");
     if crate::dev_reload::enabled() {
         html.push_str(" import \"kiln/dev-reload\";");
+    }
+    if !controllers.is_empty() {
+        html.push_str(" import \"kiln/stimulus\";");
     }
     if assets.has_application_js() {
         html.push_str(" import \"application\";");
     }
     html.push_str("</script>");
-    Value::from_safe_string(html)
+    Ok(Value::from_safe_string(html))
 }
 
 /// `{{ csrf_field() }}`: the hidden input every POST form needs.
