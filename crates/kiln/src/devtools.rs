@@ -36,6 +36,7 @@ mod icon {
         r#"<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>"#;
     pub const LAYERS: &str = r#"<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>"#;
     pub const BELL: &str = r#"<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>"#;
+    pub const WEBHOOK: &str = r#"<path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"/><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"/><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/>"#;
     pub const ARROW: &str = r#"<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>"#;
 }
 
@@ -54,6 +55,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     ("schedules", "Schedules", icon::CALENDAR),
     ("batches", "Batches", icon::LAYERS),
     ("mail", "Mail", icon::MAIL),
+    ("webhooks", "Webhooks", icon::WEBHOOK),
     ("broadcasts", "Broadcasts", icon::RADIO),
     ("cache", "Cache", icon::ZAP),
     ("notifications", "Notifications", icon::BELL),
@@ -154,6 +156,9 @@ async fn serve_page(ctx: &crate::Ctx, path: &str, query: Option<&str>) -> Option
         "/kiln/live" => return Some(live(db.clone(), param(&query, "page").to_owned())),
         p if p == "/kiln/mail" || p.starts_with("/kiln/mail/") => {
             return crate::mail::serve_outbox(ctx, path, &query).await;
+        }
+        p if p == "/kiln/webhooks" || p.starts_with("/kiln/webhooks/") => {
+            return crate::webhooks::serve_log(ctx, path, &query).await;
         }
         _ => return None,
     };
@@ -322,7 +327,7 @@ fn routes_page(query: &Query) -> Response {
         .iter()
         .filter(|r| method.is_empty() || method == "all" || r.method == method)
         .filter(|r| pipeline.is_empty() || pipeline == "all" || r.pipeline == pipeline)
-        .filter(|r| matches(query, &[r.path, &r.name(), r.file]))
+        .filter(|r| matches(query, &[r.path, r.name(), r.file]))
         .collect();
     let rows: String = shown
         .iter()
@@ -330,7 +335,7 @@ fn routes_page(query: &Query) -> Response {
             format!(
                 "<tr><td><span class=\"pill {m}\">{m}</span></td><td><code>{}</code></td><td>{}</td><td class=muted>{}:{}</td><td class=muted>{}</td></tr>",
                 esc(r.path),
-                esc(&r.name()),
+                esc(r.name()),
                 esc(r.file),
                 r.line,
                 r.pipeline,
@@ -1178,6 +1183,7 @@ fn signature_parts(page: &str) -> Vec<(Option<crate::db::Role>, &'static str)> {
         COALESCE(SUM(\"fired_success\" + \"fired_failure\" + \"fired_complete\" + \"fired_cancel\"), 0) || ':' || COALESCE(SUM(CASE WHEN \"status\" = 'cancelled' THEN 1 ELSE 0 END), 0) FROM \"kiln_batches\")";
     const SCHEDULES: &str = "(SELECT COUNT(*) || ':' || COALESCE(SUM(\"last_run_at\"), 0) || ':' || COALESCE(SUM(\"paused\"), 0) || ':' || COALESCE(SUM(\"next_run_at\"), 0) FROM \"kiln_schedules\")";
     const MAIL: &str = "(SELECT COALESCE(MAX(\"id\"), 0) FROM \"kiln_mail\")";
+    const WEBHOOKS: &str = "(SELECT COALESCE(MAX(\"id\"), 0) FROM \"kiln_webhook_deliveries\")";
     const BROADCASTS: &str = "(SELECT COALESCE(MAX(\"id\"), 0) FROM \"kiln_stream_messages\")";
     const SIGN_INS: &str = "(SELECT COUNT(*) || ':' || COALESCE(MAX(\"id\"), 0) FROM \"kiln_sessions\")";
     const NOTIFICATIONS: &str = "(SELECT COUNT(*) || ':' || COALESCE(SUM(CASE WHEN \"read_at\" IS NULL THEN 1 ELSE 0 END), 0) FROM \"kiln_notifications\")";
@@ -1189,6 +1195,7 @@ fn signature_parts(page: &str) -> Vec<(Option<crate::db::Role>, &'static str)> {
         "batches" => vec![(queue, BATCHES), (queue, JOBS)],
         "schedules" => vec![(queue, SCHEDULES)],
         "mail" => vec![(None, MAIL)],
+        "webhooks" => vec![(None, WEBHOOKS)],
         "broadcasts" => vec![(streams, BROADCASTS)],
         "cache" => vec![(cache, CACHE)],
         "sign_ins" => vec![(None, SIGN_INS)],

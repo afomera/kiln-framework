@@ -20,6 +20,7 @@ mod error;
 mod error_page;
 mod files;
 pub mod form;
+pub mod http;
 pub mod jobs;
 pub mod mail;
 mod migrate;
@@ -39,6 +40,7 @@ pub mod testing;
 pub mod turbo;
 mod types;
 pub mod view;
+pub mod webhooks;
 mod welcome;
 
 pub use app::{App, Ctx};

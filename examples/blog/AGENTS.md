@@ -259,6 +259,22 @@ generated tests passing.
 - **Testing mail:** `app.perform_enqueued_jobs().await?`, then
   `app.assert_mailed("ada@example.com", "Welcome").await?` (returns the message), or
   `app.outbox()`; `mail.message()?` renders without sending.
+- **Webhooks (outbound):** the app owns its endpoints as a record (url, secret, events, active);
+  `Webhook::new(&hook.url, hook.secret.expose()).for_record(&hook).deliver_later(&tx, "issue.opened", &payload).await?`
+  inside the write's transaction. A job POSTs the JSON signed as `X-Kiln-Signature: t=<unix>,v1=<hex HMAC-SHA256 of "t.body">`
+  with `X-Kiln-Event` and `X-Kiln-Delivery` (one id across retries), retries non-2xx and timeouts (15 attempts, ~4h),
+  and stops on `410 Gone` (`webhooks::Options::new().on_gone(|ctx, delivery| ..)` deactivates the hook;
+  `.header_prefix("X-Forked")`, `.hub_signature()` for GitHub-style receivers; register with `app.provide(..)`).
+  Private/loopback destinations are refused (`HTTP_ALLOW_PRIVATE_NETWORKS=1` allows; on in development).
+  Every attempt is logged: `db.webhook_deliveries(&hook, 50)`, `db.webhook_delivery(id)` (check its `record_id`
+  before showing), `webhook.for_record(&hook).redeliver(&db, id)` (same delivery id, current URL and secret),
+  `deliver_now(&ctx, "ping", &payload)` for test buttons; `/kiln/webhooks` shows the log. In development and tests
+  deliveries are captured, not sent (`WEBHOOK_DELIVERY=send` sends). Receiving: `kiln::webhooks::verify(secret,
+  header, &body, SignedDuration::from_mins(5))?`. For other outbound calls to user-supplied URLs use
+  `kiln::http::Client::new()` (same SSRF guard, timeouts, bounded bodies, no redirects).
+- **Testing webhooks:** `app.perform_enqueued_jobs().await?`, then `app.assert_webhook_sent("issue.opened").await?`
+  (returns the `Delivery`: `.json()`, `.header(..)`, `.status`) or `app.webhooks_sent()`. `app.receive_webhooks(|req| (500, "".into()))`
+  answers deliveries in-process instead, to test verification, retries and 410.
 - **Config:** each field reads its env var (`smtp_url` → `SMTP_URL`), then the encrypted
   secrets, then `#[config(default = "..")]`, then (outside production) `dev_default`.
   `Option<T>` fields are optional; wrap credentials in `Secret<T>` (prints `[redacted]`;

@@ -44,6 +44,8 @@ ammonia = "4"
 object_store = { version = "0.14", default-features = false, features = ["aws", "gcp", "fs"] }
 multer = "3"
 bytes = "1"
+# Outbound HTTP (webhooks): already in the tree through object_store, so no second stack.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 # Debug builds keep file:line backtraces but not full debuginfo, and none for

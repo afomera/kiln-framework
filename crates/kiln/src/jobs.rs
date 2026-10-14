@@ -909,6 +909,9 @@ pub async fn work(ctx: Ctx, concurrency: usize) {
             if let Err(e) = crate::cache::purge_expired(&upkeep.db).await {
                 tracing::error!(target: "kiln::cache", error = %e, "removing expired cache entries failed");
             }
+            if let Err(e) = crate::webhooks::purge_old_deliveries(&upkeep.db).await {
+                tracing::error!(target: "kiln::webhooks", error = %e, "removing old webhook deliveries failed");
+            }
             ticks += 1;
             tokio::time::sleep(Duration::from_secs(300)).await;
         }
