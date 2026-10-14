@@ -2,7 +2,7 @@
 //! nothing extra to run.
 //!
 //! ```ignore
-//! #[action(GET "/api/repos", pipeline = Api)]
+//! #[action(GET "/api/repos", pipeline = Api, scope = "repo:read")]
 //! pub async fn index(ctx: Ctx, user: Current<User>, limit: RateLimit) -> Result<Json<Vec<RepoJson>>> {
 //!     limit.check("api", 5000, SignedDuration::from_hours(1)).await?;     // per user
 //!     ..

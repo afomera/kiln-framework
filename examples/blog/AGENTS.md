@@ -170,8 +170,11 @@ generated tests passing.
   `src/app.rs`), are stored as SHA-256 in `kiln_api_tokens` and can't be shown twice:
   `kiln::auth::create_api_token(&ctx.db, &*user, "Laptop", &["repo:read"], Some(ttl))` returns
   `.secret.expose()` once; `api_tokens_of`, `revoke_api_token(&db, &user, id)`, `revoke_api_tokens`.
-  `user.require_scope("repo:write")?` is a 403 (K1021) for tokens without it; cookie sign-ins have
-  every scope, and actions that don't check accept any token. Service callbacks with a shared
+  Scopes are deny-by-default: an API action that takes `Current<..>` names the scope a token
+  needs, `#[action(DELETE "/api/repos/{id}", pipeline = Api, scope = "repo:admin")]`, or it won't
+  compile; `scope = "any"` takes every token (`/api/me`). A token without the scope gets a 403
+  (K1021) before the action runs; `user.require_scope("repo:write")?` checks more inside one.
+  Cookie sign-ins have every scope. Service callbacks with a shared
   secret from config take `headers: HeaderMap` and check
   `kiln::auth::bearer_matches(&headers, config.hook_secret.expose())` (constant time). Never log tokens.
 - **Rate limits:** take `limit: RateLimit` and call `limit.check("api", 5000, SignedDuration::from_hours(1)).await?`

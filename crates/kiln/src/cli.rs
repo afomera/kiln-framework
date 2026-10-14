@@ -462,6 +462,7 @@ impl Cli {
                     "file": r.file,
                     "line": r.line,
                     "pipeline": r.pipeline,
+                    "scope": r.scope,
                     "params": params,
                     "signed_in": wrapped("Current").or(optional_actor.clone()),
                     "sign_in_required": wrapped("Current").is_some(),

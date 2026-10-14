@@ -211,7 +211,11 @@ fn summary(report: &Value) -> String {
             extras.push(if optional { format!("signed in or out: {user}") } else { format!("signed in: {user}") });
         }
         if r["accepts_api_tokens"].as_bool() == Some(true) {
-            extras.push("api tokens".to_owned());
+            extras.push(match r["scope"].as_str() {
+                Some("any") => "any api token".to_owned(),
+                Some(scope) => format!("api tokens with {scope}"),
+                None => "api tokens".to_owned(),
+            });
         }
         if r["rate_limited"].as_bool() == Some(true) {
             extras.push("rate limited".to_owned());

@@ -42,7 +42,8 @@ pub enum Error {
     PendingMigrations(Vec<String>),
     #[error("invalid or missing CSRF token")]
     Csrf,
-    /// The request's API token lacks a scope the action requires (`require_scope`). 403.
+    /// The request's API token lacks the scope the route declares (`scope = ".."`) or the
+    /// action asks for (`require_scope`); empty when the route takes no tokens. 403.
     #[error("the API token lacks the `{scope}` scope")]
     MissingScope { scope: String },
     /// Too many requests under a rate limit (`RateLimit::check`). 429 with `Retry-After`.
@@ -163,11 +164,15 @@ impl Error {
                 report.hint("Put `{{ csrf_field() }}` inside every `<form method=\"post\">`, or send the token in an `X-CSRF-Token` header.");
                 report.hint("The token rotates on sign-in and sign-out, so reload the form after either.");
             }
+            Error::MissingScope { scope } if scope.is_empty() => {
+                report.message = "This route doesn't accept API tokens: it declares no `scope`.".into();
+                report.hint("Routes made with `#[action(.., pipeline = Api, scope = \"..\")]` accept tokens with that scope (`\"any\"` for any token).");
+            }
             Error::MissingScope { scope } => {
                 report.message = format!("The API token used for this request doesn't have the `{scope}` scope.");
                 report
                     .hint(format!("Create a token that includes `{scope}` (and revoke this one), then retry with it."));
-                report.hint("The action calls `user.require_scope(..)`; cookie sign-ins have every scope.");
+                report.hint("The route declares `scope = \"..\"` (or the action calls `user.require_scope(..)`); cookie sign-ins have every scope.");
             }
             Error::RateLimited { retry_after } => {
                 report.message = format!("Too many requests. Try again in {retry_after} seconds.");

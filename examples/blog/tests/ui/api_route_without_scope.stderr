@@ -1,0 +1,13 @@
+error: API routes that take `Current<..>` say which token scope they need: add `scope = "repo:read"` (the scope a token must have) or `scope = "any"` (any token)
+ --> tests/ui/api_route_without_scope.rs:5:17
+  |
+5 | #[action(DELETE "/api/repos/{id}", pipeline = Api)]
+  |                 ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `blog::records::User`
+ --> tests/ui/api_route_without_scope.rs:2:5
+  |
+2 | use blog::records::User;
+  |     ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

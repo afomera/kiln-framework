@@ -245,9 +245,10 @@ impl<T> Current<T> {
         current_scope().and_then(|scope| scope.cache.api_token.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 
-    /// Checks that the request may act with `scope` (e.g. `"repo:write"`): API tokens need it
-    /// among their scopes; cookie sign-ins have every scope. Otherwise a 403 (K1021) naming
-    /// the missing scope.
+    /// Checks that the request may act with `scope` (e.g. `"repo:write"`) too, beyond the
+    /// route's own `scope = ".."` (which Kiln checks first): for actions that need more only
+    /// sometimes. API tokens need it among their scopes; cookie sign-ins have every scope.
+    /// Otherwise a 403 (K1021) naming the missing scope.
     pub fn require_scope(&self, scope: &str) -> Result<(), Error> {
         let Some(request) = current_scope() else {
             return Err(Error::Integrity(format!(
@@ -264,7 +265,22 @@ impl<T> Current<T> {
 
 async fn load_current<T: Record>(parts: &Parts, ctx: &Ctx) -> Result<Option<T>, Error> {
     let Some(session) = parts.extensions.get::<Session>() else { return Ok(None) };
-    signed_in::<T>(session, &ctx.db).await
+    let record = signed_in::<T>(session, &ctx.db).await?;
+    // Signed in by an API token: the route's `scope` decides, and a route without one
+    // (deny by default) takes no tokens.
+    let token = current_scope().and_then(|s| s.cache.api_token.lock().unwrap_or_else(|e| e.into_inner()).clone());
+    if record.is_some()
+        && let Some(token) = token
+    {
+        let required = parts.extensions.get::<crate::routing::RequiredScope>().and_then(|r| r.0);
+        match required {
+            Some("any") => {}
+            Some(scope) if token.has_scope(scope) => {}
+            Some(scope) => return Err(Error::MissingScope { scope: scope.to_owned() }),
+            None => return Err(Error::MissingScope { scope: String::new() }),
+        }
+    }
+    Ok(record)
 }
 
 /// The signed-in `T`, loaded at most once per request: the action's `Current<T>` and the

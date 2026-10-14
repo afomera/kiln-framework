@@ -1,7 +1,7 @@
 use kiln::prelude::*;
 
-/// The scopes a token can have. API actions check them with `user.require_scope("write")?`;
-/// cookie sign-ins have every scope. Add yours (`repo:read`, `repo:write`, ..) here and in
+/// The scopes a token can have. API routes name the one they need,
+/// `#[action(.., pipeline = Api, scope = "write")]`; cookie sign-ins have every scope. Add yours (`repo:read`, `repo:write`, ..) here and in
 /// the hint below.
 pub const API_SCOPES: &[&str] = &["read", "write"];
 
@@ -11,7 +11,7 @@ pub struct ApiTokenForm {
     #[validate(length(min = 1, max = 100))]
     pub name: String,
     #[form(
-        hint = "Space-separated, from: read write. Leave empty for a token that works only where no scope is required."
+        hint = "Space-separated, from: read write. Leave empty for a token that works only on routes open to any token."
     )]
     #[validate(length(max = 500))]
     pub scopes: Option<String>,

@@ -346,9 +346,14 @@ the message. For browsers, a redirect back with a flash message is often kinder.
     (
         "K1021",
         "Missing token scope",
-        "The request was authenticated by an API token, and the action called
-`user.require_scope(\"repo:write\")` for a scope the token doesn't have. It responds 403
-naming the scope.
+        "The request was authenticated by an API token that lacks the scope the route declares
+(`#[action(.., pipeline = Api, scope = \"repo:write\")]`) or the action asks for
+(`user.require_scope(\"repo:write\")`). It responds 403 naming the scope. A route with no
+`scope` takes no tokens at all.
+
+Scopes are deny-by-default: an API route that takes `Current<..>` won't compile without
+`scope = \"..\"`, so a narrow token (a read-only CI one) can't reach a route whose author
+forgot to check. `scope = \"any\"` accepts every token, for routes like `/api/me`.
 
 The token's owner should create a token with that scope (and revoke the old one). Cookie
 sign-ins have every scope, so this only happens on `pipeline = Api` routes. Scopes are set

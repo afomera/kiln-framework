@@ -11,6 +11,8 @@ struct Args {
     method: Ident,
     path: LitStr,
     pipeline: String,
+    /// `scope = "repo:write"`, the API token scope the route needs (`"any"`: any token).
+    scope: Option<LitStr>,
 }
 
 impl Parse for Args {
@@ -21,6 +23,7 @@ impl Parse for Args {
         }
         let path: LitStr = input.parse()?;
         let mut pipeline = "browser".to_owned();
+        let mut scope = None;
         while !input.is_empty() {
             input.parse::<syn::Token![,]>()?;
             if input.is_empty() {
@@ -28,15 +31,43 @@ impl Parse for Args {
             }
             let key: Ident = input.parse()?;
             input.parse::<syn::Token![=]>()?;
+            if key == "scope" {
+                let value: LitStr = input.parse()?;
+                let text = value.value();
+                let valid = !text.is_empty()
+                    && text.len() <= 64
+                    && text.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'.' | b'_' | b'-'));
+                if !valid {
+                    return Err(Error::new_spanned(
+                        &value,
+                        "a scope is up to 64 letters, digits and `:._-`, like `repo:write` (or `any`)",
+                    ));
+                }
+                scope = Some(value);
+                continue;
+            }
             let value: Ident = input.parse()?;
             match (key.to_string().as_str(), value.to_string().as_str()) {
                 ("pipeline", "Browser") => pipeline = "browser".into(),
                 ("pipeline", "Api") => pipeline = "api".into(),
                 ("pipeline", _) => return Err(Error::new_spanned(value, "expected `Browser` (the default) or `Api`")),
-                _ => return Err(Error::new_spanned(key, "unknown option; expected `pipeline = Browser | Api`")),
+                _ => {
+                    return Err(Error::new_spanned(
+                        key,
+                        "unknown option; expected `pipeline = Browser | Api` or `scope = \"..\"`",
+                    ));
+                }
             }
         }
-        Ok(Self { method, path, pipeline })
+        if let Some(scope) = &scope
+            && pipeline != "api"
+        {
+            return Err(Error::new_spanned(
+                scope,
+                "`scope` is for API tokens, which only `pipeline = Api` routes accept; add `pipeline = Api` or remove it",
+            ));
+        }
+        Ok(Self { method, path, pipeline, scope })
     }
 }
 
@@ -103,7 +134,7 @@ fn param_inner(ty: &Type) -> Option<&Type> {
 }
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
-    let Args { method, path, pipeline } = syn::parse2(attr)?;
+    let Args { method, path, pipeline, scope } = syn::parse2(attr)?;
     let func: ItemFn = syn::parse2(item)?;
     let fn_name = &func.sig.ident;
     if func.sig.asyncness.is_none() {
@@ -136,6 +167,22 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             FnArg::Receiver(_) => None,
         })
         .collect();
+    // Deny by default: an API route that signs someone in says which token scope it needs,
+    // so forgetting a check can't let a narrow token (a read-only CI one) do anything.
+    let signs_in = func.sig.inputs.iter().any(|input| match input {
+        FnArg::Typed(arg) => type_text(&arg.ty).contains("Current<"),
+        FnArg::Receiver(_) => false,
+    });
+    if pipeline == "api" && signs_in && scope.is_none() {
+        return Err(Error::new_spanned(
+            &path,
+            "API routes that take `Current<..>` say which token scope they need: add `scope = \"repo:read\"` (the scope a token must have) or `scope = \"any\"` (any token)",
+        ));
+    }
+    let scope_value = match &scope {
+        Some(scope) => quote! { ::core::option::Option::Some(#scope) },
+        None => quote! { ::core::option::Option::None },
+    };
     let returns = match &func.sig.output {
         syn::ReturnType::Default => "()".to_owned(),
         syn::ReturnType::Type(_, ty) => type_text(ty),
@@ -226,7 +273,8 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         fn __kiln_mount(__kiln_router: ::kiln::__private::Router) -> ::kiln::__private::Router {
             __kiln_router.route(
                 #path,
-                ::kiln::__private::axum::routing::on(::kiln::__private::axum::routing::MethodFilter::#method, __kiln_handler),
+                ::kiln::__private::axum::routing::on(::kiln::__private::axum::routing::MethodFilter::#method, __kiln_handler)
+                    .layer(::kiln::__private::axum::Extension(::kiln::__private::RequiredScope(#scope_value))),
             )
         }
 
@@ -241,6 +289,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                 pipeline: #pipeline,
                 args: &[#( #arg_specs ),*],
                 returns: #returns,
+                scope: #scope_value,
                 mount: __kiln_mount,
             }
         }

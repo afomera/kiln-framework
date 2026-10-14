@@ -23,8 +23,10 @@
 //! name, optional scopes and expiry; `kiln_api_tokens` keeps its SHA-256, so it's shown once.
 //! On `pipeline = Api` routes, `Current<User>` accepts `Authorization: Bearer <token>`, or
 //! HTTP Basic with the token as the password (git). Those routes never read the cookie, so
-//! they need no CSRF token. `user.require_scope("repo:write")?` checks a token's scopes
-//! (cookie sign-ins have them all). Service callbacks check a shared secret with
+//! they need no CSRF token. Each such route that signs someone in declares the scope a
+//! token needs, `#[action(.., pipeline = Api, scope = "repo:write")]` (or `"any"`), and
+//! won't compile without one; `user.require_scope(..)` checks more inside an action.
+//! Cookie sign-ins have every scope. Service callbacks check a shared secret with
 //! [`bearer_matches`].
 
 use std::time::Duration;

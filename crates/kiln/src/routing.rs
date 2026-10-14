@@ -24,10 +24,19 @@ pub struct RouteDef {
     pub args: &'static [(&'static str, &'static str)],
     /// The return type as written, e.g. `Result<Redirect>`.
     pub returns: &'static str,
+    /// `scope = "repo:write"`: the scope an API token needs here (`"any"` for any token).
+    /// `None` on API routes means they sign nobody in; such routes refuse tokens.
+    pub scope: Option<&'static str>,
     pub mount: fn(axum::Router<Ctx>) -> axum::Router<Ctx>,
 }
 
 inventory::collect!(RouteDef);
+
+/// The route's `scope`, put on each request by its `#[action]` so `Current<T>` can check an
+/// API token against it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct RequiredScope(pub Option<&'static str>);
 
 impl RouteDef {
     /// The route's name, derived from its module: `app::actions::posts::show` → `posts::show`.
