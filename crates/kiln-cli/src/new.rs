@@ -22,6 +22,7 @@ const FILES: &[(&str, &str)] = starter![
     "build.rs",
     "rustfmt.toml",
     "gitignore",
+    "mcp.json",
     "src/main.rs",
     "src/lib.rs",
     "src/app.rs",
@@ -98,6 +99,8 @@ pub fn run(name: &str, kiln: Option<&Path>, database: &str) -> Result<(), String
     for (path, contents) in FILES {
         let target = dir.join(match *path {
             "gitignore" => ".gitignore",
+            // Agents that read `.mcp.json` (Claude Code, ..) find `kiln mcp` on their own.
+            "mcp.json" => ".mcp.json",
             "Cargo.toml.template" => "Cargo.toml",
             path => path,
         });

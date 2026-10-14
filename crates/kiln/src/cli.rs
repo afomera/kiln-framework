@@ -56,6 +56,14 @@ Commands:
   secrets ...         Encrypted secrets: init | show | set KEY VALUE | unset KEY | edit
   routes [--json]     The route table
   manifest            Routes and records as JSON
+
+For agents (`kiln mcp`; debug builds, not in production), all JSON:
+  request <METHOD> <path> [--as User:1|<email>] [--form k=v].. [--json BODY] [--accept html|json|turbo] [--follow]
+                      A request through the app, with the SQL it ran and the jobs and mail it caused
+  db query \"<SQL>\" [--limit N] [--database queue|cache|streams]
+                      Read-only SQL
+  mail [--limit N]    The newest mail in the outbox
+  jobs --json         Job counts, queues and failures
 ";
 
 impl Cli {
@@ -197,6 +205,40 @@ impl Cli {
         match args {
             [] | ["serve"] => self.serve().await,
             ["health"] => health(),
+            // For agents (`kiln mcp`): development builds only, never in production.
+            #[cfg(debug_assertions)]
+            ["request", rest @ ..] => {
+                refuse_in_production("request")?;
+                // stdout is the JSON; the request's own log line would corrupt it.
+                use tracing::instrument::WithSubscriber;
+                let app = self.app().await?;
+                let quiet = tracing::subscriber::NoSubscriber::default();
+                print_json(&crate::agent::request(&app, rest).with_subscriber(quiet).await?);
+                Ok(())
+            }
+            #[cfg(debug_assertions)]
+            ["db", "query", rest @ ..] => {
+                refuse_in_production("db query")?;
+                print_json(&crate::agent::query(&self.db().await?, rest).await?);
+                Ok(())
+            }
+            #[cfg(debug_assertions)]
+            ["mail", rest @ ..] => {
+                print_json(&crate::agent::outbox(&self.db().await?, rest).await?);
+                Ok(())
+            }
+            #[cfg(debug_assertions)]
+            ["templates", "--variables"] => {
+                let root: &'static str =
+                    Box::leak(self.root.join("templates").to_string_lossy().into_owned().into_boxed_str());
+                print_json(&crate::view::template_variables(root));
+                Ok(())
+            }
+            #[cfg(debug_assertions)]
+            ["jobs", "--json"] => {
+                print_json(&crate::agent::jobs(&self.db().await?).await?);
+                Ok(())
+            }
             // The app's own `kiln check` rules; development builds only (see `kiln::lint`).
             #[cfg(debug_assertions)]
             ["lint"] => {
@@ -747,6 +789,19 @@ impl Cli {
 
 fn relative(path: &Path, root: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).display().to_string()
+}
+
+#[cfg(debug_assertions)]
+fn print_json(value: &serde_json::Value) {
+    println!("{}", serde_json::to_string_pretty(value).expect("JSON serializes"));
+}
+
+#[cfg(debug_assertions)]
+fn refuse_in_production(command: &str) -> Result {
+    if crate::config::is_production() {
+        return Err(Error::BadRequest(format!("`{command}` is a development tool; it doesn't run in production")));
+    }
+    Ok(())
 }
 
 fn manifest() -> serde_json::Value {

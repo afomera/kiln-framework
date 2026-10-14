@@ -10,9 +10,11 @@ mod edit;
 mod explain;
 mod generate;
 mod introspect;
+mod mcp;
 mod names;
 mod new;
 mod release;
+mod template_check;
 
 use std::process::ExitCode;
 
@@ -80,6 +82,14 @@ enum Command {
     /// The long form of a `kiln check` code or an error page's code: `kiln explain K0301`.
     /// Without a code, lists them all (and the app's own rules).
     Explain { code: Option<String> },
+    /// An MCP server for agents, over stdio: `claude mcp add kiln -- kiln mcp`. Tools:
+    /// introspect, request (as any user, with SQL, jobs and mail), query (read-only SQL),
+    /// mail, jobs, check, explain, test.
+    Mcp {
+        /// Allow requests other than GET and HEAD (they change the development database).
+        #[arg(long)]
+        write: bool,
+    },
     /// Print the route table.
     Routes {
         #[arg(long)]
@@ -150,6 +160,7 @@ fn main() -> ExitCode {
             }
             Command::Routes { json } => app.run_binary(if json { &["routes", "--json"] } else { &["routes"] }),
             Command::Introspect { json } => introspect::run(&app, json),
+            Command::Mcp { write } => mcp::run(&app, write),
             Command::Check { format } => check::run(&app, format == "json"),
             Command::Build { docker } => release::run(&app, docker),
             Command::Test { args } => {

@@ -18,6 +18,17 @@ use syn::{Attribute, Fields, Item, spanned::Spanned};
 use crate::app::App;
 
 pub fn run(app: &App, json: bool) -> Result<bool, String> {
+    let report = report(app)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report).expect("introspection serializes"));
+    } else {
+        print!("{}", summary(&report));
+    }
+    Ok(true)
+}
+
+/// The binary's half and the source's half, merged.
+pub fn report(app: &App) -> Result<Value, String> {
     let Some(out) = app.binary_output(&["introspect"])? else {
         return Err("the app didn't build or `introspect` failed; run `kiln check` to see why".into());
     };
@@ -27,12 +38,7 @@ pub fn run(app: &App, json: bool) -> Result<bool, String> {
     for (key, value) in source.as_object().into_iter().flatten() {
         report[key] = value.clone();
     }
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report).expect("introspection serializes"));
-    } else {
-        print!("{}", summary(&report));
-    }
-    Ok(true)
+    Ok(report)
 }
 
 /// What the app's source declares, by kind.

@@ -209,6 +209,32 @@ fn environment(root: &'static str) -> Arc<Environment<'static>> {
     cache.entry(root).or_insert_with(|| Arc::new(build_environment(root))).clone()
 }
 
+/// For `kiln check`: each template's variables that it doesn't define itself
+/// (`post.title`, `comments`), and the names every template can use without a view field.
+#[cfg(debug_assertions)]
+pub(crate) fn template_variables(root: &'static str) -> serde_json::Value {
+    let env = build_environment(root);
+    let mut globals: Vec<String> = env.globals().map(|(name, _)| name.to_owned()).collect();
+    // Set per render or by the template engine itself.
+    globals.extend(["flash", "loop", "self", "super", "caller", "varargs", "kwargs"].map(str::to_owned));
+    let mut templates = serde_json::Map::new();
+    for path in crate::files::walk(std::path::Path::new(root)) {
+        let Some(name) =
+            path.strip_prefix(root).ok().map(|p| p.to_string_lossy().trim_start_matches('/').replace('\\', "/"))
+        else {
+            continue;
+        };
+        if !name.ends_with(".jinja") {
+            continue;
+        }
+        let Ok(template) = env.get_template(&name) else { continue };
+        let mut used: Vec<String> = template.undeclared_variables(true).into_iter().collect();
+        used.sort();
+        templates.insert(name, serde_json::json!(used));
+    }
+    serde_json::json!({ "globals": globals, "templates": templates })
+}
+
 fn build_environment(root: &'static str) -> Environment<'static> {
     let mut env = Environment::new();
     // Views know their templates by the path they were compiled with; a deployed binary

@@ -5,6 +5,8 @@
 
 extern crate self as kiln;
 
+#[cfg(debug_assertions)]
+mod agent;
 mod app;
 mod assets;
 pub mod auth;

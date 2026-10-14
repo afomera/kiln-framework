@@ -323,6 +323,7 @@ impl Db {
         self.queries.fetch_add(1, Ordering::Relaxed);
         let sql = self.dialect.ddl(sql);
         tracing::debug!(target: "kiln::sql", "{sql}");
+        capture(&sql);
         let query = sqlx::query(&sql);
         match &self.conn {
             Conn::Pool(pool) => query.execute(pool).await?,
@@ -335,6 +336,7 @@ impl Db {
     pub async fn execute_script(&self, sql: &str) -> Result<()> {
         self.queries.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(target: "kiln::sql", "{sql}");
+        capture(sql);
         let script = sqlx::raw_sql(sql);
         match &self.conn {
             Conn::Pool(pool) => script.execute(pool).await?,
@@ -347,6 +349,7 @@ impl Db {
         self.queries.fetch_add(1, Ordering::Relaxed);
         let (sql, binds) = self.dialect.prepare(sql, binds);
         tracing::debug!(target: "kiln::sql", "{sql}");
+        capture(&sql);
         // Prepared statements are cached per connection, with their columns. Outside
         // production, migrations run while the server does, and a cached statement would
         // keep reading the old columns ("no column found"), so nothing is cached there.
@@ -370,6 +373,23 @@ impl Db {
     pub fn query_count(&self) -> u64 {
         self.queries.load(Ordering::Relaxed)
     }
+}
+
+tokio::task_local! {
+    static CAPTURED: std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+}
+
+/// Runs `f`, collecting every SQL statement it runs on this task (`<app> request`, for
+/// agents checking what a page queried).
+pub(crate) async fn capturing_sql<F: Future>(f: F) -> (F::Output, Vec<String>) {
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let out = CAPTURED.scope(log.clone(), f).await;
+    let statements = std::mem::take(&mut *log.lock().unwrap_or_else(|e| e.into_inner()));
+    (out, statements)
+}
+
+fn capture(sql: &str) {
+    let _ = CAPTURED.try_with(|log| log.lock().unwrap_or_else(|e| e.into_inner()).push(sql.to_owned()));
 }
 
 fn tx_mut<'a>(slot: &'a mut Option<Transaction<'static, Any>>) -> Result<&'a mut Transaction<'static, Any>> {

@@ -44,6 +44,21 @@ impl Findings {
 }
 
 pub fn run(app: &App, json: bool) -> Result<bool, String> {
+    let (findings, _) = collect(app)?;
+    report(&findings, json);
+    Ok(!findings.0.iter().any(|f| f.level == Level::Error))
+}
+
+/// `kiln check` as JSON, for `kiln mcp`: the report plus the compiler errors in full.
+pub fn to_json(app: &App) -> Result<serde_json::Value, String> {
+    let (findings, compiler_errors) = collect(app)?;
+    let mut out = findings_json(&findings);
+    out["compiler_errors"] = serde_json::json!(compiler_errors);
+    Ok(out)
+}
+
+/// Runs every check; progress goes to stderr. The findings, and the compiler errors.
+fn collect(app: &App) -> Result<(Findings, Vec<String>), String> {
     let mut findings = Findings::default();
 
     eprintln!("kiln check: compiling");
@@ -84,6 +99,7 @@ pub fn run(app: &App, json: bool) -> Result<bool, String> {
         if let Ok(file) = syn::parse_file(&text) {
             lint_items(&relative, &file.items, &tests, &mut findings);
             lint_writes(&relative, &file.items, &guarded, &mut findings);
+            lint_transactions(&relative, &file, &mut findings);
         }
     }
 
@@ -115,21 +131,23 @@ pub fn run(app: &App, json: bool) -> Result<bool, String> {
             }
             None => findings.error("K0002", "couldn't run `db status` in the app binary", None, None),
         }
-        if let Some(out) = app.binary_output(&["manifest"])? {
-            let manifest: serde_json::Value = serde_json::from_str(&out).unwrap_or_default();
-            let routes: BTreeSet<String> = manifest["routes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|r| r["action"].as_str().map(str::to_owned))
-                .collect();
-            lint_templates(app, &routes, &mut findings);
+        match crate::introspect::report(app) {
+            Ok(report) => {
+                let routes: BTreeSet<String> = report["routes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| r["action"].as_str().map(str::to_owned))
+                    .collect();
+                lint_templates(app, &routes, &mut findings);
+                lint_route_conflicts(&report, &mut findings);
+                lint_template_variables(app, &report, &mut findings)?;
+            }
+            Err(e) => findings.error("K0002", format!("couldn't introspect the app: {e}"), None, None),
         }
         app_lints(app, &mut findings)?;
     }
-
-    report(&findings, json);
-    Ok(!findings.0.iter().any(|f| f.level == Level::Error))
+    Ok((findings, errors))
 }
 
 /// Compiler errors from `cargo check --all-targets`, rendered as rustc prints them,
@@ -412,6 +430,153 @@ fn check_write(file: &str, sig: &syn::Signature, body: &str, guarded: &BTreeSet<
     }
 }
 
+/// K0701: inside `db.transaction(|tx| ..)`, jobs, mail and notifications go on `tx`. On the
+/// pool they're stored at once, so a worker can run them before the write commits, or
+/// after it rolled back.
+fn lint_transactions(file: &str, syntax: &syn::File, findings: &mut Findings) {
+    use syn::visit::Visit;
+
+    struct Transactions<'a> {
+        file: &'a str,
+        findings: &'a mut Findings,
+        /// The transaction handles in scope (`tx`).
+        handles: Vec<String>,
+    }
+
+    impl<'ast> Visit<'ast> for Transactions<'_> {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            let closure =
+                (call.method == "transaction").then(|| call.args.first()).flatten().and_then(|arg| match arg {
+                    syn::Expr::Closure(c) => Some(c),
+                    _ => None,
+                });
+            if let Some(closure) = closure {
+                self.visit_expr(&call.receiver);
+                let handle = closure.inputs.first().and_then(|p| match p {
+                    syn::Pat::Ident(i) => Some(i.ident.to_string()),
+                    _ => None,
+                });
+                if let Some(handle) = handle {
+                    self.handles.push(handle);
+                    self.visit_expr(&closure.body);
+                    self.handles.pop();
+                    return;
+                }
+            }
+            let queues = ["enqueue", "enqueue_in", "enqueue_at", "deliver_later", "notify"];
+            if let Some(handle) = self.handles.last()
+                && queues.iter().any(|m| call.method == m)
+                && let Some(db) = call.args.first()
+            {
+                let mut target = db;
+                while let syn::Expr::Reference(r) = target {
+                    target = &r.expr;
+                }
+                let on_handle = matches!(target, syn::Expr::Path(p) if p.path.is_ident(handle.as_str()));
+                if !on_handle {
+                    let db_text = db.to_token_stream().to_string().replace(' ', "");
+                    self.findings.warn(
+                        "K0701",
+                        format!(
+                            "`.{}({db_text})` inside a transaction runs on the pool, so it can happen before the write commits or after it rolls back; pass `&{handle}`",
+                            call.method
+                        ),
+                        Some(self.file),
+                        Some(call.method.span().start().line),
+                    );
+                }
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+
+    Transactions { file, findings, handles: vec![] }.visit_file(syntax);
+}
+
+/// K0110: two routes that match the same requests. The router refuses to start with them.
+fn lint_route_conflicts(report: &serde_json::Value, findings: &mut Findings) {
+    let mut seen: std::collections::BTreeMap<(String, String), (String, String, u64)> = Default::default();
+    for r in report["routes"].as_array().into_iter().flatten() {
+        let method = r["method"].as_str().unwrap_or_default().to_owned();
+        let path = r["path"].as_str().unwrap_or_default();
+        // `{slug}` and `{id}` in the same place match the same URLs.
+        let shape: String =
+            path.split('/').map(|seg| if seg.starts_with('{') { "{}" } else { seg }).collect::<Vec<_>>().join("/");
+        let action = r["action"].as_str().unwrap_or_default().to_owned();
+        let file = r["file"].as_str().unwrap_or_default().to_owned();
+        let line = r["line"].as_u64().unwrap_or(0);
+        if let Some((other, other_file, other_line)) = seen.get(&(method.clone(), shape.clone())) {
+            findings.error(
+                "K0110",
+                format!(
+                    "`{method} {path}` ({action}) matches the same requests as {other} ({other_file}:{other_line}); \
+                     the server won't start. Change one path, or merge the actions"
+                ),
+                Some(&file),
+                Some(line as usize),
+            );
+        } else {
+            seen.insert((method, shape), (action, file, line));
+        }
+    }
+}
+
+/// K0401, K0412: templates read only what their view (or mail) provides.
+fn lint_template_variables(app: &App, report: &serde_json::Value, findings: &mut Findings) -> Result<(), String> {
+    use crate::template_check::{Records, check, shape_of};
+    let Some(out) = app.binary_output(&["templates", "--variables"])? else {
+        findings.error("K0002", "couldn't list the templates' variables (`templates --variables`)", None, None);
+        return Ok(());
+    };
+    let analysis: serde_json::Value = serde_json::from_str(&out).unwrap_or_default();
+    let globals: BTreeSet<String> =
+        analysis["globals"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(str::to_owned)).collect();
+    let records = Records::from_introspection(report);
+    let owners = report["views"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|v| (v, &["html"][..]))
+        .chain(report["mail"].as_array().into_iter().flatten().map(|m| (m, &["html", "txt"][..])));
+    for (owner, extensions) in owners {
+        let Some(template) = owner["template"].as_str() else { continue };
+        let name = owner["name"].as_str().unwrap_or_default();
+        let fields = owner["fields"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| Some((f["name"].as_str()?.to_owned(), shape_of(f["type"].as_str()?, &records))))
+            .collect();
+        for extension in extensions {
+            let file = format!("{template}.{extension}.jinja");
+            let Some(used) = analysis["templates"][&file].as_array() else { continue };
+            let used: Vec<String> = used.iter().filter_map(|u| u.as_str().map(str::to_owned)).collect();
+            let relative = format!("templates/{file}");
+            let source = fs::read_to_string(app.path(&relative)).unwrap_or_default();
+            for problem in check(name, &source, &used, &fields, &globals, &records) {
+                let line = find_line(&source, &problem.needle);
+                findings.error(problem.code, problem.message, Some(&relative), line);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The first line where `needle` appears as a whole name (not inside a longer one).
+fn find_line(source: &str, needle: &str) -> Option<usize> {
+    source
+        .lines()
+        .position(|line| {
+            line.match_indices(needle).any(|(i, _)| {
+                let before = line[..i].chars().last();
+                let after = line[i + needle.len()..].chars().next();
+                let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+                !word(before) && before != Some('.') && !word(after)
+            })
+        })
+        .map(|i| i + 1)
+}
+
 /// The app's own rules (`#[lint]` in src/lints/), run by its binary.
 fn app_lints(app: &App, findings: &mut Findings) -> Result<(), String> {
     if !app.path("src/lints").is_dir() {
@@ -474,21 +639,26 @@ fn lint_templates(app: &App, routes: &BTreeSet<String>, findings: &mut Findings)
     }
 }
 
+fn findings_json(findings: &Findings) -> serde_json::Value {
+    let errors = findings.0.iter().filter(|f| f.level == Level::Error).count();
+    let list: Vec<_> = findings
+        .0
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "level": if f.level == Level::Error { "error" } else { "warning" },
+                "code": f.code, "message": f.message, "file": f.file, "line": f.line,
+            })
+        })
+        .collect();
+    serde_json::json!({ "errors": errors, "warnings": findings.0.len() - errors, "findings": list })
+}
+
 fn report(findings: &Findings, json: bool) {
     let errors = findings.0.iter().filter(|f| f.level == Level::Error).count();
     let warnings = findings.0.len() - errors;
     if json {
-        let list: Vec<_> = findings
-            .0
-            .iter()
-            .map(|f| {
-                serde_json::json!({
-                    "level": if f.level == Level::Error { "error" } else { "warning" },
-                    "code": f.code, "message": f.message, "file": f.file, "line": f.line,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::json!({ "errors": errors, "warnings": warnings, "findings": list }));
+        println!("{}", findings_json(findings));
         return;
     }
     for f in &findings.0 {
@@ -505,5 +675,48 @@ fn report(findings: &Findings, json: bool) {
     println!("\nkiln check: {}, {}", plural(errors, "error"), plural(warnings, "warning"));
     if let Some(f) = findings.0.first() {
         println!("`kiln explain {}` (or any code above) says why a rule exists and how to fix it", f.code);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn codes(findings: &Findings) -> Vec<(String, Option<usize>)> {
+        findings.0.iter().map(|f| (f.code.clone(), f.line)).collect()
+    }
+
+    #[test]
+    fn jobs_inside_a_transaction_go_on_it() {
+        let source = r#"
+async fn op(ctx: &Ctx) -> Result {
+    ctx.db.transaction(|tx| async move {
+        Post::insert(new).run(&tx).await?;
+        Welcome { id }.enqueue(&tx).await?;
+        Welcome { id }.enqueue(&ctx.db).await?;
+        mail.deliver_later(&ctx.db).await?;
+        Ok(())
+    }).await?;
+    Welcome { id }.enqueue(&ctx.db).await?;
+    Ok(())
+}
+"#;
+        let mut findings = Findings::default();
+        lint_transactions("src/ops/op.rs", &syn::parse_file(source).unwrap(), &mut findings);
+        assert_eq!(codes(&findings), [("K0701".into(), Some(6)), ("K0701".into(), Some(7))]);
+    }
+
+    #[test]
+    fn routes_matching_the_same_requests_conflict() {
+        let report = serde_json::json!({ "routes": [
+            { "method": "GET", "path": "/posts/{slug}", "action": "posts::show", "file": "src/actions/posts/show.rs", "line": 5 },
+            { "method": "GET", "path": "/posts/new", "action": "posts::new", "file": "src/actions/posts/new.rs", "line": 5 },
+            { "method": "PATCH", "path": "/posts/{slug}", "action": "posts::update", "file": "src/actions/posts/update.rs", "line": 5 },
+            { "method": "GET", "path": "/posts/{id}", "action": "posts::preview", "file": "src/actions/posts/preview.rs", "line": 7 },
+        ]});
+        let mut findings = Findings::default();
+        lint_route_conflicts(&report, &mut findings);
+        assert_eq!(codes(&findings), [("K0110".into(), Some(7))]);
+        assert!(findings.0[0].message.contains("posts::show"));
     }
 }

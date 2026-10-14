@@ -19,7 +19,7 @@ clap.workspace = true
 proc-macro2 = { workspace = true, features = ["span-locations"] }
 quote.workspace = true
 serde_json.workspace = true
-syn.workspace = true
+syn = { workspace = true, features = ["visit"] }
 ctrlc = { version = "3", features = ["termination"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
 portable-pty = "0.9"

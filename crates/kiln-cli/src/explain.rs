@@ -73,6 +73,16 @@ comes from the module, and a function with another name makes the two disagree.
 Rename the function to match the file, or the file to match the function.",
     ),
     (
+        "K0110",
+        "Two routes match the same requests",
+        "Two actions declare the same method and a path that matches the same URLs: identical, or
+the same apart from a parameter's name (`/posts/{slug}` and `/posts/{id}`). The router
+can't choose between them and refuses to start.
+
+Change one path (`/posts/{id}/preview`), or merge the two actions. Static segments beat
+parameters, so `/posts/new` next to `/posts/{slug}` is fine.",
+    ),
+    (
         "K0202",
         "The record structs changed since the last migration",
         "Record structs are the schema. `db/snapshot.json` records what the migrations have built
@@ -144,6 +154,23 @@ action really has no viewer (a webhook), verify the caller another way and move 
 into a job or op that documents why.",
     ),
     (
+        "K0401",
+        "A template reads something its view doesn't provide",
+        "A page's template sees exactly its view struct's fields (plus `flash`, `current_user`
+and the template functions). A record in a field carries its columns, its parts
+(src/parts/) and the relations its `Loaded<..>` type names. This template reads a
+variable the view has no field for, or an attribute the record has no column or part
+for, so the page would fail when it renders (templates are strict about undefined
+values).
+
+Fix the spelling, add the field to the view struct and set it in the action, or add a
+part for a computed value:
+
+  #[part] impl Post { pub fn word_count(&self) -> usize { .. } }
+
+`kiln introspect` lists each view's fields and each record's columns and parts.",
+    ),
+    (
         "K0402",
         "A template links to a route that doesn't exist",
         "`path(\"posts::show\", slug=post.slug)` in a template names routes as
@@ -159,6 +186,22 @@ no route, so the link would fail when the page renders.
 relative to templates/. This one isn't there, so the page would fail when it renders.
 
 Check the path, including the `.html.jinja` extension, or create the template.",
+    ),
+    (
+        "K0412",
+        "A template reads a relation the view didn't load",
+        "Relations are loaded only when the view's type says so, which is what makes N+1 queries
+impossible: `Loaded<Post, (post::author,)>` has `post.author`; plain `Post` has no
+relations at all. The template reads a relation the field's type doesn't name, so the
+page would fail when it renders.
+
+Add it to the field's type and load it in the action:
+
+  pub post: Loaded<Post, (post::author, post::comments)>,
+  // nested: post::comments<(comment::author,)>
+
+Loops are followed one level, so `{% for c in post.comments %}{{ c.author.name }}` needs
+`post::comments<(comment::author,)>`.",
     ),
     (
         "K0501",
@@ -179,6 +222,15 @@ fails at boot with a clear message if a required one is missing. `std::env::var`
 code skips all of that and fails later, in a request.
 
 Add a field to the Config struct and read it with `ctx.config::<Config>()`.",
+    ),
+    (
+        "K0701",
+        "A job, mail or notification inside a transaction goes on the pool",
+        "Inside `db.transaction(|tx| ..)`, enqueue on the transaction: `.enqueue(&tx)`,
+`.deliver_later(&tx)`, `.notify(&tx, ..)`. Kiln holds those until the transaction commits
+and drops them if it rolls back. Enqueued on the pool (`&ctx.db`), the job is stored at
+once: a worker can run it before the write it depends on is visible, or after the write
+was rolled back, and it then fails or acts on data that doesn't exist.",
     ),
     (
         "K1001",
@@ -328,44 +380,50 @@ Jobs may run more than once, so make `perform` safe to repeat.",
 ];
 
 pub fn run(app: Result<App, String>, code: Option<&str>) -> Result<bool, String> {
+    print!("{}", text(app.as_ref().ok(), code)?);
+    Ok(true)
+}
+
+/// What `kiln explain [code]` prints. `app` is needed only for the app's own codes.
+pub fn text(app: Option<&App>, code: Option<&str>) -> Result<String, String> {
+    use std::fmt::Write;
+    let mut out = String::new();
     let Some(code) = code else {
-        println!("Kiln's codes (`kiln explain <code>` for the long form):\n");
+        out.push_str("Kiln's codes (`kiln explain <code>` for the long form):\n\n");
         for (code, title, _) in CODES {
-            println!("  {code}  {title}");
+            let _ = writeln!(out, "  {code}  {title}");
         }
-        if let Ok(app) = &app
+        if let Some(app) = app
             && let Some(rules) = app_rules(app)?
             && !rules.is_empty()
         {
-            println!("\nThe app's own rules (src/lints/):\n");
+            out.push_str("\nThe app's own rules (src/lints/):\n\n");
             for rule in rules {
-                println!("  {}  {}", rule["code"].as_str().unwrap_or_default(), first_line(&rule));
+                let _ = writeln!(out, "  {}  {}", rule["code"].as_str().unwrap_or_default(), first_line(&rule));
             }
         }
-        return Ok(true);
+        return Ok(out);
     };
     let code = code.trim().to_ascii_uppercase();
     if let Some((code, title, body)) = CODES.iter().find(|(c, _, _)| *c == code) {
-        println!("{code}: {title}\n\n{body}");
-        return Ok(true);
+        return Ok(format!("{code}: {title}\n\n{body}\n"));
     }
     if code.starts_with('K') {
         return Err(format!("{code} isn't one of Kiln's codes; `kiln explain` lists them"));
     }
-    let app = app.map_err(|_| format!("{code} isn't one of Kiln's codes; app codes need an app (run inside one)"))?;
-    let rules = app_rules(&app)?.ok_or("couldn't list the app's rules (`lint --list` in the app binary failed)")?;
+    let app = app.ok_or_else(|| format!("{code} isn't one of Kiln's codes; app codes need an app (run inside one)"))?;
+    let rules = app_rules(app)?.ok_or("couldn't list the app's rules (`lint --list` in the app binary failed)")?;
     let Some(rule) = rules.iter().find(|r| r["code"] == code.as_str()) else {
         return Err(format!("no rule in src/lints/ has code {code}; `kiln explain` lists them"));
     };
     let doc = rule["doc"].as_str().filter(|d| !d.is_empty()).unwrap_or("(this rule has no doc comment)");
-    println!(
-        "{code}: the app's rule `{}` ({}, {}:{})\n\n{doc}",
+    Ok(format!(
+        "{code}: the app's rule `{}` ({}, {}:{})\n\n{doc}\n",
         rule["name"].as_str().unwrap_or_default(),
         rule["level"].as_str().unwrap_or("error"),
         rule["file"].as_str().unwrap_or_default(),
         rule["line"],
-    );
-    Ok(true)
+    ))
 }
 
 /// The app's `#[lint]` rules, or `None` if the binary couldn't list them. Skips the build

@@ -336,6 +336,28 @@ impl TestClient {
         }
     }
 
+    /// Signs in the `table` row `id` on the next request (`<app> request --as`).
+    pub(crate) fn sign_in_row(&self, table: &'static str, id: i64) {
+        *self.pending_sign_in.lock().unwrap_or_else(|e| e.into_inner()) = Some((table, id));
+    }
+
+    /// Stores the sign-in `sign_in_as` asked for (done on the first request otherwise).
+    pub(crate) async fn store_pending_sign_in(&self) {
+        let pending = self.pending_sign_in.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some((table, id)) = pending {
+            let token = crate::auth::create_sign_in(&self.db, table, id, "kiln test client", "127.0.0.1")
+                .await
+                .expect("storing the test sign-in");
+            self.session_insert(&format!("current.{table}"), Value::from(token));
+            self.session_insert(&format!("current.{table}.seen"), Value::from(jiff::Timestamp::now().as_second()));
+        }
+    }
+
+    /// A string the session holds, e.g. the sign-in token under `current.users`.
+    pub(crate) fn session_string(&self, key: &str) -> Option<String> {
+        self.session.lock().unwrap_or_else(|e| e.into_inner()).get(key).and_then(|v| v.as_str().map(str::to_owned))
+    }
+
     fn session_insert(&self, key: &str, value: Value) {
         self.session.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_owned(), value);
     }
@@ -416,7 +438,7 @@ impl TestClient {
     }
 
     /// The urlencoded body for `fields`, with the session's CSRF token when `csrf`.
-    fn form_body(&self, fields: &[(&str, &str)], csrf: bool) -> (&'static str, String) {
+    pub(crate) fn form_body(&self, fields: &[(&str, &str)], csrf: bool) -> (&'static str, String) {
         let mut pairs: Vec<(&str, &str)> = fields.to_vec();
         let token = csrf.then(|| {
             let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
@@ -562,7 +584,7 @@ impl TestClient {
         token.as_str().unwrap_or(TEST_CSRF).to_owned()
     }
 
-    async fn send_with(
+    pub(crate) async fn send_with(
         &self,
         method: Method,
         path: &str,
@@ -570,14 +592,7 @@ impl TestClient {
         body: Option<(&str, Body)>,
         headers: &[(&str, &str)],
     ) -> TestResponse {
-        let pending = self.pending_sign_in.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some((table, id)) = pending {
-            let token = crate::auth::create_sign_in(&self.db, table, id, "kiln test client", "127.0.0.1")
-                .await
-                .expect("storing the test sign-in");
-            self.session_insert(&format!("current.{table}"), Value::from(token));
-            self.session_insert(&format!("current.{table}.seen"), Value::from(jiff::Timestamp::now().as_second()));
-        }
+        self.store_pending_sign_in().await;
         let mut builder = Request::builder().method(method).uri(path).header(header::USER_AGENT, "kiln test client");
         if let Some(accept) = accept {
             builder = builder.header(header::ACCEPT, accept);
@@ -600,6 +615,7 @@ impl TestClient {
         let response = self.router.clone().oneshot(request).await.expect("router is infallible");
         let status = response.status();
         let headers = response.headers().clone();
+        let error_report = response.extensions().get::<crate::error_page::ReportMarkdown>().map(|r| r.0.clone());
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("readable body");
 
         let mut flash = BTreeMap::new();
@@ -615,6 +631,7 @@ impl TestClient {
             text: String::from_utf8_lossy(&bytes).into_owned(),
             bytes: bytes.to_vec(),
             flash,
+            error_report,
             key: self.key.clone(),
         }
     }
@@ -640,6 +657,9 @@ pub struct TestResponse {
     pub bytes: Vec<u8>,
     /// Flash set by this response (for the next page), e.g. `notice`.
     pub flash: BTreeMap<String, String>,
+    /// In development, the error report as Markdown when the response is an error page,
+    /// whatever format it was sent in.
+    pub error_report: Option<String>,
     key: SecretKey,
 }
 

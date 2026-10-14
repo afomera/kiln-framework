@@ -132,6 +132,7 @@ pub(crate) enum Format {
 pub(crate) fn render(response: Response, report: &ErrorReport, request: &RequestInfo<'_>, format: Format) -> Response {
     let detailed = cfg!(debug_assertions);
     let markdown = if detailed { markdown(report, request) } else { public_markdown(report) };
+    let report_markdown = detailed.then(|| ReportMarkdown(markdown.clone()));
     let (body, content_type) = match format {
         Format::Json => (json(report, request, detailed), "application/problem+json"),
         Format::Markdown => (markdown, "text/markdown; charset=utf-8"),
@@ -142,8 +143,16 @@ pub(crate) fn render(response: Response, report: &ErrorReport, request: &Request
     parts.headers.remove(header::CONTENT_LENGTH);
     parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     parts.headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Some(report) = report_markdown {
+        parts.extensions.insert(report);
+    }
     Response::from_parts(parts, Body::from(body))
 }
+
+/// The development error report as Markdown, kept on the response whatever format it was
+/// sent in, so in-process clients (tests, `kiln mcp`) can read it without asking twice.
+#[derive(Clone)]
+pub(crate) struct ReportMarkdown(pub String);
 
 fn reason(status: StatusCode) -> &'static str {
     status.canonical_reason().unwrap_or("Error")
