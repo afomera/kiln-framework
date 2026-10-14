@@ -311,6 +311,17 @@ generated tests passing.
   `.delete_all` (each takes `&ctx.db`). A request that clashes with a record's state (already sent) is
   `Err(Error::Conflict("Already sent.".into()))`: a 409. For a browser, turn it into a flash:
   `Redirect::to(back).notice_or_alert(ops::send(&ctx, x).await, "Sent.")`.
+  - Through another table (no joins; a typed semi-join): `repository::namespace_id.in_query(Namespace::query().filter(namespace::path.eq(p)))`
+    (a `Query<U>` yields its ids), or `.in_query(Member::query().filter(..).select(member::org_id))` for another
+    column; `not_in_query` too. Union access rules with `.or(..)`. `.select(col).all(&db)` plucks one column.
+  - Aggregates: `.count_by(reaction::emoji, &db)` → `Vec<(String, i64)>`; `.sum(col, &db)` (0 when empty),
+    `.max(col, &db)` / `.min(..)` → `Option`. Queries are `Clone` to reuse a base scope.
+  - Counters: `Repository::update(id).increment(repository::issue_count, 1).run(&tx).await?.issue_count` is
+    atomic and returns the new value. To read then write: `Repository::find(id).for_update().one_or_404(&tx)`
+    inside `db.transaction`, as its first query (Postgres `FOR UPDATE`; SQLite takes its write lock).
+  - Raw SQL, the escape hatch (ordering by a joined column, reports): `db.sql("SELECT .. WHERE \"path\" = ?").bind(p)`
+    then `.records::<Repository>()`, `.all::<(String, i64)>()`, `.one::<i64>()`, `.json()` or `.run()` (rows
+    affected); works on `&tx` too. Same portability rules as above.
 - **Errors are reports** with stable codes (`K1003`, `K0202`, ...). Fetch any failing URL
   without `Accept: text/html` to get the report as Markdown. `kiln check` prints the first
   compiler error in full; fix that one first.

@@ -350,22 +350,30 @@ impl Db {
         let (sql, binds) = self.dialect.prepare(sql, binds);
         tracing::debug!(target: "kiln::sql", "{sql}");
         capture(&sql);
-        // Prepared statements are cached per connection, with their columns. Outside
-        // production, migrations run while the server does, and a cached statement would
-        // keep reading the old columns ("no column found"), so nothing is cached there.
-        let mut query = sqlx::query(&sql).persistent(crate::config::is_production());
-        for value in binds {
-            query = match value {
-                Value::Null => query.bind(None::<i64>),
-                Value::Integer(i) => query.bind(i),
-                Value::Real(f) => query.bind(f),
-                Value::Text(s) => query.bind(s),
-            };
-        }
+        let query = bind_all(&sql, binds);
         Ok(match &self.conn {
             Conn::Pool(pool) => query.fetch_all(pool).await?,
             Conn::Tx(tx) => query.fetch_all(&mut **tx_mut(&mut *tx.lock().await)?).await?,
         })
+    }
+
+    /// Like `fetch_all`, for statements that return no rows; gives the rows affected.
+    pub(crate) async fn execute_with(&self, sql: &str, binds: Vec<Value>) -> Result<u64> {
+        self.queries.fetch_add(1, Ordering::Relaxed);
+        let (sql, binds) = self.dialect.prepare(sql, binds);
+        tracing::debug!(target: "kiln::sql", "{sql}");
+        capture(&sql);
+        let query = bind_all(&sql, binds);
+        Ok(match &self.conn {
+            Conn::Pool(pool) => query.execute(pool).await?,
+            Conn::Tx(tx) => query.execute(&mut **tx_mut(&mut *tx.lock().await)?).await?,
+        }
+        .rows_affected())
+    }
+
+    /// Whether this handle is bound to a transaction (inside [`Db::transaction`]).
+    pub fn in_transaction(&self) -> bool {
+        matches!(self.conn, Conn::Tx(_))
     }
 
     /// Number of statements run through this handle. Tests use it to prove preloading
@@ -390,6 +398,22 @@ pub(crate) async fn capturing_sql<F: Future>(f: F) -> (F::Output, Vec<String>) {
 
 fn capture(sql: &str) {
     let _ = CAPTURED.try_with(|log| log.lock().unwrap_or_else(|e| e.into_inner()).push(sql.to_owned()));
+}
+
+fn bind_all(sql: &str, binds: Vec<Value>) -> sqlx::query::Query<'_, Any, sqlx::any::AnyArguments<'_>> {
+    // Prepared statements are cached per connection, with their columns. Outside
+    // production, migrations run while the server does, and a cached statement would
+    // keep reading the old columns ("no column found"), so nothing is cached there.
+    let mut query = sqlx::query(sql).persistent(crate::config::is_production());
+    for value in binds {
+        query = match value {
+            Value::Null => query.bind(None::<i64>),
+            Value::Integer(i) => query.bind(i),
+            Value::Real(f) => query.bind(f),
+            Value::Text(s) => query.bind(s),
+        };
+    }
+    query
 }
 
 fn tx_mut<'a>(slot: &'a mut Option<Transaction<'static, Any>>) -> Result<&'a mut Transaction<'static, Any>> {
