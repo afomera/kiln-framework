@@ -187,7 +187,7 @@ impl App {
         self.tools = Some(Arc::new(move |session: Session, db: Db| {
             Box::pin(async move {
                 let Some(token) = session.sign_in_token::<T>() else { return Ok(None) };
-                let viewer = crate::auth::find_signed_in::<T>(&db, &token).await?.filter(|record| allow(record));
+                let viewer = crate::auth::find_signed_in::<T>(&db, &token).await?.filter(&allow);
                 Ok(viewer.map(|record| (format!("{} #{}", T::TABLE, record.id().get()), token)))
             })
         }));
@@ -728,7 +728,7 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
     response
 }
 
-fn header_str<'a>(parts: &'a axum::http::request::Parts, name: header::HeaderName) -> &'a str {
+fn header_str(parts: &axum::http::request::Parts, name: header::HeaderName) -> &str {
     parts.headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("")
 }
 

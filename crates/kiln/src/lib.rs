@@ -22,6 +22,7 @@ mod files;
 pub mod form;
 pub mod jobs;
 pub mod mail;
+pub mod markdown;
 mod migrate;
 pub mod notify;
 pub mod policy;
@@ -73,6 +74,7 @@ pub use kiln_macros::{
     Config, DbEnum, Form, Job, Mail, Notification, Record, View, action, embedded_files, part, test,
 };
 pub use mail::{Mail, Preview};
+pub use markdown::Markdown;
 pub use notify::{Notify, Via};
 pub use schedule::Schedule;
 
@@ -119,9 +121,9 @@ pub mod prelude {
     pub use kiln_macros::{Config, Form, Job, Notification};
 
     pub use crate::{
-        App, Attachment, Batch, BatchId, Ctx, Current, Db, DbEnum, Enqueue, Error, Id, Json, Loaded, Mail, Notify,
-        Param, Perform, Preview, Query, Record, Redirect, Result, RichText, Schedule, Secret, Session, Timestamp,
-        Turbo, TurboStream, Via, View, ViewOrRedirect, action,
+        App, Attachment, Batch, BatchId, Ctx, Current, Db, DbEnum, Enqueue, Error, Id, Json, Loaded, Mail, Markdown,
+        Notify, Param, Perform, Preview, Query, Record, Redirect, Result, RichText, Schedule, Secret, Session,
+        Timestamp, Turbo, TurboStream, Via, View, ViewOrRedirect, action,
         form::{Form, FormState, OrRender, Valid},
         part,
         policy::{Allows, Authorize, Authorized},

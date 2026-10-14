@@ -304,6 +304,31 @@ fn build_environment(root: &'static str) -> Environment<'static> {
         })?;
         Ok(Value::from_safe_string(resized))
     });
+    // `{{ issue.body | markdown }}`: GitHub-flavored markdown, sanitized and highlighted.
+    env.add_filter("markdown", |state: &minijinja::State, source: Option<String>| -> Value {
+        let source = source.unwrap_or_default();
+        if source.trim().is_empty() {
+            return Value::from_safe_string(String::new());
+        }
+        let html = crate::markdown::to_html(&source);
+        // Email clients load no stylesheets; the mail layout styles the content.
+        let link = if state.lookup("__kiln_mail").is_some_and(|v| v.is_true()) { "" } else { &markdown_css() };
+        Value::from_safe_string(format!("{link}<div class=\"kiln-markdown\">{html}</div>"))
+    });
+    // `{{ blob.text | highlight(blob.path) }}`: a whole file, highlighted by its name.
+    env.add_filter("highlight", |code: Option<String>, filename: String| -> Value {
+        let html = crate::markdown::highlight(&code.unwrap_or_default(), &filename);
+        Value::from_safe_string(format!("{}{html}", markdown_css()))
+    });
+    // `{% for line in blob.text | highlight_lines(blob.path) %}`: one safe string per line.
+    env.add_filter("highlight_lines", |code: Option<String>, filename: String| -> Vec<Value> {
+        crate::markdown::highlight_lines(&code.unwrap_or_default(), &filename)
+            .into_iter()
+            .map(Value::from_safe_string)
+            .collect()
+    });
+    // The stylesheet `highlight_lines` output needs (the other filters link it themselves).
+    env.add_function("markdown_css", || Value::from_safe_string(markdown_css()));
     // `{{ post.body | plain_text }}`: rich text as words, for excerpts and mail.
     env.add_filter("plain_text", |html: String| crate::RichText::new(&html).to_plain_text());
     env.add_function("form_start", forms::form_start);
@@ -312,6 +337,10 @@ fn build_environment(root: &'static str) -> Environment<'static> {
     env.add_function("fields", forms::fields);
     env.add_function("field", forms::field);
     env
+}
+
+fn markdown_css() -> String {
+    format!("<link rel=\"stylesheet\" href=\"{}\">", crate::markdown::stylesheet_url())
 }
 
 /// `{{ csrf_token() }}`: the session's CSRF token, for `X-CSRF-Token` headers in JS.
@@ -779,6 +808,32 @@ mod tests {
 
         let mail = render_mail(root, "body.html.jinja", None, &context).unwrap();
         assert_eq!(mail, "<div class=\"kiln-rich-text-content\"><p>Hi</p><pre>code</pre></div>");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn markdown_and_highlight_filters() {
+        let dir = std::env::temp_dir().join(format!("kiln-view-md-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("md.html.jinja"),
+            "{{ body | markdown }}|{{ code | highlight(\"a.rs\") }}|{% for l in code | highlight_lines(\"a.rs\") %}[{{ l }}]{% endfor %}",
+        )
+        .unwrap();
+        let root: &'static str = Box::leak(dir.display().to_string().into_boxed_str());
+        let context = BTreeMap::from([("body", "**hi** <script>x</script>"), ("code", "fn a() {}\nfn b() {}")]);
+
+        let page = render(root, "md.html.jinja", None, &context).unwrap();
+        let css = crate::markdown::stylesheet_url();
+        assert!(page.starts_with(&format!("<link rel=\"stylesheet\" href=\"{css}\"><div class=\"kiln-markdown\"><p><strong>hi</strong> </p>\n</div>|")), "{page}");
+        assert!(
+            page.contains("<pre class=\"kiln-code\" data-language=\"Rust\"><code><span class=\"hl-source hl-rust\">"),
+            "{page}"
+        );
+        assert_eq!(page.matches("[<span class=\"hl-source hl-rust\">").count(), 2, "{page}");
+
+        let mail = render_mail(root, "md.html.jinja", None, &context).unwrap();
+        assert!(mail.starts_with("<div class=\"kiln-markdown\">"), "{mail}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

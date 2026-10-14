@@ -247,6 +247,13 @@ generated tests passing.
   (never `| safe`). `#[validate(length(min = 1))]` counts words, not markup. `post.body.to_plain_text()`
   in Rust or `{{ post.body | plain_text }}` in templates for excerpts. In mail, `| rich_text` leaves out
   the page stylesheet and scripts; the mail layout styles it.
+- **Markdown:** `{{ issue.body | markdown }}` renders GitHub-flavored markdown (tables, task lists,
+  footnotes, alerts, raw HTML) sanitized, with fenced code highlighted server-side; never `| safe`.
+  A `Markdown` field (records and forms) stores the source in a TEXT column and renders a textarea;
+  `kiln::markdown::to_html(&src)` in Rust. Whole files: `{{ blob.text | highlight(blob.path) }}`
+  (language from the filename or shebang), or `highlight_lines(path)` for one safe string per line
+  plus `{{ markdown_css() }}` once. Code is `<span class="hl-*">` classes themed by `/kiln/markdown.css`
+  (light/dark); oversized input renders as plain escaped text instead.
 - **Mail previews:** add `preview` to `#[mail(..)]` and `impl Preview for X { async fn preview(ctx: &Ctx) -> Result<Self> { .. } }`;
   test them all with `app.render_mail_previews().await?`.
 - **Notifications:** `CommentPosted { comment_id }.notify(&tx, &author).await?`. In `deliver`,

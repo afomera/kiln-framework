@@ -41,6 +41,10 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
 argon2 = "0.5"
 ammonia = "4"
+# 0.56 needs Rust 1.89; the workspace MSRV is 1.88.
+comrak = { version = "0.55", default-features = false }
+# Pure-Rust regexes (no oniguruma C build); colors come from Kiln's CSS, not syntect themes.
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "html", "regex-fancy"] }
 object_store = { version = "0.14", default-features = false, features = ["aws", "gcp", "fs"] }
 multer = "3"
 bytes = "1"
@@ -86,4 +90,14 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.weezl]
+opt-level = 3
+
+# Highlighting is regex-bound: unoptimized, a 400 KB file takes seconds.
+[profile.dev.package.syntect]
+opt-level = 3
+
+[profile.dev.package.fancy-regex]
+opt-level = 3
+
+[profile.dev.package.regex-automata]
 opt-level = 3
