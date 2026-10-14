@@ -1079,7 +1079,12 @@ fn action(app: &App, resource: &str, name: &str, method: &str, path: &str) -> Re
     if !path.starts_with('/') {
         return Err("paths start with `/`".into());
     }
-    let captures: Vec<&str> = path.split('/').filter_map(|s| s.strip_prefix('{')?.strip_suffix('}')).collect();
+    // A catch-all `{*path}` is still a `path: Param<String>` argument.
+    let captures: Vec<&str> = path
+        .split('/')
+        .filter_map(|s| s.strip_prefix('{')?.strip_suffix('}'))
+        .map(|c| c.strip_prefix('*').unwrap_or(c))
+        .collect();
     // `posts` with an existing `Post` record and an `{id}` in the path: load, authorize, test.
     if captures.first() == Some(&"id") {
         let record = std::fs::read_dir(app.path("src/records"))

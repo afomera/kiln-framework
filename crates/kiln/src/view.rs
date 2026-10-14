@@ -426,7 +426,12 @@ fn path(name: String, kwargs: Kwargs) -> std::result::Result<minijinja::Value, m
     let mut url = String::new();
     for segment in route.path.split('/').skip(1) {
         url.push('/');
-        match segment.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        match routing::capture_name(segment) {
+            // A catch-all keeps the slashes in its value: `path="src/lib.rs"`.
+            Some(capture) if segment.starts_with("{*") => {
+                let value: minijinja::Value = kwargs.get(capture)?;
+                url.push_str(&routing::encode_segments(&value.to_string()));
+            }
             Some(capture) => {
                 let value: minijinja::Value = kwargs.get(capture)?;
                 url.push_str(&routing::encode_segment(&value.to_string()));
@@ -805,6 +810,34 @@ mod tests {
 
         let mail = render_mail(root, "body.html.jinja", None, &context).unwrap();
         assert_eq!(mail, "<div class=\"kiln-rich-text-content\"><p>Hi</p><pre>code</pre></div>");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Named `repos::blob`, like an app's `src/actions/repos/blob.rs`.
+    mod actions {
+        pub mod repos {
+            pub mod blob {
+                use crate::Param;
+
+                #[crate::action(GET "/{owner}/blob/{*path}")]
+                pub async fn blob(owner: Param<String>, path: Param<String>) -> String {
+                    format!("{} {}", *owner, *path)
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn path_keeps_slashes_in_a_catch_all() {
+        let dir = std::env::temp_dir().join(format!("kiln-view-path-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("link.html.jinja"), r#"{{ path("repos::blob", owner="a b", path=file) }}"#).unwrap();
+        let root: &'static str = Box::leak(dir.display().to_string().into_boxed_str());
+        let context = BTreeMap::from([("file", "src/my file.rs")]);
+
+        let html = render(root, "link.html.jinja", None, &context).unwrap();
+        assert_eq!(html, "/a%20b/blob/src/my%20file.rs");
+        assert_eq!(actions::repos::blob::path("a b", "src/my file.rs"), html);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -38,9 +38,16 @@ impl RouteDef {
         }
     }
 
+    /// The capture names in order; a catch-all `{*path}` yields `path`.
     pub fn captures(&self) -> impl Iterator<Item = &'static str> {
-        self.path.split('/').filter_map(|seg| seg.strip_prefix('{')?.strip_suffix('}'))
+        self.path.split('/').filter_map(capture_name)
     }
+}
+
+/// `{slug}` → `slug`, `{*path}` → `path`, anything else → `None`.
+pub(crate) fn capture_name(segment: &str) -> Option<&str> {
+    let inner = segment.strip_prefix('{')?.strip_suffix('}')?;
+    Some(inner.strip_prefix('*').unwrap_or(inner))
 }
 
 /// Every registered route, sorted by path then method.
@@ -74,6 +81,11 @@ pub(crate) fn route_for(method: &str, path: &str) -> Option<&'static RouteDef> {
 
 /// A typed path segment. The `#[action]` macro matches `slug: Param<String>` to the
 /// `{slug}` capture in the route, and fails to compile if either side is missing.
+///
+/// A catch-all `{*path}` as the last segment takes the rest of the URL, slashes included:
+/// `/{owner}/{repo}/tree/{*path}` gives `path == "src/lib/mod.rs"`. Each segment is
+/// percent-decoded, so `%2F` arrives as `/` too, and `..` is passed through as written:
+/// treat the value as untrusted before touching the filesystem with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param<T>(pub T);
 
@@ -93,12 +105,19 @@ impl<T> Deref for Param<T> {
 
 /// An argument accepted by a generated path helper for a capture of type `T`.
 pub trait PathArg<T> {
+    /// The value as one percent-encoded segment: `/` becomes `%2F`.
     fn segment(&self) -> String;
+    /// The value for a catch-all `{*path}`: each `/`-separated piece encoded, slashes kept.
+    fn segments(&self) -> String;
 }
 
 impl<T: Display> PathArg<T> for T {
     fn segment(&self) -> String {
         encode_segment(&self.to_string())
+    }
+
+    fn segments(&self) -> String {
+        encode_segments(&self.to_string())
     }
 }
 
@@ -106,11 +125,19 @@ impl<T: Display> PathArg<T> for &T {
     fn segment(&self) -> String {
         encode_segment(&self.to_string())
     }
+
+    fn segments(&self) -> String {
+        encode_segments(&self.to_string())
+    }
 }
 
 impl PathArg<String> for &str {
     fn segment(&self) -> String {
         encode_segment(self)
+    }
+
+    fn segments(&self) -> String {
+        encode_segments(self)
     }
 }
 
@@ -129,6 +156,10 @@ const SEGMENT: &AsciiSet = &CONTROLS
 
 pub(crate) fn encode_segment(s: &str) -> String {
     utf8_percent_encode(s, SEGMENT).to_string()
+}
+
+pub(crate) fn encode_segments(s: &str) -> String {
+    s.split('/').map(encode_segment).collect::<Vec<_>>().join("/")
 }
 
 /// Raw path parameters, parsed per capture by `#[action]`-generated handlers.
@@ -154,5 +185,46 @@ impl<S: Send + Sync> FromRequestParts<S> for RawParams {
             .await
             .map(|Path(params)| RawParams(params))
             .map_err(IntoResponse::into_response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{Router, body::Body, http::Request, routing::get};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    #[test]
+    fn catch_all_values_keep_their_slashes() {
+        assert_eq!(PathArg::<String>::segments(&"src/my file.rs"), "src/my%20file.rs");
+        assert_eq!(PathArg::<String>::segment(&"src/my file.rs"), "src%2Fmy%20file.rs");
+        assert_eq!(encode_segments("a?b/c#d/"), "a%3Fb/c%23d/");
+        assert_eq!(capture_name("{*path}"), Some("path"));
+        assert_eq!(capture_name("{slug}"), Some("slug"));
+        assert_eq!(capture_name("tree"), None);
+    }
+
+    fn router(paths: &[&'static str]) -> Router {
+        paths.iter().copied().fold(Router::new(), |router, path| router.route(path, get(move || async move { path })))
+    }
+
+    async fn matched(app: &Router, uri: &str) -> String {
+        let response = app.clone().oneshot(Request::get(uri).body(Body::empty()).unwrap()).await.unwrap();
+        String::from_utf8(axum::body::to_bytes(response.into_body(), 1024).await.unwrap().to_vec()).unwrap()
+    }
+
+    /// `kiln check` (K0110) relies on this: literals beside a catch-all are resolved by
+    /// priority, but a capture and a catch-all in the same place can't both be registered.
+    #[tokio::test]
+    async fn axum_prefers_literals_and_rejects_captures_beside_catch_alls() {
+        let app = router(&["/{o}/{r}/tree/{*path}", "/{o}/{r}/tree/README", "/{o}/{r}/{*rest}"]);
+        assert_eq!(matched(&app, "/a/b/tree/README").await, "/{o}/{r}/tree/README");
+        assert_eq!(matched(&app, "/a/b/tree/README/x").await, "/{o}/{r}/tree/{*path}");
+        assert_eq!(matched(&app, "/a/b/issues/1").await, "/{o}/{r}/{*rest}");
+
+        for conflict in [["/a/{x}", "/a/{*p}"], ["/a/{x}/b", "/a/{*p}"], ["/a/{*p}", "/a/{*q}"]] {
+            assert!(std::panic::catch_unwind(|| router(&conflict)).is_err(), "{conflict:?} should conflict");
+        }
     }
 }
