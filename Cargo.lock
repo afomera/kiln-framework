@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "blog"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "kiln-framework",
  "serde",
@@ -1926,7 +1926,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-framework"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "ammonia",
  "argon2",
@@ -1965,7 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-framework-cli"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1982,7 +1982,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-framework-macros"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "proc-macro2",
  "quote",
