@@ -84,7 +84,7 @@ generated tests passing.
 | Page | `src/views/{resource}/{verb}.rs` + `templates/{resource}/{verb}.html.jinja` | `#[derive(View)]` |
 | JSON shape | `src/views/api/` | `#[derive(Serialize)]` struct; don't serialize records directly |
 | Partial (a fragment for Turbo Streams, broadcasts, includes) | `src/views/{resource}/{name}.rs` + `templates/{resource}/_{name}.html.jinja` | `#[derive(View)] #[view(template = "comments/_comment", layout = none)]` |
-| CSS, JS, images | `assets/` (JS entry point: `assets/application.js`) | linked with `{{ asset("app.css") }}`; JS modules load through the import map |
+| CSS, JS, images | `assets/` (JS entry point: `assets/application.js`) | linked with `{{ asset("app.css") }}`; JS modules load through the import map; CSS references other assets by path (`url("../fonts/a.woff2")`, `@import "tokens.css"`) |
 | Stimulus controllers | `assets/controllers/{name}_controller.js` | `export default class extends Controller` (from `"@hotwired/stimulus"`); registered automatically as `data-controller="{name}"` (`_` → `-`, `/` → `--`) |
 | Import-map pins | `config/importmap.toml` | `"@pierre/diffs" = "vendor/npm/@pierre/diffs@1.5.2.js"` (a file under `assets/`) or `"x" = "https://.."`; written by `kiln importmap pin` |
 | Files served as-is | `public/` (`robots.txt`, `favicon.svg`) | served at the site root when no route matches |
@@ -194,6 +194,17 @@ generated tests passing.
   `prepend`, `replace`, `update`, `before`, `after`, `remove`, `refresh`. Give list items
   stable ids (`id="comment_{{ comment.id }}"`) so appends don't duplicate. Frame requests
   (`<turbo-frame id="new_comment">`) render pages without the layout.
+- **Assets are served only at fingerprinted URLs** (`/assets/app-1a2b3c4d.css`, cached
+  forever), so link them with `{{ asset("..") }}`, never `/assets/app.css`. Stylesheets can
+  point at fonts, images and other stylesheets with plain `url(..)` and `@import ".."`:
+  Kiln serves the CSS with those rewritten to fingerprinted URLs. Paths are relative to the
+  stylesheet (`url("../fonts/a.woff2")` from `assets/css/tokens.css` is
+  `assets/fonts/a.woff2`) or start with `/assets/` (`url(/assets/fonts/a.woff2)`);
+  `?query` and `#fragment` are kept, and `https:`, `data:`, `#id` and other `/` paths
+  (`public/` files) are left alone. A stylesheet's URL changes when a file it references
+  does. A reference to a missing file is left as written and logged once (it will 404);
+  so are `url(..)`s with CSS escapes, and `image-set("a.png" 1x)` strings, which aren't
+  rewritten: write `image-set(url("a.png") 1x)`. No need to inline `@font-face` in a layout.
 - **Stimulus is on** for pages once `assets/controllers/` has a controller: Kiln starts it and
   registers each one from the import map, no `index.js` to maintain. `kiln check` flags a
   `data-controller` with no file (K0404) and a pin that won't load (K0405). Register a

@@ -141,7 +141,7 @@ async fn pages_render_inside_the_default_layout() {
         .assert_status(200)
         // `{% set title = post.title %}` in the page reaches the layout
         .assert_contains("<title>Hello, Kiln · Kiln blog</title>")
-        .assert_contains(r#"<a href="/posts">Kiln blog</a>"#)
+        .assert_contains(r#"<a class="brand" href="/posts">Kiln blog</a>"#)
         // page HTML is inserted unescaped
         .assert_contains("<main><article>");
 }

@@ -13,7 +13,7 @@
 </head>
 <body>
   <header>
-    <a href="{{ path("posts::index") }}">Kiln blog</a>
+    <a class="brand" href="{{ path("posts::index") }}">Kiln blog</a>
     <nav>
       {% if current_user %}
       <a href="{{ path("sign_ins::index") }}">{{ current_user.name }}</a>

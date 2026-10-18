@@ -4,10 +4,11 @@
 //! to `/kiln/dev/reload` (Server-Sent Events). That stream watches the app's `templates/`
 //! and `assets/` and says what changed:
 //!
-//! - a stylesheet: `css` with its new fingerprinted URL, swapped in place (no reload, so
-//!   scroll and form state stay);
+//! - a stylesheet: `css` with its new fingerprinted URL, and those of the stylesheets that
+//!   `@import` it, swapped in place (no reload, so scroll and form state stay);
 //! - a template or other asset: `html`, and the page refreshes through Turbo, keeping its
-//!   scroll position;
+//!   scroll position (a font or image a stylesheet uses changes that stylesheet's URL, so
+//!   the refreshed page links the new one);
 //! - a script: `reload`, a full reload (modules can't be swapped).
 //!
 //! Rust changes go through `kiln dev`, which rebuilds and restarts the server; the page
@@ -76,13 +77,22 @@ fn events(changed: &[PathBuf], assets_dir: &Path, assets: &Assets) -> Vec<String
     if !other.is_empty() {
         return vec!["event: html\ndata: changed\n\n".to_owned()];
     }
-    css.iter()
-        .filter_map(|p| {
-            let name = in_assets(p)?;
+    // A stylesheet's URL changes with those it `@import`s, so they're swapped too.
+    let mut names: Vec<String> = vec![];
+    for name in css.iter().filter_map(|p| in_assets(p)) {
+        for name in assets.stylesheets_using(&name).into_iter().chain([name]) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
             // A deleted stylesheet has no URL; the page reloads instead.
-            let Some(url) = assets.url(&name) else { return Some("event: html\ndata: removed\n\n".to_owned()) };
+            let Some(url) = assets.url(&name) else { return "event: html\ndata: removed\n\n".to_owned() };
             let data = serde_json::json!({ "name": name, "url": url });
-            Some(format!("event: css\ndata: {data}\n\n"))
+            format!("event: css\ndata: {data}\n\n")
         })
         .collect()
 }
@@ -156,6 +166,12 @@ mod tests {
             events(&[a.join("app.css"), dir.join("templates/x.html.jinja")], &a, &assets)[0].starts_with("event: html")
         );
         assert!(events(&[a.join("application.js"), a.join("app.css")], &a, &assets)[0].starts_with("event: reload"));
+        // A stylesheet another imports: both get new URLs.
+        std::fs::write(dir.join("assets/base.css"), "b{}").unwrap();
+        std::fs::write(dir.join("assets/app.css"), "@import 'base.css';").unwrap();
+        let css = events(&[a.join("base.css")], &a, &assets);
+        assert_eq!(css.len(), 2, "{css:?}");
+        assert!(css[0].contains("\"name\":\"app.css\"") && css[1].contains("\"name\":\"base.css\""), "{css:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -59,6 +59,7 @@ M0–M1 built the core, M2 the full stack, M3 the tools agents use; work since M
 | Mail with previews, notifications and notification settings | `crates/kiln/src/mail.rs`, `notify.rs` |
 | Auth with password settings; API tokens whose scopes deny by default (`#[action(.., pipeline = Api, scope = "write")]`); rate limits | `crates/kiln/src/auth.rs`, `rate_limit.rs` |
 | Turbo, realtime streams, live reload; Stimulus by default and import-map pins (`kiln importmap pin`) | `crates/kiln/src/turbo.rs`, `realtime.rs`, `dev_reload.rs`, `assets.rs` |
+| Fingerprinted assets, cached forever; stylesheets' `url(..)` and `@import` references rewritten to fingerprinted URLs | `crates/kiln/src/assets.rs` |
 | Rich text (Lexxy) with attachments, file uploads, direct uploads, image variants | `crates/kiln/src/rich_text.rs`, `files.rs`, `storage.rs` |
 | Markdown and syntax highlighting: `\| markdown`, `\| highlight`, a `Markdown` field type | `crates/kiln/src/markdown.rs` |
 | Catch-all route captures: `#[action(GET "/{owner}/{repo}/tree/{*path}")]` | `crates/kiln/src/routing.rs` |
