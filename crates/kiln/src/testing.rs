@@ -103,6 +103,7 @@ impl TestApp {
             }
         }
         crate::config::set_root(root);
+        crate::view::check_helpers(root)?;
         // Files go to a store of the test's own, gone when it ends.
         // Webhooks are captured until a test answers them with `receive_webhooks`.
         let app = configure(

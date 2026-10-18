@@ -15,6 +15,7 @@ mod mail;
 mod notification;
 mod part;
 mod record;
+mod template_helper;
 mod test;
 mod util;
 mod view;
@@ -143,6 +144,25 @@ pub fn lint(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn part(attr: TokenStream, item: TokenStream) -> TokenStream {
     part::expand(attr.into(), item.into()).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Registers a filter every template can use: `#[kiln::template_filter] pub fn hue(name: &str)
+/// -> u32` is `{{ user.name | hue }}`. The value is the first argument; the rest come from the
+/// call (`| truncate_words(20)`). Arguments convert like minijinja's (`&str`, `String`,
+/// numbers, `Option<T>`, `Value`, `Kwargs`, a leading `&State`); return a value, a
+/// `Value::from_safe_string(..)` for markup, or a `Result<_, kiln::view::template::Error>`.
+/// `(name = "avatar_hue")` names it differently. A name Kiln already uses fails at boot (K0406).
+#[proc_macro_attribute]
+pub fn template_filter(attr: TokenStream, item: TokenStream) -> TokenStream {
+    template_helper::expand(attr.into(), item.into(), true).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// Registers a function every template can call: `#[kiln::template_function] pub fn
+/// initials(name: &str) -> String` is `{{ initials(user.name) }}`. Arguments and return
+/// values work as in `#[template_filter]`.
+#[proc_macro_attribute]
+pub fn template_function(attr: TokenStream, item: TokenStream) -> TokenStream {
+    template_helper::expand(attr.into(), item.into(), false).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// Declares an HTTP endpoint: `#[action(GET "/posts/{slug}")]`.

@@ -83,7 +83,8 @@ pub use batch::{Batch, BatchId};
 pub use config::Secret;
 pub use jobs::{Enqueue, Perform};
 pub use kiln_macros::{
-    Config, DbEnum, Form, Job, Mail, Notification, Record, View, action, embedded_files, part, test,
+    Config, DbEnum, Form, Job, Mail, Notification, Record, View, action, embedded_files, part, template_filter,
+    template_function, test,
 };
 pub use mail::{Mail, Preview};
 pub use markdown::Markdown;

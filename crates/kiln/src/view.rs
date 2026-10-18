@@ -60,7 +60,7 @@ impl PendingRender {
 
     /// Variables read by the page, its layout, and everything they include or extend.
     pub(crate) fn variables(&self) -> Result<HashSet<String>> {
-        let env = environment(self.root);
+        let env = environment(self.root)?;
         let mut seen = HashSet::new();
         let mut variables = HashSet::new();
         collect_variables(&env, self.template, &mut seen, &mut variables)?;
@@ -117,11 +117,11 @@ pub(crate) fn render_mail<S: Serialize + ?Sized>(
 
 /// Renders a template string (a mail subject) with `context`.
 pub(crate) fn render_str<S: Serialize + ?Sized>(root: &'static str, source: &str, context: &S) -> Result<String> {
-    Ok(environment(root).render_str(source, context)?)
+    Ok(environment(root)?.render_str(source, context)?)
 }
 
 fn render_value(root: &'static str, template: &str, layout: Option<&str>, context: Value) -> Result<String> {
-    let env = environment(root);
+    let env = environment(root)?;
     let page = env.get_template(template)?;
     // Request-wide values (`flash`, `current_*`); the view's own fields win on a name clash.
     let scope = session::current_scope();
@@ -200,20 +200,41 @@ pub fn respond<V: View>(view: &V) -> Response {
     response
 }
 
-fn environment(root: &'static str) -> Arc<Environment<'static>> {
+fn environment(root: &'static str) -> Result<Arc<Environment<'static>>> {
     if cfg!(debug_assertions) {
-        return Arc::new(build_environment(root));
+        return checked_environment(root).map(Arc::new);
     }
     static CACHE: OnceLock<Mutex<HashMap<&'static str, Arc<Environment<'static>>>>> = OnceLock::new();
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-    cache.entry(root).or_insert_with(|| Arc::new(build_environment(root))).clone()
+    if let Some(env) = cache.get(root) {
+        return Ok(env.clone());
+    }
+    let env = Arc::new(checked_environment(root)?);
+    cache.insert(root, env.clone());
+    Ok(env)
+}
+
+/// The environment, or what's wrong with the app's template helpers (K0406) as one error.
+fn checked_environment(root: &str) -> Result<Environment<'static>> {
+    let (env, problems) = build_environment(root);
+    if problems.is_empty() {
+        return Ok(env);
+    }
+    let lines: Vec<String> = problems.iter().map(|p| format!("  {}", p.message)).collect();
+    Err(crate::Error::Config(format!("the app's template helpers don't load (K0406):\n{}", lines.join("\n"))))
+}
+
+/// At boot: every template helper has a name of its own, and `templates/helpers/` loads.
+pub(crate) fn check_helpers(app_root: &std::path::Path) -> Result<()> {
+    checked_environment(&app_root.join("templates").to_string_lossy()).map(|_| ())
 }
 
 /// For `kiln check`: each template's variables that it doesn't define itself
-/// (`post.title`, `comments`), and the names every template can use without a view field.
+/// (`post.title`, `comments`), the names every template can use without a view field, and
+/// problems with the app's template helpers.
 #[cfg(debug_assertions)]
 pub(crate) fn template_variables(root: &'static str) -> serde_json::Value {
-    let env = build_environment(root);
+    let (env, problems) = build_environment(root);
     let mut globals: Vec<String> = env.globals().map(|(name, _)| name.to_owned()).collect();
     // Set per render or by the template engine itself.
     globals.extend(["flash", "loop", "self", "super", "caller", "varargs", "kwargs"].map(str::to_owned));
@@ -232,10 +253,14 @@ pub(crate) fn template_variables(root: &'static str) -> serde_json::Value {
         used.sort();
         templates.insert(name, serde_json::json!(used));
     }
-    serde_json::json!({ "globals": globals, "templates": templates })
+    let helper_errors: Vec<_> =
+        problems.iter().map(|p| serde_json::json!({ "message": p.message, "file": p.file, "line": p.line })).collect();
+    serde_json::json!({ "globals": globals, "templates": templates, "helper_errors": helper_errors })
 }
 
-fn build_environment(root: &'static str) -> Environment<'static> {
+/// Kiln's environment for the templates at `root` with the app's helpers added, and what's
+/// wrong with any helper it had to leave out.
+fn build_environment(root: &str) -> (Environment<'static>, Vec<HelperProblem>) {
     let mut env = Environment::new();
     // Views know their templates by the path they were compiled with; a deployed binary
     // finds them under `KILN_ROOT` instead.
@@ -249,6 +274,8 @@ fn build_environment(root: &'static str) -> Environment<'static> {
         Some(app_root) => crate::assets::Assets::at(&app_root),
         None => crate::assets::Assets::beside_templates(&templates.to_string_lossy()),
     };
+    // Where `helpers/` is listed from: embedded files are keyed by the compiled-in path.
+    let listed = if embedded { std::path::PathBuf::from(root) } else { templates.clone() };
     if embedded {
         env.set_loader(|name| Ok(crate::files::template(name)));
     } else {
@@ -360,7 +387,224 @@ fn build_environment(root: &'static str) -> Environment<'static> {
     env.add_function("button_to", forms::button_to);
     env.add_function("fields", forms::fields);
     env.add_function("field", forms::field);
-    env
+    let problems = install_helpers(&mut env, &rust_helpers(), &listed);
+    (env, problems)
+}
+
+/// The template engine's types, for `#[template_filter]` and `#[template_function]` fns that
+/// take or return more than plain values: `Value::from_safe_string(html)`, `Kwargs`, `&State`.
+pub mod template {
+    pub use minijinja::{
+        Error, ErrorKind, State, Value,
+        value::{Kwargs, Rest},
+    };
+}
+
+/// What an app's template helper is: `{{ name | hue }}` or `{{ icon("x") }}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HelperKind {
+    Filter,
+    Function,
+}
+
+impl HelperKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Filter => "filter",
+            Self::Function => "function",
+        }
+    }
+}
+
+/// One of the app's template helpers; `#[template_filter]` and `#[template_function]` write
+/// these. Never built by hand.
+pub struct TemplateHelper {
+    pub name: &'static str,
+    pub kind: HelperKind,
+    /// The fn's doc comment.
+    pub doc: &'static str,
+    pub file: &'static str,
+    pub line: u32,
+    pub register: fn(&mut Environment<'static>),
+}
+
+inventory::collect!(TemplateHelper);
+
+/// Where the app's template macros live: every macro in `templates/helpers/*.jinja` can be
+/// called from any template, like a built-in function.
+const HELPERS_DIR: &str = "helpers";
+
+/// A helper Kiln left out (K0406): its name is taken, or its file doesn't load.
+struct HelperProblem {
+    message: String,
+    file: String,
+    line: Option<u32>,
+}
+
+/// The app's `#[template_filter]` / `#[template_function]` fns, sorted.
+fn rust_helpers() -> Vec<&'static TemplateHelper> {
+    let mut helpers: Vec<_> = inventory::iter::<TemplateHelper>.into_iter().collect();
+    helpers.sort_by_key(|h| (h.kind, h.name, h.file, h.line));
+    helpers
+}
+
+/// The macros each file in `templates/helpers/` defines, by template name.
+fn helper_macros(env: &Environment<'static>, templates: &std::path::Path) -> Vec<(String, Result<Vec<String>>)> {
+    let mut files: Vec<String> = crate::files::walk(&templates.join(HELPERS_DIR))
+        .into_iter()
+        .filter_map(|p| {
+            let name = p.strip_prefix(templates).ok()?.to_string_lossy().replace('\\', "/");
+            name.ends_with(".jinja").then_some(name)
+        })
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|file| {
+            let macros = (|| -> Result<Vec<String>> {
+                let template = env.get_template(&file)?;
+                let captured = template.render_captured(context! { __kiln_mail => false })?;
+                let state = captured.state();
+                let mut names: Vec<String> = state
+                    .exports()
+                    .into_iter()
+                    .filter(|name| {
+                        state.lookup(name).is_some_and(|v| v.get_attr("arguments").is_ok_and(|a| !a.is_undefined()))
+                    })
+                    .map(str::to_owned)
+                    .collect();
+                names.sort();
+                Ok(names)
+            })();
+            (file, macros)
+        })
+        .collect()
+}
+
+/// Adds the app's helpers after Kiln's own. A helper whose name is already taken (by a
+/// built-in or another helper) is left out and reported, never silently swapped in.
+fn install_helpers(
+    env: &mut Environment<'static>,
+    helpers: &[&TemplateHelper],
+    templates: &std::path::Path,
+) -> Vec<HelperProblem> {
+    let mut problems = vec![];
+    let builtin_functions: HashSet<String> = env.globals().map(|(name, _)| name.to_owned()).collect();
+    let is_builtin_filter = |env: &Environment, name: &str| {
+        env.render_str("{% if name is filter %}1{% endif %}", context! { name }).is_ok_and(|s| s == "1")
+    };
+    let taken: Vec<bool> = helpers
+        .iter()
+        .map(|h| match h.kind {
+            HelperKind::Filter => is_builtin_filter(env, h.name),
+            HelperKind::Function => builtin_functions.contains(h.name),
+        })
+        .collect();
+    let mut seen: HashMap<(HelperKind, String), String> = HashMap::new();
+    for (helper, taken) in helpers.iter().zip(taken) {
+        let file = crate::lint::app_relative(helper.file).to_owned();
+        let at = format!("{file}:{}", helper.line);
+        let kind = helper.kind.as_str();
+        let message = if taken {
+            format!(
+                "template {kind} `{}` ({at}) has the name of a built-in {kind}; rename it, e.g. `#[kiln::template_{kind}(name = \"app_{}\")]`",
+                helper.name, helper.name
+            )
+        } else if let Some(other) = seen.get(&(helper.kind, helper.name.to_owned())) {
+            format!("template {kind} `{}` is registered twice: {other} and {at}", helper.name)
+        } else {
+            seen.insert((helper.kind, helper.name.to_owned()), at);
+            (helper.register)(env);
+            continue;
+        };
+        problems.push(HelperProblem { message, file, line: Some(helper.line) });
+    }
+    for (file, macros) in helper_macros(env, templates) {
+        let relative = format!("templates/{file}");
+        let macros = match macros {
+            Ok(macros) => macros,
+            Err(e) => {
+                problems.push(HelperProblem {
+                    message: format!("{relative} doesn't load: {e}"),
+                    file: relative,
+                    line: None,
+                });
+                continue;
+            }
+        };
+        for name in macros {
+            let key = (HelperKind::Function, name.clone());
+            let message = if builtin_functions.contains(&name) {
+                format!("macro `{name}` in {relative} has the name of a built-in function; rename the macro")
+            } else if let Some(other) = seen.get(&key) {
+                format!("macro `{name}` in {relative} has the same name as the template function at {other}")
+            } else {
+                seen.insert(key, relative.clone());
+                env.add_function(name.clone(), macro_helper(file.clone(), name));
+                continue;
+            };
+            problems.push(HelperProblem { message, file: relative.clone(), line: None });
+        }
+    }
+    problems
+}
+
+/// A function that calls the macro `name` from `file`. minijinja macros only run inside the
+/// template state that defined them, so each call evaluates the helper file (its top level
+/// only defines macros) and calls the macro there. Arguments and keyword arguments pass
+/// through; a `{% call %}` block is rendered first, in the calling template, so the macro's
+/// `caller()` takes no arguments.
+fn macro_helper(
+    file: String,
+    name: String,
+) -> impl Fn(&minijinja::State, minijinja::value::Rest<Value>, Kwargs) -> std::result::Result<Value, minijinja::Error>
++ Send
++ Sync
++ 'static {
+    move |state, args, kwargs| {
+        let mut passed = Vec::new();
+        for key in kwargs.args() {
+            let mut value: Value = kwargs.get(key)?;
+            if key == "caller" {
+                // The block belongs to the calling template's state, which the macro can't call into.
+                let body = value.call(state, &[])?;
+                value = Value::from_function(move || body.clone());
+            }
+            passed.push((key.to_owned(), value));
+        }
+        let mut args = args.0;
+        if !passed.is_empty() {
+            args.push(Value::from(passed.into_iter().collect::<Kwargs>()));
+        }
+        let helper = state.env().get_template(&file)?;
+        let mail = state.lookup("__kiln_mail").unwrap_or(Value::from(false));
+        let captured = helper.render_captured(context! { __kiln_mail => mail })?;
+        Ok(Value::from_safe_string(captured.state().call_macro(&name, &args)?))
+    }
+}
+
+/// The app's template helpers, for `introspect`.
+pub(crate) fn helpers_listing(app_root: &std::path::Path) -> serde_json::Value {
+    let mut out: Vec<serde_json::Value> = rust_helpers()
+        .into_iter()
+        .map(|h| {
+            serde_json::json!({
+                "name": h.name,
+                "kind": h.kind.as_str(),
+                "file": crate::lint::app_relative(h.file),
+                "line": h.line,
+                "doc": h.doc,
+            })
+        })
+        .collect();
+    let templates = app_root.join("templates");
+    let (env, _) = build_environment(&templates.to_string_lossy());
+    out.extend(helper_macros(&env, &templates).into_iter().flat_map(|(file, macros)| {
+        macros.unwrap_or_default().into_iter().map(move |name| {
+            serde_json::json!({ "name": name, "kind": "macro", "file": format!("templates/{file}"), "line": null, "doc": "" })
+        })
+    }));
+    serde_json::json!(out)
 }
 
 fn markdown_css() -> String {
@@ -949,6 +1193,112 @@ mod tests {
         let text = render(root, "e.txt.jinja", None, &context).unwrap();
         assert_eq!(text, "src/lib.rs <script>alert(\"x\")</script> & it's");
         assert!(render(root, "missing.html.jinja", None, &context).is_err(), "undefined stays an error");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Shouts. (Registered for every kiln test; the name keeps it out of their way.)
+    #[crate::template_filter]
+    fn kiln_test_shout(text: &str, marks: Option<usize>) -> String {
+        format!("{}{}", text.to_uppercase(), "!".repeat(marks.unwrap_or(1)))
+    }
+
+    #[crate::template_function(name = "kiln_test_greet")]
+    fn greet(name: &str) -> Value {
+        Value::from_safe_string(format!("<b>Hi {}</b>", escape_html(name)))
+    }
+
+    #[test]
+    fn app_helpers_work_in_pages_layouts_includes_and_mail() {
+        let dir = std::env::temp_dir().join(format!("kiln-view-helpers-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("helpers")).unwrap();
+        std::fs::write(
+            dir.join("helpers/ui.html.jinja"),
+            "{% macro badge(label, tone=\"info\") %}<span class=\"{{ tone }}\">{{ label }}</span>{% endmacro %}\
+             {% macro card(title) %}<div>{{ title }}: {{ caller() }}</div>{% endmacro %}\
+             {% macro md(text) %}{{ text | markdown }}{% endmacro %}",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("page.html.jinja"),
+            "{{ name | kiln_test_shout }} {{ name | kiln_test_shout(3) }} {{ kiln_test_greet(name) }} \
+             {{ badge(\"a/b <i>\") }} {{ badge(\"x\", tone=\"warn\") }} {% call card(\"T\") %}in{% endcall %} \
+             {% include \"_part.html.jinja\" %}",
+        )
+        .unwrap();
+        std::fs::write(dir.join("_part.html.jinja"), "[{{ badge(name) }}]").unwrap();
+        std::fs::write(dir.join("layout.html.jinja"), "<main>{{ content }}</main>{{ badge(\"layout\") }}").unwrap();
+        std::fs::write(dir.join("mail.html.jinja"), "{{ md(\"**hi**\") }}").unwrap();
+        let root: &'static str = Box::leak(dir.display().to_string().into_boxed_str());
+        let context = context! { name => "ada & co" };
+
+        let html = render(root, "page.html.jinja", Some("layout.html.jinja"), &context).unwrap();
+        assert_eq!(
+            html,
+            "<main>ADA &amp; CO! ADA &amp; CO!!! <b>Hi ada &amp; co</b> <span class=\"info\">a/b &lt;i&gt;</span> \
+             <span class=\"warn\">x</span> <div>T: in</div> [<span class=\"info\">ada &amp; co</span>]</main>\
+             <span class=\"info\">layout</span>"
+        );
+        let mail = render_mail(root, "mail.html.jinja", None, &context).unwrap();
+        assert_eq!(mail, "<div class=\"kiln-markdown\"><p><strong>hi</strong></p>\n</div>");
+
+        let analysis = template_variables(root);
+        let globals: Vec<&str> = analysis["globals"].as_array().unwrap().iter().filter_map(|g| g.as_str()).collect();
+        for name in ["badge", "card", "md", "kiln_test_greet"] {
+            assert!(globals.contains(&name), "{name} is a global for kiln check: {globals:?}");
+        }
+        assert_eq!(analysis["helper_errors"], serde_json::json!([]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn helper_names_kiln_uses_are_refused() {
+        let dir = std::env::temp_dir().join(format!("kiln-view-clash-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("helpers")).unwrap();
+        std::fs::write(
+            dir.join("helpers/a.html.jinja"),
+            "{% macro asset(x) %}{% endmacro %}{% macro twice() %}{% endmacro %}",
+        )
+        .unwrap();
+        std::fs::write(dir.join("helpers/b.html.jinja"), "{% macro twice() %}{% endmacro %}").unwrap();
+        std::fs::write(dir.join("helpers/broken.html.jinja"), "{% macro oops( %}").unwrap();
+        fn none(_: &mut Environment<'static>) {}
+        let helper =
+            |name, kind, line| TemplateHelper { name, kind, doc: "", file: "src/helpers.rs", line, register: none };
+        let helpers = [
+            helper("upper", HelperKind::Filter, 1),
+            helper("markdown", HelperKind::Filter, 2),
+            helper("path", HelperKind::Function, 3),
+            helper("hue", HelperKind::Filter, 4),
+            helper("hue", HelperKind::Filter, 5),
+            // Filters and functions are separate namespaces.
+            helper("hue", HelperKind::Function, 6),
+        ];
+        let root: &'static str = Box::leak(dir.display().to_string().into_boxed_str());
+        let (mut env, problems) = build_environment(root);
+        let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert!(messages[0].starts_with("macro `asset` in templates/helpers/a.html.jinja has the name of a built-in"));
+        assert_eq!(
+            messages[1],
+            "macro `twice` in templates/helpers/b.html.jinja has the same name as the template function at templates/helpers/a.html.jinja"
+        );
+        assert!(messages[2].starts_with("templates/helpers/broken.html.jinja doesn't load"), "{}", messages[2]);
+        // The page fails to render (and the app to boot) rather than run without them.
+        std::fs::write(dir.join("p.html.jinja"), "hi").unwrap();
+        let error = render(root, "p.html.jinja", None, &()).unwrap_err().to_string();
+        assert!(error.contains("K0406") && error.contains("macro `asset`"), "{error}");
+        assert_eq!(template_variables(root)["helper_errors"].as_array().unwrap().len(), 3);
+
+        let refs: Vec<&TemplateHelper> = helpers.iter().collect();
+        let problems = install_helpers(&mut env, &refs, &dir.join("nothing-here"));
+        let messages: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(messages.len(), 4, "{messages:#?}");
+        assert!(
+            messages[0].starts_with("template filter `upper` (src/helpers.rs:1) has the name of a built-in filter")
+        );
+        assert!(messages[1].starts_with("template filter `markdown`"), "{}", messages[1]);
+        assert!(messages[2].starts_with("template function `path`"), "{}", messages[2]);
+        assert_eq!(messages[3], "template filter `hue` is registered twice: src/helpers.rs:4 and src/helpers.rs:5");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

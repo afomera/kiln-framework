@@ -570,6 +570,7 @@ impl Cli {
             "notifications": notifications,
             "mail_previews": previews,
             "lints": crate::lint::list(),
+            "template_helpers": crate::view::helpers_listing(&self.root),
         }))
     }
 
@@ -584,6 +585,7 @@ impl Cli {
                 names.join("\n")
             )));
         }
+        crate::view::check_helpers(&self.root)?;
         let mut app = App::new(db).secret_key(self.secret_key()?).root(&self.root);
         if let Some(configure) = self.configure {
             app = configure(app)?;

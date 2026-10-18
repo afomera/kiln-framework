@@ -159,7 +159,7 @@ into a job or op that documents why.",
         "K0401",
         "A template reads something its view doesn't provide",
         "A page's template sees exactly its view struct's fields (plus `flash`, `current_user`
-and the template functions). A record in a field carries its columns, its parts
+and the template functions, the app's own helpers included). A record in a field carries its columns, its parts
 (src/parts/) and the relations its `Loaded<..>` type names. This template reads a
 variable the view has no field for, or an attribute the record has no column or part
 for, so the page would fail when it renders (templates are strict about undefined
@@ -213,6 +213,18 @@ This entry isn't valid TOML, isn't a string, or points at a file that isn't ther
 page's `{{ javascript_importmap() }}` would fail to render. Re-run
 `kiln importmap pin <package>` to download the package again, fix the path, or remove the
 line (`kiln importmap unpin <package>`).",
+    ),
+    (
+        "K0406",
+        "A template helper's name is taken, or a helper file doesn't load",
+        "The app's own template helpers share names with Kiln's: `#[kiln::template_filter]` and
+`#[kiln::template_function]` fns, and every macro in templates/helpers/. This one has the
+same name as a built-in (`path`, `asset`, `markdown`, `upper`, ..) or as another helper, so
+one of them would silently replace the other; or a file in templates/helpers/ doesn't
+parse. The app refuses to boot until it's fixed.
+
+Rename the helper (`#[kiln::template_filter(name = \"avatar_hue\")]` keeps the Rust name),
+or rename the macro. `kiln introspect template_helpers` lists the app's helpers.",
     ),
     (
         "K0412",

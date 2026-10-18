@@ -2,7 +2,7 @@
 //!
 //! Two halves:
 //! - The app binary's `introspect` (what the registries know once it's compiled): routes with
-//!   their arguments and pipelines, records with columns and relations, jobs, schedules,
+//!   their arguments and pipelines, records with columns and relations, template helpers, jobs, schedules,
 //!   notifications and mail previews.
 //! - What only the source says: views and their templates, forms and their validations,
 //!   policies, ops, mail, parts, config, the templates on disk, Stimulus controllers and
@@ -292,6 +292,14 @@ fn summary(report: &Value) -> String {
     simple(&mut out, "schedules", &list("schedules"), &|v| format!("{} {}", s(&v["job"]), s(&v["when"])));
     simple(&mut out, "notifications", &list("notifications"), &|v| {
         format!("{}: {}", s(&v["name"]), s(&v["description"]))
+    });
+    simple(&mut out, "template helpers", &list("template_helpers"), &|v| {
+        let usage = match s(&v["kind"]).as_str() {
+            "filter" => format!("| {}", s(&v["name"])),
+            _ => format!("{}(..)", s(&v["name"])),
+        };
+        let place = if v["line"].is_null() { s(&v["file"]) } else { at(v) };
+        format!("{usage}  {}  {place}", s(&v["kind"]))
     });
     simple(&mut out, "config", &list("config"), &|v| format!("{} ({})", s(&v["name"]), field_names(v)));
     simple(&mut out, "stimulus controllers", &list("stimulus_controllers"), &|v| {

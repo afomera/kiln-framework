@@ -577,6 +577,13 @@ fn lint_template_variables(app: &App, report: &serde_json::Value, findings: &mut
         return Ok(());
     };
     let analysis: serde_json::Value = serde_json::from_str(&out).unwrap_or_default();
+    // K0406: the app's template filters, functions and helper macros, checked as at boot.
+    for problem in analysis["helper_errors"].as_array().into_iter().flatten() {
+        let message = problem["message"].as_str().unwrap_or_default();
+        let file = problem["file"].as_str().filter(|f| !f.is_empty());
+        let line = problem["line"].as_u64().map(|l| l as usize);
+        findings.error("K0406", message, file, line);
+    }
     let globals: BTreeSet<String> =
         analysis["globals"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(str::to_owned)).collect();
     let records = Records::from_introspection(report);
