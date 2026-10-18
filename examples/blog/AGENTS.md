@@ -89,6 +89,8 @@ generated tests passing.
 | Import-map pins | `config/importmap.toml` | `"@pierre/diffs" = "vendor/npm/@pierre/diffs@1.5.2.js"` (a file under `assets/`) or `"x" = "https://.."`; written by `kiln importmap pin` |
 | Files served as-is | `public/` (`robots.txt`, `favicon.svg`) | served at the site root when no route matches |
 | Presentation methods | `src/parts/{record}.rs` | `#[part] impl Record` + `#[record(.., parts)]` |
+| Template filters and functions (every template, no import) | `src/helpers/{name}.rs` (`pub mod helpers;` in `src/lib.rs`) | `#[kiln::template_filter] pub fn avatar_hue(name: &str) -> u32` is `{{ user.name \| avatar_hue }}`; `#[kiln::template_function] pub fn initials(name: &str) -> String` is `{{ initials(user.name) }}` |
+| Template macros (every template, no import) | `templates/helpers/{name}.html.jinja` | `{% macro icon(name, size=16) %}..{% endmacro %}`; any template calls `{{ icon("git-branch") }}` |
 | Test data | `src/factories.rs` | `impl Factory for Record`; defaults are placeholders, override per test with `app.create_with::<T>(\|n\| n.field = ..)` |
 | Tests | `tests/{resource}.rs` | `#[kiln::test] async fn ..(app: TestApp) -> Result` |
 | The app's own `kiln check` rules | `src/lints/{what_it_enforces}.rs` | `#[lint(code = "A0001")] pub fn rule(file: &File, report: &mut Report)` with `use kiln::lint::*`; the doc comment is its `kiln explain` text; test it with `kiln::lint::check(rule, path, source)` |
@@ -353,6 +355,18 @@ generated tests passing.
 - **Templates are strict:** an undefined value is an error, not an empty string. Output in
   `.html` templates is HTML-escaped (`&`, `<`, `>`, `"`, `'`; slashes stay as they are, so
   `{{ blob.path }}` prints `src/lib.rs`); `.txt` templates aren't escaped.
+- **Template helpers** are the app's own filters, functions and macros, usable in every
+  template (pages, layouts, includes, mail) without an import, and known to `kiln check`
+  (`kiln introspect template_helpers` lists them). Rust ones are plain fns with typed
+  arguments (`&str`, `String`, numbers, `Option<T>`; `kiln::view::template::{Value, Kwargs}`
+  or a leading `&State` for more); a filter's first argument is the value before the `|`.
+  Their return value is escaped like any other; return
+  `kiln::view::template::Value::from_safe_string(html)` only for markup you escaped yourself.
+  Errors are `Result<T, kiln::view::template::Error>`. Each macro in `templates/helpers/` is called by
+  its name (keyword arguments and `{% call %}` blocks work; `caller()` takes no arguments) and
+  sees only its arguments, not the page's variables. A name Kiln already uses (`path`,
+  `upper`, `markdown`, ..) or two helpers with one name stop the app at boot (K0406);
+  `#[kiln::template_filter(name = "hue")]` registers a fn under another name.
 - **Inside a record's own file**, column and relation names are constants (`title`,
   `owner`), so a binding or parameter with one of those names won't compile there; pick
   another name (the generated `owned_by` uses `who`).

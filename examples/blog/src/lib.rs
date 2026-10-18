@@ -5,6 +5,7 @@ pub mod app;
 pub mod config;
 pub mod factories;
 pub mod forms;
+pub mod helpers;
 pub mod jobs;
 pub mod lints;
 pub mod mail;
