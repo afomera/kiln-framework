@@ -21,11 +21,11 @@ async fn sign_in_and_out(app: TestApp) -> Result {
 }
 
 #[kiln::test]
-async fn unknown_email_rerenders_the_form(app: TestApp) -> Result {
+async fn unknown_email_rerenders_the_form_without_saying_so(app: TestApp) -> Result {
     app.client()
         .post_form(sessions::create::path(), &[("email", "nobody@example.com")])
         .await
         .assert_status(422)
-        .assert_contains("doesn&#x27;t match any user");
+        .assert_contains("can&#x27;t be used to sign in");
     Ok(())
 }
