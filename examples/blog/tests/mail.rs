@@ -41,7 +41,7 @@ async fn mail_renders_without_sending(app: TestApp) -> Result {
     let mail =
         CommentNotification { to: "x@example.com".into(), post, commenter: "Lin".into(), body: "<b>hi</b>".into() };
     let message = mail.message()?;
-    assert!(message.html.contains("&lt;b&gt;hi&lt;&#x2f;b&gt;"), "bodies are escaped: {}", message.html);
+    assert!(message.html.contains("&lt;b&gt;hi&lt;/b&gt;"), "bodies are escaped: {}", message.html);
     assert_eq!(message.from, "app@localhost");
     Ok(())
 }

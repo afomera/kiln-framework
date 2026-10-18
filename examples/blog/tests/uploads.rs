@@ -16,7 +16,7 @@ fn kept_file_token(html: &str, field: &str) -> String {
 
 fn img_src(html: &str) -> String {
     let start = html.find("class=\"cover\" src=\"").map(|i| i + "class=\"cover\" src=\"".len()).expect("cover shown");
-    html[start..start + html[start..].find('"').unwrap()].replace("&#x2f;", "/")
+    html[start..start + html[start..].find('"').unwrap()].to_owned()
 }
 
 #[kiln::test]
@@ -51,7 +51,7 @@ async fn an_author_uploads_a_cover_and_readers_see_it(app: TestApp) -> Result {
     let edit = client.get_html(posts::edit::path("with-a-cover")).await;
     let marker = "class=\"field-file\"><img src=\"";
     let start = edit.text.find(marker).expect("the edit form shows the cover") + marker.len();
-    let original = edit.text[start..start + edit.text[start..].find('"').unwrap()].replace("&#x2f;", "/");
+    let original = edit.text[start..start + edit.text[start..].find('"').unwrap()].to_owned();
     assert!(original.starts_with("/kiln/files/"), "{original}");
     let image = app.get(&original).await;
     image.assert_status(200);

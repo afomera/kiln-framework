@@ -72,6 +72,7 @@ button {
 }
 button:hover { border-color: var(--accent); }
 li { margin-bottom: .75rem; }
+.avatar { display: inline-grid; place-items: center; width: 1.6rem; height: 1.6rem; border-radius: 999px; font-size: .8rem; font-weight: 600; vertical-align: middle; color: #fff; background: hsl(var(--avatar-hue) 55% 45%); }
 
 /* Theme switcher */
 .theme-switcher { display: inline-flex; padding: 2px; gap: 2px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }

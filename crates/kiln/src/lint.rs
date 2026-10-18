@@ -232,7 +232,7 @@ pub(crate) fn list() -> serde_json::Value {
 }
 
 /// `file!()` is relative to the workspace when the app is in one (`examples/blog/src/..`).
-fn app_relative(file: &str) -> &str {
+pub(crate) fn app_relative(file: &str) -> &str {
     match file.find("src/") {
         Some(i) if i == 0 || file[..i].ends_with('/') => &file[i..],
         _ => file,

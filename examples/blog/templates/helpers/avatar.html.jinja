@@ -1,0 +1,2 @@
+{# Every macro in templates/helpers/ can be called from any template: `{{ avatar(user.name) }}`. #}
+{% macro avatar(name) %}<span class="avatar" style="--avatar-hue: {{ name | avatar_hue }}" aria-hidden="true">{{ name[:1] | upper }}</span>{% endmacro %}
