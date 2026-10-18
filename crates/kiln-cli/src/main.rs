@@ -51,7 +51,9 @@ enum Command {
     /// one into assets/vendor/npm/ and pins it in config/importmap.toml; `importmap unpin`.
     #[command(subcommand)]
     Importmap(importmap::Importmap),
-    /// Schema workflow: `db diff <name>`, `db migrate`, `db status`, `db seed`, `db reset`.
+    /// Schema workflow: `db diff <name>`, `db migrate`, `db status`, `db seed`, `db reset`
+    /// (drops the `DATABASE_URL` database, else the default one; never in production, and a
+    /// Postgres server not on this machine only with `db reset --allow-remote`).
     Db {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
