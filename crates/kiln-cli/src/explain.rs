@@ -165,6 +165,13 @@ variable the view has no field for, or an attribute the record has no column or 
 for, so the page would fail when it renders (templates are strict about undefined
 values).
 
+Layouts and included templates are checked too. A layout renders with the page's
+context: the view's fields, `content`, the page's `{% set %}`s (`title`), `flash`,
+`current_user` and the template functions. So every view that uses a layout must provide
+what it reads; the finding names the views that don't. An `{% include %}`d template sees
+the context at the include, loop and `{% with %}` variables included. A read the template
+guards (`{% if repo_nav is defined %}`, `{{ title | default(\"\") }}`) is fine.
+
 Fix the spelling, add the field to the view struct and set it in the action, or add a
 part for a computed value:
 
@@ -228,7 +235,8 @@ Add it to the field's type and load it in the action:
   // nested: post::comments<(comment::author,)>
 
 Loops are followed one level, so `{% for c in post.comments %}{{ c.author.name }}` needs
-`post::comments<(comment::author,)>`.",
+`post::comments<(comment::author,)>`, and so does `{{ c.author.name }}` in a template
+included inside that loop. Layouts are checked against each view that uses them.",
     ),
     (
         "K0501",

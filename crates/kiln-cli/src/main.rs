@@ -16,6 +16,7 @@ mod names;
 mod new;
 mod release;
 mod template_check;
+mod template_scan;
 
 use std::process::ExitCode;
 

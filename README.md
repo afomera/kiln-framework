@@ -102,12 +102,12 @@ writes the record, migration, form, policy, three ops, seven actions, four views
 | K0204 | `db/snapshot.json` was written with a migration that's since been deleted (`kiln db undo` restores it) |
 | K0302 | (warn) A data-changing action has no test that calls its path helper |
 | K0304 | No `policy::as_system` in an action |
-| K0401 | A template reads only what its view provides |
+| K0401 | A template, its layout and its includes read only what the view provides |
 | K0402 | Every `path("..")` in a template names a real route |
 | K0403 | Every `include`/`extends` names a real template |
 | K0404 | Every `data-controller` names a real Stimulus controller |
 | K0405 | Every import-map pin loads |
-| K0412 | A template reads only the relations its view loaded |
+| K0412 | A template, its layout and its includes read only the relations the view loaded |
 | K0501 | No raw `sqlx` outside `src/records/` |
 | K0601 | No environment reads outside `src/main.rs` |
 | K0701 | Jobs, mail and notifications inside a transaction are enqueued on it, not on the pool |

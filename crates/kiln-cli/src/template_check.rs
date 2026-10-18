@@ -11,10 +11,16 @@
 //!
 //! Loops over a field or a loaded relation (`{% for c in post.comments %}`) are followed one
 //! loop deep, so `c.author` is checked too.
+//!
+//! [`check_layouts_and_includes`] does the same for the templates a page pulls in: its layout
+//! (rendered with the page's context) and its `{% include %}`s (rendered with the context at
+//! the include), for every view that uses them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
+
+use crate::template_scan::{Kind, Scan, scan};
 
 /// What a value in a template is, as far as the checks care.
 #[derive(Clone, Debug, PartialEq)]
@@ -305,6 +311,243 @@ fn snake(name: &str) -> String {
     out
 }
 
+/// A view or mail, with the templates it renders: its page, its layout (`None` for
+/// `layout = none`), and through them every `{% include %}` and `{% extends %}`.
+pub struct Owner {
+    /// `views::pulls::Index`.
+    pub name: String,
+    /// `pulls/index.html.jinja`.
+    pub template: String,
+    /// `layouts/repo.html.jinja`.
+    pub layout: Option<String>,
+    pub fields: BTreeMap<String, Shape>,
+}
+
+/// What the layout and include checks read the templates from.
+pub struct Templates<'a> {
+    /// A template's source by name (`layouts/app.html.jinja`).
+    pub source: &'a dyn Fn(&str) -> Option<String>,
+    /// The top-level names minijinja reports each template reading without defining them.
+    /// Only these are ever flagged.
+    pub undeclared: &'a BTreeMap<String, BTreeSet<String>>,
+    pub globals: &'a BTreeSet<String>,
+    pub records: &'a Records,
+}
+
+/// A finding in a layout or an included template.
+#[derive(Debug, PartialEq)]
+pub struct TreeProblem {
+    pub code: &'static str,
+    /// `templates/layouts/repo.html.jinja`.
+    pub file: String,
+    pub line: usize,
+    pub message: String,
+}
+
+enum Found {
+    /// A name the context doesn't have.
+    Missing(String),
+    /// What `walk` said about an attribute.
+    Attr(String),
+}
+
+struct Raw {
+    code: &'static str,
+    file: String,
+    line: usize,
+    needle: String,
+    owner: String,
+    via: String,
+    found: Found,
+}
+
+struct Tree<'a> {
+    templates: &'a Templates<'a>,
+    scans: BTreeMap<String, Option<std::rc::Rc<Scan>>>,
+    found: Vec<Raw>,
+}
+
+/// K0401/K0412 for what a page's view reaches beyond its own template: the layout renders
+/// with the page's context (its fields, `content`, the page's `{% set %}`s, `flash`,
+/// `current_*` and the template functions), and an included template with the context at
+/// the `{% include %}` (plus the loop, `with` and `set` variables there). A layout or
+/// partial shared by several views must work with each of them. `{% extends %}` is
+/// followed, leaving out the parent's blocks the child replaces. Names a template guards
+/// (`is defined`, `| default`) aren't flagged; neither are macro bodies, computed include
+/// names, or anything minijinja doesn't report as a variable the template reads.
+pub fn check_layouts_and_includes(owners: &[Owner], templates: &Templates) -> Vec<TreeProblem> {
+    let mut tree = Tree { templates, scans: BTreeMap::new(), found: vec![] };
+    for owner in owners {
+        let Some(page) = tree.scan(&owner.template) else { continue };
+        // The page's own reads are checked against the view already; follow what it pulls in.
+        tree.visit(&owner.template, &owner.fields, owner, "extended by its page", false, &BTreeSet::new(), &mut vec![]);
+        let Some(layout) = &owner.layout else { continue };
+        let mut context = owner.fields.clone();
+        context.insert("content".into(), Shape::Other);
+        for (name, path) in &page.declared {
+            let shape = path.as_deref().map_or(Shape::Other, |p| tree.path_shape(p, &[], &owner.fields));
+            context.insert(name.clone(), shape);
+        }
+        tree.visit(layout, &context, owner, "as the layout", true, &BTreeSet::new(), &mut vec![]);
+    }
+    group(tree.found)
+}
+
+impl Tree<'_> {
+    fn scan(&mut self, name: &str) -> Option<std::rc::Rc<Scan>> {
+        let source = self.templates.source;
+        self.scans.entry(name.to_owned()).or_insert_with(|| source(name).map(|s| std::rc::Rc::new(scan(&s)))).clone()
+    }
+
+    /// The shape of `path` (`post.comments`), its head looked up in `locals` then `context`.
+    fn path_shape(&self, path: &str, locals: &[(String, Option<String>)], context: &BTreeMap<String, Shape>) -> Shape {
+        let parts: Vec<&str> = path.split('.').collect();
+        let head = match locals.iter().rposition(|(name, _)| name == parts[0]) {
+            Some(at) => self.local_shape(&locals[..=at], context),
+            None => context.get(parts[0]).cloned().unwrap_or(Shape::Other),
+        };
+        resolve(&head, &parts[1..])
+    }
+
+    /// The shape of the last of `locals`, from the path it was taken from.
+    fn local_shape(&self, locals: &[(String, Option<String>)], context: &BTreeMap<String, Shape>) -> Shape {
+        let Some(((_, path), outer)) = locals.split_last() else { return Shape::Other };
+        path.as_deref().map_or(Shape::Other, |p| self.path_shape(p, outer, context))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn visit(
+        &mut self,
+        name: &str,
+        context: &BTreeMap<String, Shape>,
+        owner: &Owner,
+        via: &str,
+        own_reads: bool,
+        replaced: &BTreeSet<String>,
+        stack: &mut Vec<String>,
+    ) {
+        if stack.iter().any(|s| s == name) {
+            return;
+        }
+        let Some(scan) = self.scan(name) else { return };
+        stack.push(name.to_owned());
+        // What the template sets for itself (`{% set title = post.title %}`) shadows the context.
+        let mut inner = context.clone();
+        for (declared, path) in &scan.declared {
+            let shape = path.as_deref().map_or(Shape::Other, |p| self.path_shape(p, &[], context));
+            inner.insert(declared.clone(), shape);
+        }
+        if let Some(parent) = &scan.extends {
+            // The parent renders with this template's blocks in place of its own.
+            let mut replaced = replaced.clone();
+            replaced.extend(scan.blocks.difference(&scan.super_blocks).cloned());
+            self.visit(parent, &inner, owner, via, true, &replaced, stack);
+        }
+        let empty = BTreeSet::new();
+        let undeclared = self.templates.undeclared.get(name).unwrap_or(&empty);
+        let file = format!("templates/{name}");
+        for item in &scan.items {
+            if item.blocks.iter().any(|b| replaced.contains(b)) {
+                continue;
+            }
+            match &item.kind {
+                Kind::Read(path) if own_reads => {
+                    let top = &path[0];
+                    if scan.guarded.contains(top) {
+                        continue;
+                    }
+                    let shape = if item.locals.iter().any(|(n, _)| n == top) {
+                        let at = item.locals.iter().rposition(|(n, _)| n == top).unwrap_or(0);
+                        self.local_shape(&item.locals[..=at], &inner)
+                    } else if scan.declared.contains_key(top) {
+                        inner.get(top).cloned().unwrap_or(Shape::Other)
+                    } else if self.templates.globals.contains(top)
+                        || top.starts_with("current_")
+                        || !undeclared.contains(top)
+                    {
+                        continue;
+                    } else if let Some(shape) = context.get(top) {
+                        shape.clone()
+                    } else {
+                        self.found.push(Raw {
+                            code: "K0401",
+                            file: file.clone(),
+                            line: item.line,
+                            needle: top.clone(),
+                            owner: owner.name.clone(),
+                            via: via.to_owned(),
+                            found: Found::Missing(top.clone()),
+                        });
+                        continue;
+                    };
+                    let attrs: Vec<&str> = path[1..].iter().map(String::as_str).collect();
+                    if let Some(problem) = walk(top, &shape, &attrs, self.templates.records) {
+                        self.found.push(Raw {
+                            code: problem.code,
+                            file: file.clone(),
+                            line: item.line,
+                            needle: problem.needle,
+                            owner: owner.name.clone(),
+                            via: via.to_owned(),
+                            found: Found::Attr(problem.message),
+                        });
+                    }
+                }
+                Kind::Read(_) => {}
+                Kind::Include(target) => {
+                    let mut at_include = inner.clone();
+                    for (k, (local, _)) in item.locals.iter().enumerate() {
+                        at_include.insert(local.clone(), self.local_shape(&item.locals[..=k], &inner));
+                    }
+                    let via = format!("included from {file}:{}", item.line);
+                    self.visit(target, &at_include, owner, &via, true, &BTreeSet::new(), stack);
+                }
+            }
+        }
+        stack.pop();
+    }
+}
+
+/// One finding per place, naming every view it fails for.
+fn group(found: Vec<Raw>) -> Vec<TreeProblem> {
+    let mut groups: Vec<(Raw, Vec<String>)> = vec![];
+    for raw in found {
+        let same = |(g, _): &&mut (Raw, Vec<String>)| {
+            g.code == raw.code && g.file == raw.file && g.line == raw.line && g.needle == raw.needle
+        };
+        match groups.iter_mut().find(|g| same(g)) {
+            Some((_, owners)) => {
+                if !owners.contains(&raw.owner) {
+                    owners.push(raw.owner);
+                }
+            }
+            None => {
+                let owner = raw.owner.clone();
+                groups.push((raw, vec![owner]));
+            }
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(raw, owners)| {
+            let shown = if owners.len() > 3 {
+                format!("{} and {} more", owners[..3].join(", "), owners.len() - 3)
+            } else {
+                owners.join(", ")
+            };
+            let message = match raw.found {
+                Found::Missing(top) => format!(
+                    "reads `{top}`, which {shown} {} provide ({}); add the field, or guard the read with `{{% if {top} is defined %}}`",
+                    if owners.len() == 1 { "doesn't" } else { "don't" },
+                    raw.via
+                ),
+                Found::Attr(message) => format!("{message} (for {shown}, {})", raw.via),
+            };
+            TreeProblem { code: raw.code, file: raw.file, line: raw.line, message }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -378,5 +621,193 @@ mod tests {
         let source = "{% for post in posts %}{{ post.author.name }} {{ post.comments }}{% endfor %}";
         let problems = check("Index", source, &["posts".into()], &f, &BTreeSet::new(), &records());
         assert_eq!(codes(&problems), [("K0412", "post.comments")]);
+    }
+
+    /// Checks `owners` against `files` (name → source), with minijinja's own reading of the
+    /// names each template reads, as `templates --variables` reports them.
+    fn tree(files: &[(&str, &str)], owners: &[Owner]) -> Vec<TreeProblem> {
+        let mut env = minijinja::Environment::new();
+        for (name, source) in files {
+            env.add_template_owned(name.to_string(), source.to_string()).unwrap();
+        }
+        let undeclared: BTreeMap<String, BTreeSet<String>> = files
+            .iter()
+            .map(|(name, _)| {
+                let used = env.get_template(name).unwrap().undeclared_variables(true);
+                (name.to_string(), used.iter().map(|u| u.split('.').next().unwrap().to_owned()).collect())
+            })
+            .collect();
+        let sources: BTreeMap<String, String> = files.iter().map(|(n, s)| (n.to_string(), s.to_string())).collect();
+        let source = |name: &str| sources.get(name).cloned();
+        let globals: BTreeSet<String> = ["path", "flash", "loop", "super"].map(String::from).into();
+        let records = records();
+        check_layouts_and_includes(
+            owners,
+            &Templates { source: &source, undeclared: &undeclared, globals: &globals, records: &records },
+        )
+    }
+
+    fn owner(name: &str, template: &str, layout: Option<&str>, field_types: &[(&str, &str)]) -> Owner {
+        Owner {
+            name: name.into(),
+            template: template.into(),
+            layout: layout.map(str::to_owned),
+            fields: fields(field_types),
+        }
+    }
+
+    fn places(problems: &[TreeProblem]) -> Vec<(&str, &str, usize)> {
+        problems.iter().map(|p| (p.code, p.file.as_str(), p.line)).collect()
+    }
+
+    #[test]
+    fn layouts_read_only_what_every_view_using_them_provides() {
+        let layout = "<title>{% if title is defined %}{{ title }} · {% endif %}Repo</title>\n\
+                      <nav>{{ repo_nav }}</nav>\n\
+                      {% for kind, message in flash | items %}{{ kind }}: {{ message }}{% endfor %}\n\
+                      <h1>{{ repo.title }}</h1>{{ content }} {{ path(\"posts::index\") }}";
+        let files = [
+            ("layouts/repo.html.jinja", layout),
+            ("pulls/index.html.jinja", "{% set title = \"Pulls\" %}{{ repo.title }}"),
+            ("issues/index.html.jinja", "{{ repo_nav }}"),
+        ];
+        let problems = tree(
+            &files,
+            &[
+                owner(
+                    "views::pulls::Index",
+                    "pulls/index.html.jinja",
+                    Some("layouts/repo.html.jinja"),
+                    &[("repo", "Post")],
+                ),
+                owner(
+                    "views::issues::Index",
+                    "issues/index.html.jinja",
+                    Some("layouts/repo.html.jinja"),
+                    &[("repo", "Post"), ("repo_nav", "String")],
+                ),
+            ],
+        );
+        assert_eq!(places(&problems), [("K0401", "templates/layouts/repo.html.jinja", 2)], "{problems:?}");
+        assert!(
+            problems[0]
+                .message
+                .starts_with("reads `repo_nav`, which views::pulls::Index doesn't provide (as the layout)"),
+            "{}",
+            problems[0].message
+        );
+    }
+
+    #[test]
+    fn guarded_layout_reads_and_page_sets_are_fine() {
+        let layout = "{% if repo_nav is defined %}{{ repo_nav }}{% endif %}{{ sidebar | default(\"\") }}\
+                      {{ heading }}{{ content }}";
+        let files = [
+            ("layouts/app.html.jinja", layout),
+            ("a.html.jinja", "{% set heading = \"A\" %}"),
+            ("b.html.jinja", "no heading"),
+        ];
+        let problems = tree(
+            &files,
+            &[
+                owner("views::A", "a.html.jinja", Some("layouts/app.html.jinja"), &[]),
+                owner("views::B", "b.html.jinja", Some("layouts/app.html.jinja"), &[]),
+                owner("views::Partial", "b.html.jinja", None, &[]),
+            ],
+        );
+        assert_eq!(places(&problems), [("K0401", "templates/layouts/app.html.jinja", 1)], "{problems:?}");
+        assert!(problems[0].message.starts_with("reads `heading`, which views::B doesn't"), "{}", problems[0].message);
+    }
+
+    #[test]
+    fn includes_see_the_loop_and_with_variables_at_the_include() {
+        let files = [
+            (
+                "posts/index.html.jinja",
+                "{% for post in posts %}{% include \"posts/_post.html.jinja\" %}{% endfor %}\n\
+                 {% with heading = \"Posts\" %}{% include \"_heading.html.jinja\" %}{% endwith %}",
+            ),
+            (
+                "posts/_post.html.jinja",
+                "{{ loop.index }} {{ post.title }} by {{ post.author.name }}\n{{ post.comments }}",
+            ),
+            ("_heading.html.jinja", "<h1>{{ heading }}</h1>"),
+        ];
+        let problems = tree(
+            &files,
+            &[owner(
+                "views::posts::Index",
+                "posts/index.html.jinja",
+                None,
+                &[("posts", "Vec<Loaded<Post, (post::author,)>>")],
+            )],
+        );
+        assert_eq!(places(&problems), [("K0412", "templates/posts/_post.html.jinja", 2)], "{problems:?}");
+        assert!(problems[0].message.contains("included from templates/posts/index.html.jinja:1"), "{problems:?}");
+    }
+
+    #[test]
+    fn includes_reading_a_missing_field_are_found_through_nesting_without_looping() {
+        let files = [
+            ("posts/show.html.jinja", "<h1>{{ post.title }}</h1>\n{% include \"posts/_comments.html.jinja\" %}"),
+            (
+                "posts/_comments.html.jinja",
+                "{% for c in post.comments %}\n{% include \"comments/_comment.html.jinja\" %}\n{% endfor %}\n{% include partial %}",
+            ),
+            (
+                "comments/_comment.html.jinja",
+                "{{ c.body }}\n{{ c.author.name }}\n{{ categories }}\n{% include \"posts/_comments.html.jinja\" %}",
+            ),
+        ];
+        let problems = tree(
+            &files,
+            &[owner(
+                "views::posts::Show",
+                "posts/show.html.jinja",
+                None,
+                &[("post", "Loaded<Post, (post::comments,)>"), ("partial", "String")],
+            )],
+        );
+        assert_eq!(
+            places(&problems),
+            [
+                ("K0412", "templates/comments/_comment.html.jinja", 2),
+                ("K0401", "templates/comments/_comment.html.jinja", 3)
+            ],
+            "{problems:?}"
+        );
+        assert!(
+            problems[1].message.starts_with(
+                "reads `categories`, which views::posts::Show doesn't provide (included from templates/posts/_comments.html.jinja:2)"
+            ),
+            "{}",
+            problems[1].message
+        );
+    }
+
+    #[test]
+    fn extended_layouts_skip_the_blocks_they_replace() {
+        let files = [
+            (
+                "layouts/base.html.jinja",
+                "{% block nav %}{{ default_nav }}{% endblock %}\n{{ content }}\n{{ site_name }}",
+            ),
+            (
+                "layouts/admin.html.jinja",
+                "{% extends \"layouts/base.html.jinja\" %}{% block nav %}{{ admin_nav }}{% endblock %}",
+            ),
+            ("admin/index.html.jinja", "{% from \"forms.html.jinja\" import input %}{{ input(form) }}"),
+            ("forms.html.jinja", "{% macro input(field, label=none) %}{{ field }}{{ label }}{{ outer }}{% endmacro %}"),
+        ];
+        let problems = tree(
+            &files,
+            &[owner(
+                "views::admin::Index",
+                "admin/index.html.jinja",
+                Some("layouts/admin.html.jinja"),
+                &[("admin_nav", "String"), ("form", "String")],
+            )],
+        );
+        assert_eq!(places(&problems), [("K0401", "templates/layouts/base.html.jinja", 3)], "{problems:?}");
     }
 }

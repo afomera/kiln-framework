@@ -1970,6 +1970,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "libc",
+ "minijinja",
  "portable-pty",
  "proc-macro2",
  "quote",
