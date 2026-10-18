@@ -48,6 +48,9 @@
 body { font: 16px/1.6 system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1rem; color: var(--ink); background: var(--bg); }
 a { color: var(--accent); }
 header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+/* Other assets by their path from here, like url("images/mark.svg"): Kiln serves this file
+   with the image's fingerprinted URL in its place, so the image is cached forever too. */
+.brand { padding-left: 1.6rem; background: url("images/mark.svg") left center / 1.2rem no-repeat; font-weight: 600; text-decoration: none; }
 nav { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
 form.inline { display: inline; }
 .meta { color: var(--muted); font-size: .9rem; }

@@ -25,6 +25,26 @@ async fn assets_are_fingerprinted_and_cached_forever(app: TestApp) -> Result {
 }
 
 #[kiln::test]
+async fn stylesheets_link_other_assets_at_fingerprinted_urls(app: TestApp) -> Result {
+    let page = app.get_html(posts::index::path()).await;
+    let css = app.get(linked(&page.text, "/assets/app-")).await;
+    // `url("images/mark.svg")` in assets/app.css, rewritten (the comment mentioning it isn't).
+    css.assert_status(200)
+        .assert_contains(r#"like url("images/mark.svg")"#)
+        .assert_not_contains(r#"background: url("images/mark.svg")"#);
+    let mark = linked(&css.text, "/assets/images/mark-");
+    assert!(mark.ends_with(".svg") && css.text.contains(&format!("url(\"{mark}\") left center")), "{mark}");
+
+    let res = app.get(mark).await;
+    res.assert_status(200).assert_contains("<svg");
+    assert_eq!(res.headers["content-type"], "image/svg+xml");
+    assert_eq!(res.headers["cache-control"], "public, max-age=31536000, immutable");
+    // Unfingerprinted names aren't served, which is why the stylesheet is rewritten.
+    app.get("/assets/images/mark.svg").await.assert_status(404);
+    Ok(())
+}
+
+#[kiln::test]
 async fn stale_fingerprints_still_serve_but_are_not_cached(app: TestApp) -> Result {
     let res = app.get("/assets/app-00000000.css").await;
     res.assert_status(200);
