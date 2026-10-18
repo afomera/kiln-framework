@@ -2,7 +2,7 @@
 //! Every finding has a stable code so agents can look it up and fix it mechanically.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -569,9 +569,10 @@ fn paths_conflict(a: &str, b: &str) -> Option<&'static str> {
     }
 }
 
-/// K0401, K0412: templates read only what their view (or mail) provides.
+/// K0401, K0412: templates read only what their view (or mail) provides, and so do the
+/// layouts and partials they render.
 fn lint_template_variables(app: &App, report: &serde_json::Value, findings: &mut Findings) -> Result<(), String> {
-    use crate::template_check::{Records, check, shape_of};
+    use crate::template_check::{Owner, Records, Templates, check, check_layouts_and_includes, shape_of};
     let Some(out) = app.binary_output(&["templates", "--variables"])? else {
         findings.error("K0002", "couldn't list the templates' variables (`templates --variables`)", None, None);
         return Ok(());
@@ -593,10 +594,11 @@ fn lint_template_variables(app: &App, report: &serde_json::Value, findings: &mut
         .flatten()
         .map(|v| (v, &["html"][..]))
         .chain(report["mail"].as_array().into_iter().flatten().map(|m| (m, &["html", "txt"][..])));
+    let mut tree_owners = vec![];
     for (owner, extensions) in owners {
         let Some(template) = owner["template"].as_str() else { continue };
         let name = owner["name"].as_str().unwrap_or_default();
-        let fields = owner["fields"]
+        let fields: BTreeMap<String, _> = owner["fields"]
             .as_array()
             .into_iter()
             .flatten()
@@ -612,9 +614,55 @@ fn lint_template_variables(app: &App, report: &serde_json::Value, findings: &mut
                 let line = find_line(&source, &problem.needle);
                 findings.error(problem.code, problem.message, Some(&relative), line);
             }
+            // Mail's HTML part renders in layouts/mail; its text part has no layout.
+            let layout = match *extension {
+                "html" => owner["layout"].as_str().map(str::to_owned),
+                _ => None,
+            };
+            tree_owners.push(Owner {
+                name: owner_path(owner["file"].as_str().unwrap_or_default(), name),
+                template: file,
+                layout,
+                fields: fields.clone(),
+            });
         }
     }
+    let undeclared: BTreeMap<String, BTreeSet<String>> = analysis["templates"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(file, used)| {
+            let tops = used.as_array().into_iter().flatten().filter_map(|u| u.as_str()?.split('.').next());
+            (file.clone(), tops.map(str::to_owned).collect())
+        })
+        .collect();
+    let source = |name: &str| {
+        // Only templates under templates/, by the names minijinja uses.
+        let name = Path::new(name);
+        if name.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return None;
+        }
+        fs::read_to_string(app.path("templates").join(name)).ok()
+    };
+    let templates = Templates { source: &source, undeclared: &undeclared, globals: &globals, records: &records };
+    for problem in check_layouts_and_includes(&tree_owners, &templates) {
+        findings.error(problem.code, problem.message, Some(&problem.file), Some(problem.line));
+    }
     Ok(())
+}
+
+/// `views::pulls::Index` for `Index` in src/views/pulls/index.rs (re-exported from its
+/// module, as generated), else `views::pulls::index::Index`.
+fn owner_path(file: &str, name: &str) -> String {
+    let module = file.strip_prefix("src/").unwrap_or(file).trim_end_matches(".rs");
+    let module = module.strip_suffix("/mod").unwrap_or(module);
+    let mut segments: Vec<&str> = module.split('/').filter(|s| !s.is_empty() && *s != "lib").collect();
+    let snake = snake(name);
+    if segments.last() == Some(&snake.as_str()) {
+        segments.pop();
+    }
+    segments.push(name);
+    segments.join("::")
 }
 
 /// The first line where `needle` appears as a whole name (not inside a longer one).
@@ -923,6 +971,14 @@ pub async fn delete_event(ctx: &Ctx, event: Authorized<Delete, Event>) -> Result
             findings.0[0].message
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn owners_are_named_by_module_path() {
+        assert_eq!(owner_path("src/views/pulls/index.rs", "Index"), "views::pulls::Index");
+        assert_eq!(owner_path("src/views/pulls/mod.rs", "Index"), "views::pulls::Index");
+        assert_eq!(owner_path("src/views/pulls/list.rs", "Index"), "views::pulls::list::Index");
+        assert_eq!(owner_path("src/mail/password_reset.rs", "PasswordReset"), "mail::PasswordReset");
     }
 
     #[test]

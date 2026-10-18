@@ -52,7 +52,10 @@ Commands:
                       One migration file per past year (default: every year before this one)
   db status [--json]  Pending migrations and schema drift
   db seed             Run the app's seed function
-  db reset            Recreate the development database, migrate and seed
+  db reset [--allow-remote]
+                      Drop and recreate the app's database (DATABASE_URL, else the default
+                      development one), migrate and seed. Never in production; a Postgres
+                      server not on this machine needs --allow-remote.
   secrets ...         Encrypted secrets: init | show | set KEY VALUE | unset KEY | edit
   routes [--json]     The route table
   manifest            Routes and records as JSON
@@ -284,7 +287,8 @@ impl Cli {
             ["db", "squash", "--before", year] => self.squash(year).await,
             ["db", "status", rest @ ..] => self.status(rest.contains(&"--json")).await,
             ["db", "seed"] => self.run_seed().await,
-            ["db", "reset"] => self.reset().await,
+            ["db", "reset"] => self.reset(false).await,
+            ["db", "reset", "--allow-remote"] => self.reset(true).await,
             ["routes"] => {
                 println!("{}", routes_table());
                 Ok(())
@@ -806,21 +810,124 @@ impl Cli {
         }
     }
 
-    async fn reset(self) -> Result {
-        if std::env::var("DATABASE_URL").is_ok() {
-            return Err(Error::BadRequest("`db reset` only resets the default development database".into()));
-        }
-        if self.backend().name() == "postgres" {
+    async fn reset(self, allow_remote: bool) -> Result {
+        let url = self.database_url();
+        let target = redact_database_url(&url);
+        let pghost = std::env::var("PGHOST").ok();
+        reset_allowed(&url, crate::config::is_production(), allow_remote, pghost.as_deref())
+            .map_err(Error::BadRequest)?;
+        println!("Resetting {target}");
+        if crate::dialect::for_url(&url)?.name() == "postgres" {
             self.db().await?.execute_script("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").await?;
-        } else {
+        } else if let Some(path) = sqlite_file(&url) {
             for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(format!("{}{suffix}", self.sqlite_path().display()));
+                let _ = std::fs::remove_file(format!("{path}{suffix}"));
             }
         }
         let applied = self.db().await?.migrate(&self.migrations_dir()).await?;
-        println!("Recreated the development database ({} migrations).", applied.len());
+        println!("Recreated {target} ({} migrations).", applied.len());
         self.run_seed().await
     }
+}
+
+/// Whether `db reset` may drop the database at `url`: never in production, and a Postgres
+/// server elsewhere (a shared or hosted one) only with `--allow-remote`. SQLite files and
+/// Postgres on this machine (localhost, a loopback address, a unix socket) are fair game,
+/// so each checkout can point `DATABASE_URL` at its own local database and reset it.
+/// `pghost` is the `PGHOST` environment variable, which a URL without a host falls back to.
+fn reset_allowed(
+    url: &str,
+    production: bool,
+    allow_remote: bool,
+    pghost: Option<&str>,
+) -> std::result::Result<(), String> {
+    let target = redact_database_url(url);
+    if production {
+        return Err(format!(
+            "`db reset` drops the database ({target}); it doesn't run in production (KILN_ENV=production)"
+        ));
+    }
+    if !allow_remote && !database_is_local(url, pghost) {
+        return Err(format!(
+            "`db reset` would drop {target}, which isn't on this machine; \
+             pass --allow-remote if that's the database you mean to wipe"
+        ));
+    }
+    Ok(())
+}
+
+/// SQLite (always a file here), or Postgres whose every host is this machine.
+fn database_is_local(url: &str, pghost: Option<&str>) -> bool {
+    let Some((scheme, rest)) = url.split_once(':') else { return false };
+    match scheme {
+        "sqlite" => true,
+        "postgres" | "postgresql" => {
+            let Some(rest) = rest.strip_prefix("//") else { return false };
+            let (before_query, query) = rest.split_once('?').unwrap_or((rest, ""));
+            let authority = before_query.split('/').next().unwrap_or_default();
+            let mut hosts = authority.rsplit_once('@').map_or(authority, |(_, hosts)| hosts).to_owned();
+            // `?host=` overrides the authority (it's how a socket directory is usually given).
+            for pair in query.split('&') {
+                if let Some(value) = pair.strip_prefix("host=") {
+                    hosts = value.to_owned();
+                }
+            }
+            if hosts.is_empty() {
+                // No host: libpq and sqlx use PGHOST, else the local socket.
+                return pghost.is_none_or(|h| h.split(',').all(host_is_local));
+            }
+            hosts.split(',').all(|host| {
+                let host = percent_encoding::percent_decode_str(host).decode_utf8_lossy();
+                // Drop the port: `[::1]:5432`, `localhost:5432`.
+                let host = match host.strip_prefix('[') {
+                    Some(v6) => v6.split(']').next().unwrap_or_default().to_owned(),
+                    None if host.starts_with('/') => host.into_owned(),
+                    None => host.split(':').next().unwrap_or_default().to_owned(),
+                };
+                host_is_local(&host)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn host_is_local(host: &str) -> bool {
+    host.is_empty()
+        || host.starts_with('/')
+        || host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// `url` with any password replaced by `***`, for printing.
+fn redact_database_url(url: &str) -> String {
+    let mut out = url.to_owned();
+    if let Some(start) = url.find("://").map(|i| i + 3) {
+        let end = url[start..].find(['/', '?']).map_or(url.len(), |i| start + i);
+        if let Some(at) = url[start..end].rfind('@')
+            && let Some(colon) = url[start..start + at].find(':')
+        {
+            out = format!("{}***{}", &url[..start + colon + 1], &url[start + at..]);
+        }
+    }
+    if let Some((base, query)) = out.split_once('?') {
+        let query: Vec<&str> =
+            query.split('&').map(|pair| if pair.starts_with("password=") { "password=***" } else { pair }).collect();
+        out = format!("{base}?{}", query.join("&"));
+    }
+    out
+}
+
+/// The file a `sqlite:` URL names (relative to the current directory, as when connecting);
+/// `None` for an in-memory database.
+fn sqlite_file(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("sqlite:")?;
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    if path.is_empty() || path == ":memory:" || query.split('&').any(|p| p == "mode=memory") {
+        return None;
+    }
+    Some(path.to_owned())
 }
 
 fn relative(path: &Path, root: &Path) -> String {
@@ -901,5 +1008,80 @@ fn health() -> Result {
         Ok(())
     } else {
         Err(Error::Config(format!("GET /up answered {status}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn allowed(url: &str) -> std::result::Result<(), String> {
+        reset_allowed(url, false, false, None)
+    }
+
+    #[test]
+    fn reset_never_runs_in_production() {
+        for url in ["sqlite://storage/production.sqlite3", "postgres://localhost/app", "postgres://db.example.com/app"]
+        {
+            let err = reset_allowed(url, true, true, None).unwrap_err();
+            assert!(err.contains("production"), "{err}");
+        }
+    }
+
+    #[test]
+    fn local_databases_reset_without_a_flag() {
+        for url in [
+            "sqlite://storage/development.sqlite3",
+            "sqlite:/tmp/feature.sqlite3?mode=rwc",
+            "postgres://localhost/myapp_feature_development",
+            "postgresql://me:secret@localhost:5432/myapp",
+            "postgres://127.0.0.1/myapp",
+            "postgres://127.0.0.2:5433/myapp",
+            "postgres://[::1]:5432/myapp",
+            "postgres:///myapp",
+            "postgres://%2Ftmp/myapp",
+            "postgres:///myapp?host=/var/run/postgresql",
+            "postgres://localhost,127.0.0.1/myapp",
+        ] {
+            assert_eq!(allowed(url), Ok(()), "{url}");
+        }
+    }
+
+    #[test]
+    fn other_hosts_need_allow_remote() {
+        for url in [
+            "postgres://db.example.com/myapp",
+            "postgres://user:hunter2@10.0.0.5:5432/myapp",
+            "postgres://localhost.example.com/myapp",
+            "postgres://localhost,db.example.com/myapp",
+            "postgres://localhost/myapp?host=db.example.com",
+        ] {
+            let err = allowed(url).unwrap_err();
+            assert!(err.contains("--allow-remote") && !err.contains("hunter2"), "{err}");
+            assert_eq!(reset_allowed(url, false, true, None), Ok(()), "{url}");
+        }
+        // A URL without a host uses PGHOST.
+        assert!(reset_allowed("postgres:///myapp", false, false, Some("db.example.com")).is_err());
+        assert!(reset_allowed("postgres:///myapp", false, false, Some("/tmp")).is_ok());
+    }
+
+    #[test]
+    fn printed_urls_hide_passwords() {
+        assert_eq!(redact_database_url("postgres://me:secret@db:5432/app"), "postgres://me:***@db:5432/app");
+        assert_eq!(redact_database_url("postgres://me@localhost/app"), "postgres://me@localhost/app");
+        assert_eq!(
+            redact_database_url("postgres://localhost/app?user=me&password=pw"),
+            "postgres://localhost/app?user=me&password=***"
+        );
+        assert_eq!(redact_database_url("sqlite://storage/development.sqlite3"), "sqlite://storage/development.sqlite3");
+    }
+
+    #[test]
+    fn sqlite_urls_name_their_file() {
+        assert_eq!(sqlite_file("sqlite://storage/dev.sqlite3").as_deref(), Some("storage/dev.sqlite3"));
+        assert_eq!(sqlite_file("sqlite:///tmp/dev.sqlite3?mode=rwc").as_deref(), Some("/tmp/dev.sqlite3"));
+        assert_eq!(sqlite_file("sqlite:dev.db").as_deref(), Some("dev.db"));
+        assert_eq!(sqlite_file("sqlite::memory:"), None);
+        assert_eq!(sqlite_file("sqlite:file:x?mode=memory&cache=shared"), None);
     }
 }

@@ -95,6 +95,7 @@ pub fn scan(app: &App) -> Value {
                     if derives.iter().any(|d| d == "View") {
                         let mut v = entry();
                         v["template"] = json!(attr_value(&s.attrs, "view", "template"));
+                        v["layout"] = json!(view_layout(app, &s.attrs));
                         views.push(v);
                     }
                     if derives.iter().any(|d| d == "Form") {
@@ -104,6 +105,8 @@ pub fn scan(app: &App) -> Value {
                         let mut m = entry();
                         m["template"] = json!(attr_value(&s.attrs, "mail", "template"));
                         m["subject"] = json!(attr_value(&s.attrs, "mail", "subject"));
+                        let mail_layout = "layouts/mail.html.jinja";
+                        m["layout"] = json!(app.path("templates").join(mail_layout).exists().then_some(mail_layout));
                         mail.push(m);
                     }
                     if derives.iter().any(|d| d == "Config") {
@@ -343,6 +346,30 @@ fn attr_value(attrs: &[Attribute], name: &str, key: &str) -> Option<String> {
     found
 }
 
+/// The layout file a view renders in, as `#[derive(View)]` picks it: `layout = "repo"` →
+/// `layouts/repo.html.jinja`, `layout = none` → none, unset → `layouts/app.html.jinja` when
+/// the app has one.
+fn view_layout(app: &App, attrs: &[Attribute]) -> Option<String> {
+    let mut layout: Option<Option<String>> = None;
+    for attr in attrs.iter().filter(|a| a.path().is_ident("view")) {
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("layout") {
+                match meta.value()?.parse::<syn::Expr>()? {
+                    syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(name), .. }) => {
+                        layout = Some(Some(format!("layouts/{}.html.jinja", name.value())));
+                    }
+                    _ => layout = Some(None),
+                }
+            } else if meta.input.peek(syn::Token![=]) {
+                let _: syn::Expr = meta.value()?.parse()?;
+            }
+            Ok(())
+        });
+    }
+    let default = "layouts/app.html.jinja";
+    layout.unwrap_or_else(|| app.path("templates").join(default).exists().then(|| default.to_owned()))
+}
+
 /// The `///` comment, joined into one paragraph-ish string.
 fn doc(attrs: &[Attribute]) -> Option<String> {
     let lines: Vec<String> = attrs
@@ -459,8 +486,11 @@ mod tests {
         write("Cargo.toml", "[package]\nname = \"demo\"\n");
         write(
             "src/views/posts/show.rs",
-            "/// One post.\n#[derive(View)]\n#[view(template = \"posts/show\")]\npub struct Show { pub post: Post, pub can_edit: bool }\n",
+            "/// One post.\n#[derive(View)]\n#[view(template = \"posts/show\")]\npub struct Show { pub post: Post, pub can_edit: bool }\n\n\
+             #[derive(View)]\n#[view(template = \"posts/show\", layout = \"admin\")]\npub struct Admin { pub post: Post }\n\n\
+             #[derive(View)]\n#[view(template = \"posts/show\", layout = none)]\npub struct Bare { pub post: Post }\n",
         );
+        write("templates/layouts/app.html.jinja", "");
         write(
             "src/forms/post_form.rs",
             "#[derive(Form, Debug)]\npub struct PostForm {\n    #[validate(length(min = 3))]\n    pub title: String,\n}\n",
@@ -484,6 +514,8 @@ mod tests {
         assert_eq!(out["views"][0]["template"], "posts/show");
         assert_eq!(out["views"][0]["doc"], "One post.");
         assert_eq!(out["views"][0]["fields"][1]["type"], "bool");
+        let layouts: Vec<&Value> = out["views"].as_array().unwrap().iter().map(|v| &v["layout"]).collect();
+        assert_eq!(layouts, [&json!("layouts/app.html.jinja"), &json!("layouts/admin.html.jinja"), &Value::Null]);
         assert_eq!(out["forms"][0]["fields"][0]["attributes"][0], "#[validate(length(min = 3))]");
         assert_eq!(out["policies"][0]["action"], "Update");
         assert_eq!(out["policies"][0]["resource"], "Post");
@@ -493,7 +525,7 @@ mod tests {
             out["ops"][0]["signature"],
             "async fn create_post(ctx: &Ctx, input: Valid<PostForm>) -> Result<Post>"
         );
-        assert_eq!(out["templates"][0], "posts/show.html.jinja");
+        assert_eq!(out["templates"][1], "posts/show.html.jinja");
         assert_eq!(out["stimulus_controllers"][0]["identifier"], "admin--users");
         assert_eq!(out["stimulus_controllers"][0]["file"], "assets/controllers/admin/users_controller.js");
         assert_eq!(out["importmap_pins"][0]["name"], "@pierre/diffs");
