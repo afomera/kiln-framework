@@ -297,7 +297,7 @@ struct FencedCode {
 impl comrak::adapters::SyntaxHighlighterAdapter for FencedCode {
     fn write_highlighted(&self, output: &mut dyn fmt::Write, lang: Option<&str>, code: &str) -> fmt::Result {
         let within_budget =
-            self.budget.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(code.len())).is_ok();
+            self.budget.try_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(code.len())).is_ok();
         let syntax = lang.and_then(syntax_for_token).filter(|_| within_budget);
         match lines_for(code, syntax) {
             Some(lines) => {

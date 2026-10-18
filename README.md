@@ -26,7 +26,11 @@ New app: `kiln-dev new journal` creates a standalone app with sign-in, a layout,
 
 Agents working in an app start with its `AGENTS.md` ([the template](crates/kiln-cli/templates/AGENTS.md)).
 
-## Status: M1 (core)
+## Status: M3 (agent tooling)
+
+M0–M1 built the core, M2 the full stack, M3 the tools agents use; work since M3 fills out the query layer, APIs and assets. Published as 0.0.1.
+
+### Core (M1)
 
 | Piece | Where |
 | --- | --- |
@@ -44,6 +48,35 @@ Agents working in an app start with its `AGENTS.md` ([the template](crates/kiln-
 | Test harness: `#[kiln::test]`, `TestApp` with migrations, factories, `as_user`, `post_form`, `assert_flash` | `crates/kiln/src/testing.rs` |
 | `kiln` CLI: `new`, generators (`resource`, `record`, `action`, `op`, `part`), `db`, `routes`, `check`, `test`, `dev --port` | `crates/kiln-cli` |
 
+### Full stack (M2 and since)
+
+| Piece | Where |
+| --- | --- |
+| Postgres behind a `Dialect` interface (`kiln new --database postgres`); SQLite stays the default. Kiln's own tables can live in a separate database | `crates/kiln/src/dialect.rs`, `db.rs` |
+| Queries: typed joins (filtering on an unjoined table is a compile error), `has_many(.., through = ..)`, subqueries, aggregates, row locks, `increment`, raw `db.sql` | `crates/kiln/src/query.rs`, `join.rs`, `sql.rs` |
+| Record constraints, cascades, `one_of` and `has_one` | `crates/kiln-macros/src/record.rs` |
+| Jobs, schedules and batches, enqueued on a transaction so they run only after commit; `kiln jobs`, `schedules`, `batches` | `crates/kiln/src/jobs.rs`, `schedule.rs`, `batch.rs` |
+| Mail with previews, notifications and notification settings | `crates/kiln/src/mail.rs`, `notify.rs` |
+| Auth with password settings; API tokens whose scopes deny by default (`#[action(.., pipeline = Api, scope = "write")]`); rate limits | `crates/kiln/src/auth.rs`, `rate_limit.rs` |
+| Turbo, realtime streams, live reload; Stimulus by default and import-map pins (`kiln importmap pin`) | `crates/kiln/src/turbo.rs`, `realtime.rs`, `dev_reload.rs`, `assets.rs` |
+| Rich text (Lexxy) with attachments, file uploads, direct uploads, image variants | `crates/kiln/src/rich_text.rs`, `files.rs`, `storage.rs` |
+| Markdown and syntax highlighting: `\| markdown`, `\| highlight`, a `Markdown` field type | `crates/kiln/src/markdown.rs` |
+| Catch-all route captures: `#[action(GET "/{owner}/{repo}/tree/{*path}")]` | `crates/kiln/src/routing.rs` |
+| Cache; `#[derive(Config)]` with encrypted secrets (`kiln secrets`) | `crates/kiln/src/cache.rs`, `config.rs` |
+| Signed outbound webhooks and an SSRF-guarded HTTP client | `crates/kiln/src/webhooks.rs`, `http.rs` |
+| The `/kiln` command center and a welcome page for `/` in development | `crates/kiln/src/devtools.rs`, `welcome.rs` |
+| `kiln dev`: a terminal UI with a routes pane, process groups, crash restarts, `--inline` and `--json` | `crates/kiln-cli/src/dev/` |
+| Deploys: `kiln build` makes a single-binary `dist/`, `kiln build --docker` a production image; `make release` | `crates/kiln-cli`, `scripts/release.sh` |
+
+### Agent tooling (M3)
+
+| Piece | Where |
+| --- | --- |
+| `kiln introspect [--json]`: routes, records, views, forms, policies, ops, jobs, mail, config and templates, with file:line | `crates/kiln-cli/src/introspect.rs` |
+| `kiln explain <code>`: the long form of every check and error-page code | `crates/kiln-cli/src/explain.rs` |
+| `kiln mcp`: an MCP server with introspect, request (as any user), read-only query, mail, jobs, check, explain and test tools | `crates/kiln-cli/src/mcp.rs` |
+| App-written lint rules (`#[lint]` in `src/lints/`) that `kiln check` runs | `crates/kiln/src/lint.rs` |
+
 ### `kiln g resource`
 
 ```sh
@@ -57,18 +90,29 @@ writes the record, migration, form, policy, three ops, seven actions, four views
 | Code | Rule |
 | --- | --- |
 | K0001 | The app compiles (`cargo check --all-targets`); the first compiler error is printed in full |
+| K0002 | The app binary can report its schema status |
+| K0003 | The app's own rules (`src/lints/`) can run |
 | K0101 | Records, forms, views, parts and actions live in their directories; a record's file is named after it |
 | K0102 | One `#[action]` per file |
 | K0103 | (warn) The action function is named after its file |
+| K0110 | No two routes match the same requests |
 | K0202 | The record structs match `db/snapshot.json` (no undiffed schema change) |
 | K0301 | A function that writes a policy-guarded record (`Post::insert/update/delete`) takes the matching `Authorized<_, Post>` proof |
 | K0203 | (warn) Migrations not yet applied to the development database |
 | K0204 | `db/snapshot.json` was written with a migration that's since been deleted (`kiln db undo` restores it) |
 | K0302 | (warn) A data-changing action has no test that calls its path helper |
+| K0304 | No `policy::as_system` in an action |
+| K0401 | A template reads only what its view provides |
 | K0402 | Every `path("..")` in a template names a real route |
 | K0403 | Every `include`/`extends` names a real template |
+| K0404 | Every `data-controller` names a real Stimulus controller |
+| K0405 | Every import-map pin loads |
+| K0412 | A template reads only the relations its view loaded |
 | K0501 | No raw `sqlx` outside `src/records/` |
 | K0601 | No environment reads outside `src/main.rs` |
+| K0701 | Jobs, mail and notifications inside a transaction are enqueued on it, not on the pool |
+
+Error pages carry `K1xxx` codes (404s, CSRF, missing scopes, rate limits, database errors, ...); `kiln explain` covers those too.
 
 ### What the tests prove
 
@@ -77,13 +121,13 @@ writes the record, migration, form, policy, three ops, seven actions, four views
 - `tests/http.rs`: preloading is one query per relation, layouts, optional relations, error reports for browsers and agents.
 - `tests/api.rs`: JSON lists without leaking emails, JSON 404s, field errors as JSON, unknown JSON fields (400), and API routes ignoring the session cookie.
 - `crates/kiln/src/migrate.rs`: diff output, including the rebuild path for NOT NULL columns.
+- The rest of `examples/blog/tests/` covers each M2 piece and what came after it: jobs and batches, mail, notifications, uploads, cache, sessions, joins and queries, row locks, API tokens and scopes, webhooks, catch-all routes, split databases, assets and the dev tools.
 
 ## Known issues
 
-- **rustc incremental-compilation ICE.** On rustc 1.98.1, adding a field to a record while `src/factories.rs` has `async fn` trait impls sometimes crashes incremental compilation. The real error (e.g. E0063, missing field) still prints first. Workaround: `cargo clean -p <app>`. To be reported upstream with a reproduction.
+- **rustc incremental-compilation ICE.** On rustc 1.98.1 and 1.99.1, adding a field to a record while `src/factories.rs` has `async fn` trait impls crashes incremental compilation (`encountered incremental compilation error with evaluate_obligation`, `rustc_middle/src/verify_ich.rs:82`). In the blog, adding a field to `Post` does it every time. The real error (e.g. E0063, missing field) still prints first, and the next build after fixing it succeeds. Workarounds: `cargo clean -p <app>`, or `CARGO_INCREMENTAL=0`, which avoids it. To be reported upstream with a reproduction.
 - zsh treats `?` as a glob, so quote optional fields: `'notes:text?'`.
 - Factories live in `src/factories.rs` (not `tests/`) because of Rust's orphan rule.
-- SQLite only. Postgres is planned as its own step after M1.
 
 ## License
 

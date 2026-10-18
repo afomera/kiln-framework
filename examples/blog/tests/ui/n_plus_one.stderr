@@ -7,6 +7,7 @@ error[E0277]: relation `blog::records::post::comments<_>` was not preloaded
   = help: the trait `HasRel<blog::records::Post, blog::records::post::comments<_>, _>` is not implemented for `(blog::records::post::author,)`
   = note: add `.preload(...)` for this relation to the query, and include it in the `Loaded<..>` type
   = help: the following other types implement trait `HasRel<T, X, I>`:
+            `(A,)` implements `HasRel<T, A, I0>`
             `(A, B)` implements `HasRel<T, A, I0>`
             `(A, B)` implements `HasRel<T, B, I1>`
             `(A, B, C)` implements `HasRel<T, A, I0>`
@@ -14,7 +15,6 @@ error[E0277]: relation `blog::records::post::comments<_>` was not preloaded
             `(A, B, C)` implements `HasRel<T, C, I2>`
             `(A, B, C, D)` implements `HasRel<T, A, I0>`
             `(A, B, C, D)` implements `HasRel<T, B, I1>`
-            `(A, B, C, D)` implements `HasRel<T, C, I2>`
           and $N others
   = note: required for `kiln::Loaded<blog::records::Post, (blog::records::post::author,)>` to implement `HasRelation<blog::records::Post, blog::records::post::comments<_>, _>`
 note: required by a bound in `blog::records::PostRelations::comments`

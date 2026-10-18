@@ -187,7 +187,7 @@ impl App {
         self.tools = Some(Arc::new(move |session: Session, db: Db| {
             Box::pin(async move {
                 let Some(token) = session.sign_in_token::<T>() else { return Ok(None) };
-                let viewer = crate::auth::find_signed_in::<T>(&db, &token).await?.filter(&allow);
+                let viewer = crate::auth::find_signed_in::<T>(&db, &token).await?.filter(allow);
                 Ok(viewer.map(|record| (format!("{} #{}", T::TABLE, record.id().get()), token)))
             })
         }));
