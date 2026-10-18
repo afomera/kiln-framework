@@ -350,9 +350,9 @@ generated tests passing.
   secrets, then `#[config(default = "..")]`, then (outside production) `dev_default`.
   `Option<T>` fields are optional; wrap credentials in `Secret<T>` (prints `[redacted]`;
   `.expose()` reads it). Missing values fail at boot, all listed at once.
-- **Templates are strict:** an undefined value is an error, not an empty string. Output is
-  HTML-escaped, including `/` inside computed strings (`{{ a ~ "/5" }}` renders `&#x2f;`);
-  put literal text outside the braces: `{{ book.rating }}/5`.
+- **Templates are strict:** an undefined value is an error, not an empty string. Output in
+  `.html` templates is HTML-escaped (`&`, `<`, `>`, `"`, `'`; slashes stay as they are, so
+  `{{ blob.path }}` prints `src/lib.rs`); `.txt` templates aren't escaped.
 - **Inside a record's own file**, column and relation names are constants (`title`,
   `owner`), so a binding or parameter with one of those names won't compile there; pick
   another name (the generated `owned_by` uses `who`).

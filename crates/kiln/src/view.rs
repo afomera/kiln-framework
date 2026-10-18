@@ -259,23 +259,21 @@ fn build_environment(root: &'static str) -> Environment<'static> {
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
     env.set_auto_escape_callback(|name| if name.contains(".html") { AutoEscape::Html } else { AutoEscape::None });
+    env.set_formatter(format_value);
+    env.add_filter("escape", escape_filter);
+    env.add_filter("e", escape_filter);
     env.add_function("path", path);
     // Absolute links, for emails: `{{ url(path("posts::show", post.slug)) }}`.
-    env.add_function("url", |path: String| {
-        let url = crate::mail::absolute_url(&path);
-        Value::from_safe_string(url.replace('"', "%22").replace('<', "%3C").replace('>', "%3E"))
-    });
+    env.add_function("url", |path: String| crate::mail::absolute_url(&path));
     env.add_function("csrf_field", csrf_field);
     env.add_function("csrf_token", csrf_token);
     env.add_function("csrf_meta", csrf_meta);
     env.add_function("turbo_stream_from", turbo_stream_from);
     let lookup = assets.clone();
-    // Asset URLs are safe to emit unescaped (like `path()`), so `/` isn't turned into `&#x2f;`.
-    env.add_function("asset", move |name: String| -> std::result::Result<Value, minijinja::Error> {
-        let url = lookup.url(&name).ok_or_else(|| {
+    env.add_function("asset", move |name: String| -> std::result::Result<String, minijinja::Error> {
+        lookup.url(&name).ok_or_else(|| {
             minijinja::Error::new(ErrorKind::InvalidOperation, format!("asset `{name}` not found in assets/"))
-        })?;
-        Ok(Value::from_safe_string(url.replace('"', "%22").replace('<', "%3C").replace('>', "%3E")))
+        })
     });
     env.add_function("javascript_importmap", move || javascript_importmap(&assets));
     env.add_filter("datetime", datetime);
@@ -391,6 +389,50 @@ fn datetime(value: Value, format: Option<String>) -> std::result::Result<String,
     Ok(ts.strftime(format.as_deref().unwrap_or("%b %-d, %Y %H:%M UTC")).to_string())
 }
 
+/// How `{{ value }}` prints. In HTML templates text is escaped for element content and quoted
+/// attributes (`&`, `<`, `>`, `"`, `'`) and nothing else, so `src/lib.rs` stays `src/lib.rs`
+/// (minijinja's own escaping also turns `/` into `&#x2f;`). Safe strings pass through.
+fn format_value(
+    out: &mut minijinja::Output,
+    state: &minijinja::State,
+    value: &Value,
+) -> std::result::Result<(), minijinja::Error> {
+    use minijinja::value::ValueKind;
+    let plain = matches!(value.kind(), ValueKind::Undefined | ValueKind::None | ValueKind::Bool | ValueKind::Number);
+    if state.auto_escape() != AutoEscape::Html || value.is_safe() || plain {
+        return minijinja::escape_formatter(out, state, value);
+    }
+    let text = match value.as_str() {
+        Some(s) => escape_html(s),
+        None => escape_html(&value.to_string()),
+    };
+    out.write_str(&text).map_err(minijinja::Error::from)
+}
+
+/// `| escape` (and `| e`), by the same rules as auto-escaping.
+fn escape_filter(value: &Value) -> Value {
+    if value.is_safe() {
+        return value.clone();
+    }
+    Value::from_safe_string(escape_html(&value.to_string()))
+}
+
+/// Escapes text for HTML element content or a quoted attribute value.
+pub(crate) fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Escapes text for an HTML attribute value.
 pub(crate) fn escape_attribute(s: &str) -> String {
     s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
@@ -459,7 +501,7 @@ fn csrf_field() -> std::result::Result<Value, minijinja::Error> {
 
 /// `{{ path("posts::show", slug=post.slug) }}`: builds a URL from a registered route.
 /// Unknown routes, missing captures and extra arguments are render errors.
-fn path(name: String, kwargs: Kwargs) -> std::result::Result<minijinja::Value, minijinja::Error> {
+fn path(name: String, kwargs: Kwargs) -> std::result::Result<String, minijinja::Error> {
     let route = routing::route_named(&name).ok_or_else(|| {
         let known: Vec<&str> = routing::routes().iter().map(|r| r.name()).collect();
         minijinja::Error::new(
@@ -484,8 +526,7 @@ fn path(name: String, kwargs: Kwargs) -> std::result::Result<minijinja::Value, m
         }
     }
     kwargs.assert_all_used()?;
-    // Segments are percent-encoded above, so the URL is safe to emit unescaped.
-    Ok(minijinja::Value::from_safe_string(url))
+    Ok(url)
 }
 
 /// Form helpers. Markup comes from the form's `#[derive(Form)]` metadata, so inputs carry
@@ -497,22 +538,7 @@ mod forms {
 
     use minijinja::{Error, ErrorKind, State, Value, context, value::Kwargs};
 
-    use super::csrf_token;
-
-    fn esc(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        for c in s.chars() {
-            match c {
-                '&' => out.push_str("&amp;"),
-                '<' => out.push_str("&lt;"),
-                '>' => out.push_str("&gt;"),
-                '"' => out.push_str("&quot;"),
-                '\'' => out.push_str("&#x27;"),
-                c => out.push(c),
-            }
-        }
-        out
-    }
+    use super::{csrf_token, escape_html as esc};
 
     /// `{{ form_start(path("posts::update", slug=post.slug), method="patch") }}`: the
     /// `<form>` tag, its CSRF token, and the `_method` override for PATCH/PUT/DELETE.
@@ -888,6 +914,41 @@ mod tests {
         let html = render(root, "link.html.jinja", None, &context).unwrap();
         assert_eq!(html, "/a%20b/blob/src/my%20file.rs");
         assert_eq!(actions::repos::blob::path("a b", "src/my file.rs"), html);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn escapes_html_but_not_slashes() {
+        let dir = std::env::temp_dir().join(format!("kiln-view-escape-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("e.html.jinja"),
+            "<p>{{ v }}</p><a title=\"{{ v }}\">{{ branch }}</a>|{{ v | e }}|{{ html | safe }}|{{ n }} {{ b }} {{ none }}|{{ branch ~ \"/x\" }}",
+        )
+        .unwrap();
+        std::fs::write(dir.join("e.txt.jinja"), "{{ v }}").unwrap();
+        std::fs::write(dir.join("missing.html.jinja"), "{{ nope }}").unwrap();
+        let root: &'static str = Box::leak(dir.display().to_string().into_boxed_str());
+        let context = context! {
+            v => "src/lib.rs <script>alert(\"x\")</script> & it's",
+            branch => "feature/x",
+            html => "<b>bold</b>",
+            n => 3,
+            b => true,
+            none => (),
+        };
+        let escaped = "src/lib.rs &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; it&#x27;s";
+
+        let html = render(root, "e.html.jinja", None, &context).unwrap();
+        assert_eq!(
+            html,
+            format!(
+                "<p>{escaped}</p><a title=\"{escaped}\">feature/x</a>|{escaped}|<b>bold</b>|3 True None|feature/x/x"
+            )
+        );
+        let text = render(root, "e.txt.jinja", None, &context).unwrap();
+        assert_eq!(text, "src/lib.rs <script>alert(\"x\")</script> & it's");
+        assert!(render(root, "missing.html.jinja", None, &context).is_err(), "undefined stays an error");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
