@@ -1,0 +1,5 @@
+error: `slug` is the route's `{slug}` capture, so it's read with `Param`: write `slug: Param<String>`
+ --> tests/ui/capture_without_param_wrapper.rs:5:35
+  |
+5 | pub async fn show(ctx: Ctx, slug: String) -> String {
+  |                                   ^^^^^^

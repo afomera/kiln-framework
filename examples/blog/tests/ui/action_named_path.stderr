@@ -1,0 +1,5 @@
+error: an action can't be named `path`: `#[action]` generates `path(..)` beside it, the URL helper; rename the function (`show`, `index`, ..)
+ --> tests/ui/action_named_path.rs:5:14
+  |
+5 | pub async fn path(path: Param<String>) -> String {
+  |              ^^^^

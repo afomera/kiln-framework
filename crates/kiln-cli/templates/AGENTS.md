@@ -87,7 +87,7 @@ generated tests passing.
 | CSS, JS, images | `assets/` (JS entry point: `assets/application.js`) | linked with `{{ asset("app.css") }}`; JS modules load through the import map; CSS references other assets by path (`url("../fonts/a.woff2")`, `@import "tokens.css"`) |
 | Stimulus controllers | `assets/controllers/{name}_controller.js` | `export default class extends Controller` (from `"@hotwired/stimulus"`); registered automatically as `data-controller="{name}"` (`_` → `-`, `/` → `--`) |
 | Import-map pins | `config/importmap.toml` | `"@pierre/diffs" = "vendor/npm/@pierre/diffs@1.5.2.js"` (a file under `assets/`) or `"x" = "https://.."`; written by `kiln importmap pin` |
-| Files served as-is | `public/` (`robots.txt`, `favicon.svg`) | served at the site root when no route matches |
+| Files served as-is | `public/` (`robots.txt`, `favicon.svg`) | served at the site root (GET/HEAD), before routes that merely match the path (`/{owner}` doesn't swallow `/favicon.svg`); only a route for exactly that path wins over the file. `public/index.html` is `/` when no route is |
 | Presentation methods | `src/parts/{record}.rs` | `#[part] impl Record` + `#[record(.., parts)]` |
 | Template filters and functions (every template, no import) | `src/helpers/{name}.rs` (`pub mod helpers;` in `src/lib.rs`) | `#[kiln::template_filter] pub fn avatar_hue(name: &str) -> u32` is `{{ user.name \| avatar_hue }}`; `#[kiln::template_function] pub fn initials(name: &str) -> String` is `{{ initials(user.name) }}` |
 | Template macros (every template, no import) | `templates/helpers/{name}.html.jinja` | `{% macro icon(name, size=16) %}..{% endmacro %}`; any template calls `{{ icon("git-branch") }}` |
@@ -125,6 +125,16 @@ generated tests passing.
   `{{ path("posts::show", slug=post.slug) }}` in templates.
 - **Slashes in a param:** end the route with a catch-all, `/{owner}/{repo}/tree/{*path}`
   with `path: Param<String>` (`"src/lib.rs"`); `tree::path(o, r, "src/lib.rs")` keeps the slashes.
+- **Action arguments** are extractors: `Ctx`, `Current<User>`, `Param<T>` (one per route
+  capture, named like it: `{slug}` is `slug: Param<String>`), `QueryParams<T>`, `HeaderMap`,
+  `Session`, `Turbo`, `RateLimit`. A body extractor (`Form<T>`, `Json<T>`) must be the last argument.
+  Records aren't arguments: take `id: Param<Id<Post>>` and load it in the action. The
+  action can share a capture's name (`fn tab(.., tab: Param<String>)`), but not be named `path`.
+- **Redirects:** `Redirect::to(path)` is a 303, right after any form submission.
+  `Redirect::back(&headers, fallback)` (with a `headers: HeaderMap` argument) returns to the
+  page a small POST came from (follow, star, mark read): the `Referer`'s path when it's this
+  site, else `fallback`, so it's never an open redirect. For moved URLs, `Redirect::permanent(path)`
+  (308) and `Redirect::temporary(path)` (307). `.notice(..)` / `.alert(..)` work on all of them.
 - **Permissions are policies:** `impl Allows<A, Post> for User` in `src/policies/post.rs`,
   where `A` is `Read`, `Create` (checked against `NewPost`), `Update` or `Delete` from
   `kiln::policy` (or your own unit struct, e.g. `Publish`). `user.authorize::<Update, _>(post)?`
@@ -175,6 +185,22 @@ generated tests passing.
   `button_attrs={"title": "Delete"}` for its button. For markup in the button (an icon), use a call block, which takes just
   the path: `{% call button_to(path("posts::destroy", slug=post.slug), method="delete") %}{{ icon("trash") }} Delete{% endcall %}`
   (a helper macro's output also works as the label: `button_to(icon("trash"), path(..))`).
+- **Query strings** (filters, sorting, tabs, search) are typed: a `#[derive(Form, Default)]`
+  struct in `src/forms/{name}_filters.rs`, taken as `filters: QueryParams<RepoFilters>` (any
+  argument position; it derefs to the struct). Never parse `RawQuery` by hand. Field types,
+  `#[validate]` rules and `DbEnum` enums (`#[default]` on a variant) work as in forms; a key
+  given twice fills a `Vec<T>` field (`?tag=a&tag=b`). Unlike forms, unknown keys are ignored,
+  missing keys take the `Default`, and **a bad value (`?sort=oldest`, `?page=0` against
+  `range(min = 1)`) falls back to its default** instead of failing the page;
+  `filters.errors()` has the messages if an action would rather refuse
+  (`return Err(Error::Invalid(filters.errors().clone()))`). Put it in the view
+  (`pub filters: QueryParams<RepoFilters>`) to build links that change one parameter and
+  keep the rest, leaving defaults out: `{{ filters.with("sort", "stars") }}`,
+  `filters.without("q")`, `filters.toggle("tag", "rust")` (for `Vec` fields),
+  `filters.has("tag", "rust")`, `filters.values("tag")`, `{{ filters.sort }}` (the value as
+  text), `filters.href()`, `filters.query_string()` (no `?`; empty at the defaults). The same
+  methods exist in Rust; `QueryParams::of(path, value).href()` links to another page with
+  given filters.
 - **Time:**
   - `Timestamp` values are UTC.
   - Build them with `Timestamp::now()`, `Timestamp::days_from_now(7)`, `hours_ago(2)`, or `ts + kiln::time::SignedDuration::from_mins(30)`.

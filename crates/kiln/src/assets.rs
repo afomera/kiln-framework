@@ -10,8 +10,9 @@
 //!   `//cdn`, `data:`, `#id`, `/` paths outside `assets/` such as `public/` files) and
 //!   references to missing files (logged once) are left as written; `?query` and `#fragment`
 //!   are kept.
-//! - `public/`: served as-is at the site root (`robots.txt`, `favicon.ico`) when no route
-//!   matches.
+//! - `public/`: served as-is at the site root (`robots.txt`, `favicon.ico`), ahead of routes
+//!   that merely match the path (`/{owner}`); a route for exactly that path wins. A
+//!   directory's `index.html` is served only when no route matches.
 //! - Kiln's own JavaScript (Turbo, Stimulus) at `/kiln/turbo-<version>-<hash>.js` and
 //!   `/kiln/stimulus-*`, and the rich text editor (Lexxy plus Kiln's setup and skin) at
 //!   `/kiln/lexxy-*`, `/kiln/rich-text-*`.
@@ -483,12 +484,20 @@ pub(crate) struct Assets {
     assets: PathBuf,
     public: PathBuf,
     pins: PathBuf,
+    /// In production, the files under `public/` (relative, `/`-separated), listed once so
+    /// requests that aren't for one never touch the disk.
+    public_files: Arc<OnceLock<BTreeSet<String>>>,
 }
 
 impl Assets {
     /// From the app's root directory (the crate with `templates/`, `assets/`, `public/`).
     pub fn at(root: &Path) -> Self {
-        Self { assets: root.join("assets"), public: root.join("public"), pins: root.join(PINS_FILE) }
+        Self {
+            assets: root.join("assets"),
+            public: root.join("public"),
+            pins: root.join(PINS_FILE),
+            public_files: Arc::default(),
+        }
     }
 
     /// From a `templates/` directory: assets live next to it.
@@ -588,6 +597,31 @@ impl Assets {
         // A stale fingerprint still gets the current file, just not cached forever.
         let immutable = short_hash(&bytes) == hash;
         Some(file_response(&name, bytes, immutable))
+    }
+
+    /// Serves `public/<path>` when it's a file (not a directory's `index.html`). Checked
+    /// before routing, so `/favicon.svg` is the file even beside a `/{owner}` route. In
+    /// production the file list is read once; in development the disk is asked, so new
+    /// files show up at once.
+    pub fn serve_public_file(&self, request_path: &str) -> Option<Response> {
+        let name = request_path.strip_prefix('/')?;
+        if name.is_empty() || name.ends_with('/') {
+            return None;
+        }
+        if crate::config::is_production() {
+            let files = self.public_files.get_or_init(|| {
+                crate::files::walk(&self.public)
+                    .iter()
+                    .filter_map(|path| Some(path.strip_prefix(&self.public).ok()?.to_string_lossy().replace('\\', "/")))
+                    .collect()
+            });
+            if !files.contains(name) {
+                return None;
+            }
+        }
+        let path = self.public.join(safe_relative(name)?);
+        let bytes = crate::files::read(&path)?.into_owned();
+        Some(file_response(name, bytes, false))
     }
 
     /// Serves a file from `public/`, if there is one.
