@@ -587,6 +587,7 @@ fn lint_template_variables(app: &App, report: &serde_json::Value, findings: &mut
     }
     let globals: BTreeSet<String> =
         analysis["globals"].as_array().into_iter().flatten().filter_map(|g| g.as_str().map(str::to_owned)).collect();
+    lint_shadowed_helpers(app, report, &globals, findings);
     let records = Records::from_introspection(report);
     let owners = report["views"]
         .as_array()
@@ -649,6 +650,26 @@ fn lint_template_variables(app: &App, report: &serde_json::Value, findings: &mut
         findings.error(problem.code, problem.message, Some(&problem.file), Some(problem.line));
     }
     Ok(())
+}
+
+/// K0407: view and mail fields, and template variables, named after a template helper.
+fn lint_shadowed_helpers(app: &App, report: &serde_json::Value, globals: &BTreeSet<String>, findings: &mut Findings) {
+    use crate::shadow_check::{Shadow, fields, helpers, template};
+    let helpers = helpers(globals, &report["template_helpers"]);
+    let mut found: Vec<Shadow> = vec![];
+    for (key, kind) in [("views", "view"), ("mail", "mail")] {
+        for owner in report[key].as_array().into_iter().flatten() {
+            found.extend(fields(owner, kind, &helpers));
+        }
+    }
+    for path in files_with(&app.path("templates"), ".jinja") {
+        let relative = path.strip_prefix(&app.root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+        let Ok(source) = fs::read_to_string(&path) else { continue };
+        found.extend(template(&relative, &source, &helpers));
+    }
+    for shadow in found {
+        findings.error("K0407", shadow.message, Some(&shadow.file), shadow.line);
+    }
 }
 
 /// `views::pulls::Index` for `Index` in src/views/pulls/index.rs (re-exported from its

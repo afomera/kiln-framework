@@ -377,7 +377,10 @@ generated tests passing.
   its name (keyword arguments and `{% call %}` blocks work; `caller()` takes no arguments) and
   sees only its arguments, not the page's variables. A name Kiln already uses (`path`,
   `upper`, `markdown`, ..) or two helpers with one name stop the app at boot (K0406);
-  `#[kiln::template_filter(name = "hue")]` registers a fn under another name.
+  `#[kiln::template_filter(name = "hue")]` registers a fn under another name. A view field
+  (or `{% set %}`/loop/macro-argument name) called like a function or helper macro hides it
+  in that template, its layout and partials (`path`, `avatar`, `empty`): `kiln check` flags
+  it (K0407); name the field for what it holds (`file_path`). Filters don't clash.
 - **Inside a record's own file**, column and relation names are constants (`title`,
   `owner`), so a binding or parameter with one of those names won't compile there; pick
   another name (the generated `owned_by` uses `who`).

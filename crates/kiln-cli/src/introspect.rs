@@ -400,6 +400,7 @@ fn fields(fields: &Fields) -> Vec<Value> {
             Some(json!({
                 "name": name,
                 "type": type_text(&f.ty.to_token_stream().to_string()),
+                "line": f.ident.as_ref()?.span().start().line,
                 "attributes": attributes,
                 "doc": doc(&f.attrs),
             }))

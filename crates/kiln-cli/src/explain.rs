@@ -234,6 +234,28 @@ Rename the helper (`#[kiln::template_filter(name = \"avatar_hue\")]` keeps the R
 or rename the macro. `kiln introspect template_helpers` lists the app's helpers.",
     ),
     (
+        "K0407",
+        "A field or template variable hides a template helper",
+        "A view's (or mail's) fields are its template's variables, and a variable wins over a
+global of the same name. So a field called `path` turns every `path(\"posts::show\", ..)` in
+the template, its layout and its partials into a call on a string, and the page fails only
+when it renders (\"string is not callable\"). The same goes for the app's helpers: a field
+`avatar` hides the `avatar()` macro from templates/helpers/, a field `empty` hides `empty()`.
+
+  pub struct Blob { pub path: String }        // hides path()
+  pub struct Blob { pub file_path: String }   // fine
+
+Rename the field (and its uses in the template). Inside a template, a `{% set %}`, loop,
+`{% with %}` or macro-argument name hides the helper the same way, which is flagged when the
+template also calls it: `{% macro empty(icon_name, title) %}{{ icon(icon_name) }}` rather than
+`empty(icon, ..)`.
+
+Filters live in their own namespace, so a field may share a filter's name
+(`avatar_hue`). The names come from the app itself (`templates --variables`), so built-ins,
+`#[template_function]`s and helper macros are all covered; `kiln introspect template_helpers`
+lists the app's own.",
+    ),
+    (
         "K0412",
         "A template reads a relation the view didn't load",
         "Relations are loaded only when the view's type says so, which is what makes N+1 queries
