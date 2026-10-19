@@ -42,7 +42,7 @@ M0–M1 built the core, M2 the full stack, M3 the tools agents use; work since M
 | API pipeline: `#[action(GET "/api/posts", pipeline = Api)]`, `Json<T>`, JSON/form bodies through `Form<T>`, problem+json errors, no session cookie | `crates/kiln/src/app.rs`, `error_page.rs` |
 | Sessions (signed cookies), flash, CSRF, `_method` override, `Current<User>` | `crates/kiln/src/session.rs`, `app.rs` |
 | Forms: `#[derive(Form)]` + `#[validate]` + `#[form(textarea, label, hint, placeholder)]`, `Form<T>` rejects unknown fields, `or_render` (422), async `CheckWith`; template helpers `form_start`/`fields`/`field`/`form_end` render inputs with `required`/`maxlength` from the rules | `crates/kiln/src/form.rs`, `view.rs` |
-| Time: `Timestamp::days_from_now(7)`, `hours_ago(2)`, `+ kiln::time::SignedDuration`; `{{ ts \| datetime }}` | `crates/kiln/src/types.rs` |
+| Time: `Timestamp::days_from_now(7)`, `hours_ago(2)`, `+ kiln::time::SignedDuration`; `{{ ts \| datetime }}`, `\| time_ago`, `\| time_ago_tag`; numbers: `\| number`, `\| compact_number`, `\| filesize`, `\| duration` (also `kiln::format::*`) | `crates/kiln/src/types.rs`, `format.rs` |
 | Policies with proof types: `Allows<Update, Post>`, `authorize` → `Authorized<Update, Post>` | `crates/kiln/src/policy.rs` |
 | Views, layouts, parts, strict templates, error pages (HTML + Markdown for agents) | `crates/kiln/src/view.rs`, `error_page.rs` |
 | Test harness: `#[kiln::test]`, `TestApp` with migrations, factories, `as_user`, `post_form`, `assert_flash` | `crates/kiln/src/testing.rs` |

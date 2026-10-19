@@ -164,7 +164,17 @@ generated tests passing.
   - Build them with `Timestamp::now()`, `Timestamp::days_from_now(7)`, `hours_ago(2)`, or `ts + kiln::time::SignedDuration::from_mins(30)`.
   - Compare in queries with `event::starts_at.gt(Timestamp::now())`.
   - Display with `{{ event.starts_at | datetime }}` (`Oct 12, 2026 09:30 UTC`; the default format ends in `UTC`) or `{{ event.starts_at | datetime("%b %-d") }}`.
+  - Relative: `{{ post.created_at | time_ago }}` → `just now` (under 45s), `3 minutes ago`, `2 hours ago`, `yesterday` (24–48h),
+    `4 days ago`, `3 weeks ago`, then the date (`Mar 11`; `Mar 11, 2025` in another year); future times read `in 3 days`,
+    `tomorrow`. Every unit rounds down (2h59m is `2 hours ago`). `{{ ts | time_ago_tag }}` wraps it in
+    `<time datetime=".." title="Oct 18, 2026 14:03 UTC">` so the exact time shows on hover. Both use `Timestamp::now()`,
+    so `app.travel(..)` moves them in tests. The text is as of the render; it doesn't update in an open page.
   - Form time inputs are read as UTC.
+- **Numbers** (English formatting: `,` thousands, `.` decimals): `{{ stars | number }}` → `2,841`,
+  `{{ ratio | number(2) }}` → `0.67`; `{{ n | compact_number }}` → `2.8k`, `12.3k`, `123k`, `1.2M` (rounded
+  down); `{{ bytes | filesize }}` → `870 B`, `2.7 KB`, `1.5 MB` (1 KB = 1,024 bytes, nearest tenth);
+  `{{ secs | duration }}` → `38s`, `4m 31s`, `1h 04m`, `2d 3h`. The same in Rust for views that build strings:
+  `kiln::format::{time_ago, number, compact_number, filesize, duration}`; don't write your own.
 - **API routes** (`pipeline = Api`) take JSON or form bodies through the same `Form<T>`, return
   JSON problem reports on errors, and never use the session cookie (so no CSRF token).
 - **API tokens:** on `pipeline = Api` routes, `Current<User>` comes from `Authorization: Bearer <token>`,
@@ -377,7 +387,10 @@ generated tests passing.
   its name (keyword arguments and `{% call %}` blocks work; `caller()` takes no arguments) and
   sees only its arguments, not the page's variables. A name Kiln already uses (`path`,
   `upper`, `markdown`, ..) or two helpers with one name stop the app at boot (K0406);
-  `#[kiln::template_filter(name = "hue")]` registers a fn under another name.
+  `#[kiln::template_filter(name = "hue")]` registers a fn under another name. The formatting
+  filters (`time_ago`, `time_ago_tag`, `number`, `compact_number`, `filesize`, `duration`) are
+  built-ins too: an app filter of the same name written before Kiln had them now fails K0406;
+  delete it and use Kiln's (or rename it if it prints something different).
 - **Inside a record's own file**, column and relation names are constants (`title`,
   `owner`), so a binding or parameter with one of those names won't compile there; pick
   another name (the generated `owned_by` uses `who`).

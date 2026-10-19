@@ -304,6 +304,21 @@ fn build_environment(root: &str) -> (Environment<'static>, Vec<HelperProblem>) {
     });
     env.add_function("javascript_importmap", move || javascript_importmap(&assets));
     env.add_filter("datetime", datetime);
+    // Relative times and numbers, in English (see `kiln::format`).
+    env.add_filter("time_ago", |value: Value| -> std::result::Result<String, minijinja::Error> {
+        Ok(timestamp("time_ago", &value)?.map(crate::format::time_ago).unwrap_or_default())
+    });
+    env.add_filter("time_ago_tag", time_ago_tag);
+    env.add_filter("number", number_filter);
+    env.add_filter("compact_number", |value: Value| -> std::result::Result<String, minijinja::Error> {
+        Ok(integer("compact_number", &value)?.map(crate::format::compact_number).unwrap_or_default())
+    });
+    env.add_filter("filesize", |value: Value| -> std::result::Result<String, minijinja::Error> {
+        Ok(integer("filesize", &value)?.map(|n| crate::format::filesize(n.max(0) as u64)).unwrap_or_default())
+    });
+    env.add_filter("duration", |value: Value| -> std::result::Result<String, minijinja::Error> {
+        Ok(integer("duration", &value)?.map(crate::format::duration).unwrap_or_default())
+    });
     // `{{ post.body | rich_text }}`: rich text as HTML, sanitized again on the way out.
     env.add_filter("rich_text", |state: &minijinja::State, html: String| -> Value {
         let clean = crate::RichText::new(&html);
@@ -624,13 +639,59 @@ fn csrf_token() -> std::result::Result<String, minijinja::Error> {
 /// `{{ post.published_at | datetime }}` → `Oct 20, 2026 18:00 UTC`. Takes an optional
 /// strftime format: `{{ starts_at | datetime("%Y-%m-%d") }}`. Missing values render empty.
 fn datetime(value: Value, format: Option<String>) -> std::result::Result<String, minijinja::Error> {
+    let Some(ts) = timestamp("datetime", &value)? else { return Ok(String::new()) };
+    Ok(ts.as_jiff().strftime(format.as_deref().unwrap_or("%b %-d, %Y %H:%M UTC")).to_string())
+}
+
+/// A filter's timestamp argument; none for a missing value.
+fn timestamp(filter: &str, value: &Value) -> std::result::Result<Option<crate::Timestamp>, minijinja::Error> {
+    if value.is_none() || value.is_undefined() {
+        return Ok(None);
+    }
+    value.to_string().parse().map(Some).map_err(|e| {
+        minijinja::Error::new(ErrorKind::InvalidOperation, format!("{filter}: `{value}` isn't a timestamp ({e})"))
+    })
+}
+
+/// A filter's whole-number argument (a float is rounded down); none for a missing value.
+fn integer(filter: &str, value: &Value) -> std::result::Result<Option<i64>, minijinja::Error> {
+    if value.is_none() || value.is_undefined() {
+        return Ok(None);
+    }
+    if let Ok(n) = i64::try_from(value.clone()) {
+        return Ok(Some(n));
+    }
+    match f64::try_from(value.clone()) {
+        Ok(n) if n.is_finite() => Ok(Some(n.floor() as i64)),
+        _ => Err(minijinja::Error::new(ErrorKind::InvalidOperation, format!("{filter}: `{value}` isn't a number"))),
+    }
+}
+
+/// `{{ post.published_at | time_ago_tag }}`: `<time datetime=".." title="Oct 18, 2026 14:03
+/// UTC">2 hours ago</time>`, so the exact time shows on hover.
+fn time_ago_tag(value: Value) -> std::result::Result<Value, minijinja::Error> {
+    let Some(ts) = timestamp("time_ago_tag", &value)? else { return Ok(Value::from_safe_string(String::new())) };
+    Ok(Value::from_safe_string(format!(
+        "<time datetime=\"{ts}\" title=\"{}\">{}</time>",
+        escape_html(&crate::format::full_time(ts)),
+        escape_html(&crate::format::time_ago(ts))
+    )))
+}
+
+/// `{{ stars | number }}` → `2,841`; `{{ ratio | number(2) }}` → `0.67`.
+fn number_filter(value: Value, decimals: Option<usize>) -> std::result::Result<String, minijinja::Error> {
     if value.is_none() || value.is_undefined() {
         return Ok(String::new());
     }
-    let ts: jiff::Timestamp = value.to_string().parse().map_err(|e| {
-        minijinja::Error::new(ErrorKind::InvalidOperation, format!("datetime: `{value}` isn't a timestamp ({e})"))
-    })?;
-    Ok(ts.strftime(format.as_deref().unwrap_or("%b %-d, %Y %H:%M UTC")).to_string())
+    if decimals.is_none()
+        && let Ok(n) = i64::try_from(value.clone())
+    {
+        return Ok(crate::format::number(n));
+    }
+    match f64::try_from(value.clone()) {
+        Ok(n) => Ok(crate::format::number_f64(n, decimals)),
+        Err(_) => Err(minijinja::Error::new(ErrorKind::InvalidOperation, format!("number: `{value}` isn't a number"))),
+    }
 }
 
 /// How `{{ value }}` prints. In HTML templates text is escaped for element content and quoted
@@ -1326,5 +1387,44 @@ mod tests {
         let mail = render_mail(root, "md.html.jinja", None, &context).unwrap();
         assert!(mail.starts_with("<div class=\"kiln-markdown\">"), "{mail}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Renders `source` as an HTML template with `context`.
+    fn render_html(name: &str, source: &str, context: Value) -> Result<String> {
+        let dir = std::env::temp_dir().join(format!("kiln-view-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("t.html.jinja"), source).unwrap();
+        let root: &'static str = Box::leak(dir.display().to_string().into_boxed_str());
+        let html = render(root, "t.html.jinja", None, &context);
+        let _ = std::fs::remove_dir_all(&dir);
+        html
+    }
+
+    #[test]
+    fn time_and_number_filters() {
+        let two_hours = crate::Timestamp::hours_ago(2) - jiff::SignedDuration::from_mins(10);
+        let context = context! {
+            at => two_hours, missing => (), stars => 2841, big => 1_250_000, ratio => 0.6667, bytes => 2765, secs => 271,
+        };
+        let html = render_html(
+            "format",
+            "{{ at | time_ago }}|{{ missing | time_ago }}|{{ stars | number }}|{{ ratio | number(2) }}|{{ big | compact_number }}|{{ bytes | filesize }}|{{ secs | duration }}|{{ 271.9 | duration }}",
+            context.clone(),
+        )
+        .unwrap();
+        assert_eq!(html, "2 hours ago||2,841|0.67|1.2M|2.7 KB|4m 31s|4m 31s");
+
+        let tag = render_html("format-tag", "{{ at | time_ago_tag }}", context.clone()).unwrap();
+        assert_eq!(
+            tag,
+            format!(
+                "<time datetime=\"{two_hours}\" title=\"{}\">2 hours ago</time>",
+                crate::format::full_time(two_hours)
+            )
+        );
+        let error = render_html("format-error", "{{ \"soon\" | time_ago }}", context.clone()).unwrap_err();
+        assert!(format!("{error:#}").contains("time_ago: `soon` isn't a timestamp"), "{error:#}");
+        let error = render_html("format-error2", "{{ \"many\" | number }}", context).unwrap_err();
+        assert!(format!("{error:#}").contains("number: `many` isn't a number"), "{error:#}");
     }
 }
