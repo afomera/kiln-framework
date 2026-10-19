@@ -7,7 +7,7 @@
   <li id="api_token_{{ token.id }}">
     <strong>{{ token.name }}</strong> <code>{{ token.hint }}</code>{% if token.expired %} · expired{% endif %}
     <br><small>{% if token.scopes %}{{ token.scopes | join(" ") }}{% else %}no scopes{% endif %} · created {{ token.created_at | datetime }} · {% if token.last_used_at %}last used {{ token.last_used_at | datetime }}{% else %}never used{% endif %}{% if token.expires_at and not token.expired %} · expires {{ token.expires_at | datetime }}{% endif %}</small>
-    {{ button_to("Revoke", path("api_tokens::destroy", id=token.id), method="delete", class="inline", confirm="Revoke " ~ token.name ~ "? Anything using it stops working.", confirm_button="Revoke", tone="danger") }}
+    {% call button_to(path("api_tokens::destroy", id=token.id), method="delete", class="inline", id="revoke_api_token_" ~ token.id, confirm="Revoke " ~ token.name ~ "? Anything using it stops working.", confirm_button="Revoke", tone="danger", button_attrs={"title": "Revoke " ~ token.name}) %}<span aria-hidden="true">&times;</span> Revoke{% endcall %}
   </li>
   {% endfor %}
 </ul>

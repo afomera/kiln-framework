@@ -159,6 +159,14 @@ generated tests passing.
   - `#[form(textarea)]`, `#[form(label = "Starts at")]`, `#[form(hint = "..")]`, `#[form(placeholder = "..")]`
 
   In templates, never write raw `<form>` tags. Use `{{ form_start(path("posts::update", slug=post.slug), method="patch") }}`, then `{{ fields(form) }}` (or `{{ field(form.title, label="..") }}`), then `{{ form_end() }}`. These add the CSRF token, the method override, labels, errors and the `required`/`maxlength` attributes.
+  Other attributes on the `<form>`: `id="search"`, `class="inline"`, `data={"controller": "search", "search_url_value": "/s"}`
+  (→ `data-controller="search" data-search-url-value="/s"`; `_` becomes `-`, lists and maps are written as JSON),
+  `attrs={"aria-label": "Search", "novalidate": true}` (`true` is a bare attribute, `false`/none leaves it out). All are
+  escaped; an attribute given twice is an error.
+  `button_to(..)` takes the same `id`/`class`/`data`/`attrs` for its form, and `button_class=`, `button_data={..}`,
+  `button_attrs={"title": "Delete"}` for its button. For markup in the button (an icon), use a call block, which takes just
+  the path: `{% call button_to(path("posts::destroy", slug=post.slug), method="delete") %}{{ icon("trash") }} Delete{% endcall %}`
+  (a helper macro's output also works as the label: `button_to(icon("trash"), path(..))`).
 - **Time:**
   - `Timestamp` values are UTC.
   - Build them with `Timestamp::now()`, `Timestamp::days_from_now(7)`, `hours_ago(2)`, or `ts + kiln::time::SignedDuration::from_mins(30)`.
