@@ -171,6 +171,38 @@ pub(crate) fn encode_segments(s: &str) -> String {
     s.split('/').map(encode_segment).collect::<Vec<_>>().join("/")
 }
 
+/// What an action argument before the last must be: something read from the request's
+/// head. `#[action]` checks each argument against it, so a wrong one is named instead of
+/// failing as an opaque `Handler` error.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` can't be an action argument",
+    label = "not something an action can take",
+    note = "action arguments are extractors: `Ctx`, `Current<User>`, `Param<T>` for a route capture, `QueryParams<T>`, `HeaderMap`, `Session`, and last, `Form<T>` or `Json<T>` for the body",
+    note = "to work with a record, take its id (`id: Param<Id<Post>>`) and load it in the action: `Post::find(*id).one_or_404(&ctx.db).await?`"
+)]
+pub trait ActionArg {}
+
+impl<T: axum::extract::FromRequestParts<Ctx>> ActionArg for T {}
+
+/// The last action argument, which may also read the body.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` can't be an action argument",
+    label = "not something an action can take",
+    note = "action arguments are extractors: `Ctx`, `Current<User>`, `Param<T>` for a route capture, `QueryParams<T>`, `HeaderMap`, `Session`, and last, `Form<T>` or `Json<T>` for the body",
+    note = "to work with a record, take its id (`id: Param<Id<Post>>`) and load it in the action: `Post::find(*id).one_or_404(&ctx.db).await?`"
+)]
+pub trait LastActionArg<M> {}
+
+impl<M, T: axum::extract::FromRequest<Ctx, M>> LastActionArg<M> for T {}
+
+#[doc(hidden)]
+pub fn action_arg<T: ActionArg>() {}
+
+#[doc(hidden)]
+pub fn last_action_arg<T: LastActionArg<M>, M>() {}
+
 /// Raw path parameters, parsed per capture by `#[action]`-generated handlers.
 #[doc(hidden)]
 pub struct RawParams(HashMap<String, String>);

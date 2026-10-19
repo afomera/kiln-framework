@@ -1,5 +1,6 @@
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{ToTokens, format_ident, quote, quote_spanned};
+use syn::spanned::Spanned;
 use syn::{
     Error, FnArg, GenericArgument, Ident, ItemFn, LitStr, Pat, PathArguments, Type,
     parse::{Parse, ParseStream},
@@ -133,12 +134,34 @@ fn param_inner(ty: &Type) -> Option<&Type> {
     }
 }
 
+/// The type's last path segment, looking through `Option<..>`: `Option<Form<PostForm>>` → `Form`.
+fn last_ident(ty: &Type) -> Option<String> {
+    let Type::Path(tp) = ty else { return None };
+    let last = tp.path.segments.last()?;
+    if last.ident == "Option"
+        && let PathArguments::AngleBracketed(args) = &last.arguments
+        && let Some(GenericArgument::Type(inner)) = args.args.first()
+    {
+        return last_ident(inner);
+    }
+    Some(last.ident.to_string())
+}
+
+/// Extractors that read the request body, which only the last argument may do.
+const BODY_EXTRACTORS: [&str; 8] = ["Form", "Json", "Body", "Bytes", "String", "Request", "Multipart", "RawForm"];
+
 pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let Args { method, path, pipeline, scope } = syn::parse2(attr)?;
     let func: ItemFn = syn::parse2(item)?;
     let fn_name = &func.sig.ident;
     if func.sig.asyncness.is_none() {
         return Err(Error::new_spanned(func.sig.fn_token, "actions must be `async fn`"));
+    }
+    if fn_name == "path" {
+        return Err(Error::new_spanned(
+            fn_name,
+            "an action can't be named `path`: `#[action]` generates `path(..)` beside it, the URL helper; rename the function (`show`, `index`, ..)",
+        ));
     }
     let segments = parse_path(&path)?;
     let captures: Vec<&str> = segments
@@ -148,6 +171,14 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             Segment::Literal(_) => None,
         })
         .collect();
+    for (i, capture) in captures.iter().enumerate() {
+        if captures[..i].contains(capture) {
+            return Err(Error::new(
+                path.span(),
+                format!("the route captures `{{{capture}}}` twice; give each capture its own name"),
+            ));
+        }
+    }
 
     // For introspection: each argument and the return type as the author wrote them.
     let type_text = |ty: &dyn quote::ToTokens| crate::util::type_text(&quote!(#ty).to_string());
@@ -191,6 +222,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let mut call_args = Vec::new();
     let mut param_lets = Vec::new();
     let mut param_types: Vec<(String, &Type)> = Vec::new();
+    let mut wrapper_types: Vec<&Type> = Vec::new();
 
     for (i, input) in func.sig.inputs.iter().enumerate() {
         let FnArg::Typed(arg) = input else {
@@ -208,29 +240,91 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     format!("`{name}` is a `Param`, but the route `{}` has no `{{{name}}}` segment", path.value()),
                 ));
             }
+            // Bound under its own name, so a capture named like the action (`tab` in
+            // `fn tab(.., tab: Param<String>)`) doesn't shadow the function being called.
+            let local = format_ident!("__kiln_param_{}", ident);
             param_lets.push(quote! {
-                let #ident = match __kiln_params.parse::<#inner>(#name) {
+                let #local = match __kiln_params.parse::<#inner>(#name) {
                     ::core::result::Result::Ok(__kiln_v) => ::kiln::Param(__kiln_v),
                     ::core::result::Result::Err(__kiln_e) => return ::kiln::__private::IntoResponse::into_response(__kiln_e),
                 };
             });
             param_types.push((name, inner));
-            call_args.push(quote! { #ident });
+            call_args.push(quote! { #local });
         } else {
             let ty = &arg.ty;
             let w = format_ident!("__kiln_arg{}", i);
             wrapper_params.push(quote! { #w: #ty });
+            wrapper_types.push(ty);
             call_args.push(quote! { #w });
         }
     }
+    // Each argument is checked on its own, spanned to its type, so a type that isn't an
+    // extractor is named (see `kiln::routing::ActionArg`).
+    let arg_checks = wrapper_types.iter().enumerate().map(|(i, ty)| {
+        if i + 1 == wrapper_types.len() {
+            quote_spanned! {ty.span()=> ::kiln::__private::last_action_arg::<#ty, _>(); }
+        } else {
+            quote_spanned! {ty.span()=> ::kiln::__private::action_arg::<#ty>(); }
+        }
+    });
 
     for capture in &captures {
         if !param_types.iter().any(|(n, _)| n == capture) {
+            // The usual slip: the argument is there, but not wrapped in `Param`.
+            let same_name = func.sig.inputs.iter().find_map(|input| match input {
+                FnArg::Typed(arg) if matches!(&*arg.pat, Pat::Ident(p) if p.ident == capture) => Some(arg),
+                _ => None,
+            });
+            if let Some(arg) = same_name {
+                let ty = &arg.ty;
+                return Err(Error::new_spanned(
+                    ty,
+                    format!(
+                        "`{capture}` is the route's `{{{capture}}}` capture, so it's read with `Param`: write `{capture}: Param<{}>`",
+                        type_text(ty)
+                    ),
+                ));
+            }
             return Err(Error::new(
                 path.span(),
                 format!("the route captures `{{{capture}}}`, but `{fn_name}` has no `{capture}: Param<_>` argument"),
             ));
         }
+    }
+
+    // Body extractors must come last: axum hands the body to the last argument only, and
+    // otherwise fails with an opaque `Handler` error. `Param`s don't count: they aren't
+    // arguments of the generated handler.
+    let extractors: Vec<&syn::PatType> = func
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(arg) if param_inner(&arg.ty).is_none() => Some(arg),
+            _ => None,
+        })
+        .collect();
+    let reads_body = |arg: &&syn::PatType| last_ident(&arg.ty).is_some_and(|i| BODY_EXTRACTORS.contains(&i.as_str()));
+    if let Some(at) = extractors.iter().position(reads_body)
+        && at + 1 < extractors.len()
+    {
+        let body = extractors[at];
+        let kind = last_ident(&body.ty).unwrap_or_default();
+        let shown = if matches!(kind.as_str(), "String" | "Bytes" | "Body" | "Request") {
+            format!("`{kind}`")
+        } else {
+            format!("`{kind}<..>`")
+        };
+        let after: Vec<String> = extractors[at + 1..].iter().map(|arg| arg.pat.to_token_stream().to_string()).collect();
+        return Err(Error::new_spanned(
+            &body.ty,
+            format!(
+                "{shown} reads the request body, so it must be the last parameter; move `{}` after `{}`",
+                body.pat.to_token_stream(),
+                after.join("`, `"),
+            ),
+        ));
     }
 
     let type_of =
@@ -265,6 +359,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
 
         #[doc(hidden)]
         async fn __kiln_handler(#raw_params #( #wrapper_params ),*) -> ::kiln::__private::Response {
+            #( #arg_checks )*
             #( #param_lets )*
             ::kiln::__private::IntoResponse::into_response(#fn_name(#( #call_args ),*).await)
         }

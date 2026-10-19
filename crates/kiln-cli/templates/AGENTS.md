@@ -125,6 +125,11 @@ generated tests passing.
   `{{ path("posts::show", slug=post.slug) }}` in templates.
 - **Slashes in a param:** end the route with a catch-all, `/{owner}/{repo}/tree/{*path}`
   with `path: Param<String>` (`"src/lib.rs"`); `tree::path(o, r, "src/lib.rs")` keeps the slashes.
+- **Action arguments** are extractors: `Ctx`, `Current<User>`, `Param<T>` (one per route
+  capture, named like it: `{slug}` is `slug: Param<String>`), `HeaderMap`, `Session`,
+  `Turbo`, `RateLimit`. A body extractor (`Form<T>`, `Json<T>`) must be the last argument.
+  Records aren't arguments: take `id: Param<Id<Post>>` and load it in the action. The
+  action can share a capture's name (`fn tab(.., tab: Param<String>)`), but not be named `path`.
 - **Permissions are policies:** `impl Allows<A, Post> for User` in `src/policies/post.rs`,
   where `A` is `Read`, `Create` (checked against `NewPost`), `Update` or `Delete` from
   `kiln::policy` (or your own unit struct, e.g. `Publish`). `user.authorize::<Update, _>(post)?`

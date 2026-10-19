@@ -1,0 +1,5 @@
+error: actions must be `async fn`
+ --> tests/ui/action_not_async.rs:5:5
+  |
+5 | pub fn index() -> String {
+  |     ^^

@@ -154,7 +154,7 @@ pub mod __private {
     pub use tokio;
 
     pub use crate::db::Row;
-    pub use crate::routing::{RawParams, RequiredScope};
+    pub use crate::routing::{RawParams, RequiredScope, action_arg, last_action_arg};
     pub use crate::view::assert_no_overlap;
 
     pub type Router = axum::Router<crate::Ctx>;
