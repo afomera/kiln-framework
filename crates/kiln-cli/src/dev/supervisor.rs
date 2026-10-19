@@ -736,7 +736,7 @@ impl Supervisor {
                 self.list_routes();
                 self.notices.push(Notice::BuildSucceeded { first });
                 if first {
-                    self.say(format!("{}  (watching src/ and Cargo.toml)", self.url()));
+                    self.say(format!("{}  (watching src/, Cargo.toml and which templates exist)", self.url()));
                 }
                 self.start_services();
                 if !first {
@@ -787,7 +787,7 @@ impl Supervisor {
     fn watch(&mut self, now: Instant) {
         if now.duration_since(self.last_poll) >= POLL {
             self.last_poll = now;
-            if self.change_at.is_none() && build::snapshot(&self.config.root) != self.seen {
+            if self.change_at.is_none() && build::change(&self.seen, &build::snapshot(&self.config.root)).is_some() {
                 self.change_at = Some(now + SETTLE);
             }
         }
@@ -795,8 +795,16 @@ impl Supervisor {
             && now >= at
         {
             self.change_at = None;
-            self.seen = build::snapshot(&self.config.root);
-            self.say("change detected; rebuilding".into());
+            let current = build::snapshot(&self.config.root);
+            // Gone again (an editor saving by delete-and-rename): nothing to build.
+            let Some(change) = build::change(&self.seen, &current) else { return };
+            self.seen = current;
+            if change == build::Change::Templates {
+                // No Rust file changed, so cargo wouldn't compile the views again by itself.
+                build::invalidate(&self.config.root);
+                self.seen = build::snapshot(&self.config.root);
+            }
+            self.say(change.describe().into());
             self.rebuild();
         }
     }
