@@ -1,0 +1,5 @@
+error: `Form<..>` reads the request body, so it must be the last parameter; move `form` after `headers`
+ --> tests/ui/body_extractor_not_last.rs:5:48
+  |
+5 | pub async fn create(slug: Param<String>, form: Form<blog::forms::CommentForm>, headers: HeaderMap) -> Result<Redirect> {
+  |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

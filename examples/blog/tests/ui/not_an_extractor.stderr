@@ -1,0 +1,57 @@
+error[E0277]: `Post` can't be an action argument
+ --> tests/ui/not_an_extractor.rs:6:37
+  |
+6 | pub async fn latest(ctx: Ctx, post: Post) -> String {
+  |                                     ^^^^ not something an action can take
+  |
+  = help: the trait `kiln::__private::axum::extract::FromRequestParts<kiln::Ctx>` is not implemented for `Post`
+  = note: action arguments are extractors: `Ctx`, `Current<User>`, `Param<T>` for a route capture, `QueryParams<T>`, `HeaderMap`, `Session`, and last, `Form<T>` or `Json<T>` for the body
+  = note: to work with a record, take its id (`id: Param<Id<Post>>`) and load it in the action: `Post::find(*id).one_or_404(&ctx.db).await?`
+help: the following other types implement trait `kiln::__private::axum::extract::FromRequestParts<S>`
+ --> $WORKSPACE/crates/kiln/src/app.rs
+  |
+  | impl FromRequestParts<Ctx> for Ctx {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `kiln::Ctx`
+  |
+ ::: $WORKSPACE/crates/kiln/src/rate_limit.rs
+  |
+  | impl FromRequestParts<Ctx> for RateLimit {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `RateLimit`
+  |
+ ::: $WORKSPACE/crates/kiln/src/session.rs
+  |
+  | impl<T: Record> FromRequestParts<Ctx> for Current<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `kiln::Current<T>`
+  = note: required for `Post` to implement `kiln::__private::axum::extract::FromRequest<kiln::Ctx, axum_core::extract::private::ViaParts>`
+  = note: required for `Post` to implement `kiln::routing::LastActionArg<axum_core::extract::private::ViaParts>`
+note: required by a bound in `kiln::__private::last_action_arg`
+ --> $WORKSPACE/crates/kiln/src/routing.rs
+  |
+  | pub fn last_action_arg<T: LastActionArg<M>, M>() {}
+  |                           ^^^^^^^^^^^^^^^^ required by this bound in `last_action_arg`
+
+error[E0277]: the trait bound `fn(kiln::Ctx, Post) -> impl Future<Output = kiln::__private::axum::http::Response<kiln::__private::axum::body::Body>> {__kiln_handler}: kiln::__private::axum::handler::Handler<_, _>` is not satisfied
+ --> tests/ui/not_an_extractor.rs:5:1
+  |
+5 | #[action(GET "/posts/latest")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+  = help: the trait `kiln::__private::axum::handler::Handler<_, _>` is not implemented for fn item `fn(kiln::Ctx, Post) -> impl Future<Output = kiln::__private::axum::http::Response<kiln::__private::axum::body::Body>> {__kiln_handler}`
+  = note: Consider using `#[axum::debug_handler]` to improve the error message
+note: required by a bound in `kiln::__private::axum::routing::on`
+ --> $CARGO/axum-$VERSION/src/routing/method_routing.rs
+  |
+  | pub fn on<H, T, S>(filter: MethodFilter, handler: H) -> MethodRouter<S, Infallible>
+  |        -- required by a bound in this function
+  | where
+  |     H: Handler<T, S>,
+  |        ^^^^^^^^^^^^^ required by this bound in `on`
+  = note: this error originates in the attribute macro `action` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `ctx`
+ --> tests/ui/not_an_extractor.rs:6:21
+  |
+6 | pub async fn latest(ctx: Ctx, post: Post) -> String {
+  |                     ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`
+  |
+  = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default

@@ -1,0 +1,5 @@
+error: `page` is a `Param`, but the route `/posts` has no `{page}` segment; add one, or read `?page=` from the query string with `QueryParams<T>`
+ --> tests/ui/param_without_capture.rs:5:20
+  |
+5 | pub async fn index(page: Param<i64>) -> String {
+  |                    ^^^^

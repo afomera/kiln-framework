@@ -1,0 +1,5 @@
+error: the route captures `{id}` twice; give each capture its own name
+ --> tests/ui/duplicate_capture.rs:4:14
+  |
+4 | #[action(GET "/{id}/compare/{id}")]
+  |              ^^^^^^^^^^^^^^^^^^^^

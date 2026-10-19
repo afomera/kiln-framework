@@ -88,7 +88,7 @@ generated tests passing.
 | CSS, JS, images | `assets/` (JS entry point: `assets/application.js`) | linked with `{{ asset("app.css") }}`; JS modules load through the import map; CSS references other assets by path (`url("../fonts/a.woff2")`, `@import "tokens.css"`) |
 | Stimulus controllers | `assets/controllers/{name}_controller.js` | `export default class extends Controller` (from `"@hotwired/stimulus"`); registered automatically as `data-controller="{name}"` (`_` → `-`, `/` → `--`) |
 | Import-map pins | `config/importmap.toml` | `"@pierre/diffs" = "vendor/npm/@pierre/diffs@1.5.2.js"` (a file under `assets/`) or `"x" = "https://.."`; written by `kiln importmap pin` |
-| Files served as-is | `public/` (`robots.txt`, `favicon.svg`) | served at the site root when no route matches |
+| Files served as-is | `public/` (`robots.txt`, `favicon.svg`) | served at the site root (GET/HEAD), before routes that merely match the path (`/{owner}` doesn't swallow `/favicon.svg`); only a route for exactly that path wins over the file. `public/index.html` is `/` when no route is |
 | Presentation methods | `src/parts/{record}.rs` | `#[part] impl Record` + `#[record(.., parts)]` |
 | Template filters and functions (every template, no import) | `src/helpers/{name}.rs` (`pub mod helpers;` in `src/lib.rs`) | `#[kiln::template_filter] pub fn avatar_hue(name: &str) -> u32` is `{{ user.name \| avatar_hue }}`; `#[kiln::template_function] pub fn initials(name: &str) -> String` is `{{ initials(user.name) }}` |
 | Template macros (every template, no import) | `templates/helpers/{name}.html.jinja` | `{% macro icon(name, size=16) %}..{% endmacro %}`; any template calls `{{ icon("git-branch") }}` |
@@ -126,6 +126,16 @@ generated tests passing.
   `{{ path("posts::show", slug=post.slug) }}` in templates.
 - **Slashes in a param:** end the route with a catch-all, `/{owner}/{repo}/tree/{*path}`
   with `path: Param<String>` (`"src/lib.rs"`); `tree::path(o, r, "src/lib.rs")` keeps the slashes.
+- **Action arguments** are extractors: `Ctx`, `Current<User>`, `Param<T>` (one per route
+  capture, named like it: `{slug}` is `slug: Param<String>`), `QueryParams<T>`, `HeaderMap`,
+  `Session`, `Turbo`, `RateLimit`. A body extractor (`Form<T>`, `Json<T>`) must be the last argument.
+  Records aren't arguments: take `id: Param<Id<Post>>` and load it in the action. The
+  action can share a capture's name (`fn tab(.., tab: Param<String>)`), but not be named `path`.
+- **Redirects:** `Redirect::to(path)` is a 303, right after any form submission.
+  `Redirect::back(&headers, fallback)` (with a `headers: HeaderMap` argument) returns to the
+  page a small POST came from (follow, star, mark read): the `Referer`'s path when it's this
+  site, else `fallback`, so it's never an open redirect. For moved URLs, `Redirect::permanent(path)`
+  (308) and `Redirect::temporary(path)` (307). `.notice(..)` / `.alert(..)` work on all of them.
 - **Permissions are policies:** `impl Allows<A, Post> for User` in `src/policies/post.rs`,
   where `A` is `Read`, `Create` (checked against `NewPost`), `Update` or `Delete` from
   `kiln::policy` (or your own unit struct, e.g. `Publish`). `user.authorize::<Update, _>(post)?`
@@ -146,6 +156,14 @@ generated tests passing.
   (a marketplace's `Merchant`) get their own registration, sign-in page, `current_merchant`
   value and session; one person in several roles (a course's student and instructor) is one
   `User` plus records such as `Enrollment`, checked in policies.
+- **Layout data** (an unread count in the nav, the viewer's teams in a menu) comes from one async
+  fn, not a lazy turbo-frame or a field on every view: `app.layout_data(views::layout::data)` in
+  `src/app.rs`, with `pub async fn data(ctx: Ctx, user: Option<User>) -> Result<LayoutData>` in
+  `src/views/layout.rs` (`LayoutData` is `#[derive(Serialize)]`). Every template reads it as
+  `layout_data` (`{{ layout_data.unread }}`). It runs once per request, after the action, and only
+  when a template that renders reads `layout_data`: full HTML pages, not JSON, redirects, Turbo Frame
+  requests or Turbo Streams. An error fails the page with its report; a view field named
+  `layout_data` wins over it. `kiln check` knows the name.
 - **Sign-in redirects:** a signed-out browser asking for a page (GET with
   `Accept: text/html`) whose action takes `Current<T>` is sent to `T`'s sign-in page; every
   other request gets 401. `#[kiln::test]` applies `src/app.rs`, so tests see the same
@@ -166,12 +184,46 @@ generated tests passing.
     and works for a single `select` too. Enum lists get their variants without `options=`.
 
   In templates, never write raw `<form>` tags. Use `{{ form_start(path("posts::update", slug=post.slug), method="patch") }}`, then `{{ fields(form) }}` (or `{{ field(form.title, label="..") }}`), then `{{ form_end() }}`. These add the CSRF token, the method override, labels, errors and the `required`/`maxlength` attributes.
+  Other attributes on the `<form>`: `id="search"`, `class="inline"`, `data={"controller": "search", "search_url_value": "/s"}`
+  (→ `data-controller="search" data-search-url-value="/s"`; `_` becomes `-`, lists and maps are written as JSON),
+  `attrs={"aria-label": "Search", "novalidate": true}` (`true` is a bare attribute, `false`/none leaves it out). All are
+  escaped; an attribute given twice is an error.
+  `button_to(..)` takes the same `id`/`class`/`data`/`attrs` for its form, and `button_class=`, `button_data={..}`,
+  `button_attrs={"title": "Delete"}` for its button. For markup in the button (an icon), use a call block, which takes just
+  the path: `{% call button_to(path("posts::destroy", slug=post.slug), method="delete") %}{{ icon("trash") }} Delete{% endcall %}`
+  (a helper macro's output also works as the label: `button_to(icon("trash"), path(..))`).
+- **Query strings** (filters, sorting, tabs, search) are typed: a `#[derive(Form, Default)]`
+  struct in `src/forms/{name}_filters.rs`, taken as `filters: QueryParams<RepoFilters>` (any
+  argument position; it derefs to the struct). Never parse `RawQuery` by hand. Field types,
+  `#[validate]` rules and `DbEnum` enums (`#[default]` on a variant) work as in forms; a key
+  given twice fills a `Vec<T>` field (`?tag=a&tag=b`). Unlike forms, unknown keys are ignored,
+  missing keys take the `Default`, and **a bad value (`?sort=oldest`, `?page=0` against
+  `range(min = 1)`) falls back to its default** instead of failing the page;
+  `filters.errors()` has the messages if an action would rather refuse
+  (`return Err(Error::Invalid(filters.errors().clone()))`). Put it in the view
+  (`pub filters: QueryParams<RepoFilters>`) to build links that change one parameter and
+  keep the rest, leaving defaults out: `{{ filters.with("sort", "stars") }}`,
+  `filters.without("q")`, `filters.toggle("tag", "rust")` (for `Vec` fields),
+  `filters.has("tag", "rust")`, `filters.values("tag")`, `{{ filters.sort }}` (the value as
+  text), `filters.href()`, `filters.query_string()` (no `?`; empty at the defaults). The same
+  methods exist in Rust; `QueryParams::of(path, value).href()` links to another page with
+  given filters.
 - **Time:**
   - `Timestamp` values are UTC.
   - Build them with `Timestamp::now()`, `Timestamp::days_from_now(7)`, `hours_ago(2)`, or `ts + kiln::time::SignedDuration::from_mins(30)`.
   - Compare in queries with `event::starts_at.gt(Timestamp::now())`.
   - Display with `{{ event.starts_at | datetime }}` (`Oct 12, 2026 09:30 UTC`; the default format ends in `UTC`) or `{{ event.starts_at | datetime("%b %-d") }}`.
+  - Relative: `{{ post.created_at | time_ago }}` → `just now` (under 45s), `3 minutes ago`, `2 hours ago`, `yesterday` (24–48h),
+    `4 days ago`, `3 weeks ago`, then the date (`Mar 11`; `Mar 11, 2025` in another year); future times read `in 3 days`,
+    `tomorrow`. Every unit rounds down (2h59m is `2 hours ago`). `{{ ts | time_ago_tag }}` wraps it in
+    `<time datetime=".." title="Oct 18, 2026 14:03 UTC">` so the exact time shows on hover. Both use `Timestamp::now()`,
+    so `app.travel(..)` moves them in tests. The text is as of the render; it doesn't update in an open page.
   - Form time inputs are read as UTC.
+- **Numbers** (English formatting: `,` thousands, `.` decimals): `{{ stars | number }}` → `2,841`,
+  `{{ ratio | number(2) }}` → `0.67`; `{{ n | compact_number }}` → `2.8k`, `12.3k`, `123k`, `1.2M` (rounded
+  down); `{{ bytes | filesize }}` → `870 B`, `2.7 KB`, `1.5 MB` (1 KB = 1,024 bytes, nearest tenth);
+  `{{ secs | duration }}` → `38s`, `4m 31s`, `1h 04m`, `2d 3h`. The same in Rust for views that build strings:
+  `kiln::format::{time_ago, number, compact_number, filesize, duration}`; don't write your own.
 - **API routes** (`pipeline = Api`) take JSON or form bodies through the same `Form<T>`, return
   JSON problem reports on errors, and never use the session cookie (so no CSRF token).
 - **API tokens:** on `pipeline = Api` routes, `Current<User>` comes from `Authorization: Bearer <token>`,
@@ -373,6 +425,12 @@ generated tests passing.
 - **Templates are strict:** an undefined value is an error, not an empty string. Output in
   `.html` templates is HTML-escaped (`&`, `<`, `>`, `"`, `'`; slashes stay as they are, so
   `{{ blob.path }}` prints `src/lib.rs`); `.txt` templates aren't escaped.
+- **Data for JavaScript:** `<script type="application/json" id="tree">{{ tree | tojson }}</script>`
+  (read it with `JSON.parse(el.textContent)`), or in a **single-quoted** attribute:
+  `data-tree-paths-value='{{ paths | tojson }}'`. `tojson` writes `<`, `>`, `&`, `'` (and
+  U+2028/9) as `<`-style escapes, so the value can't close the script, open a comment or end
+  the attribute; `tojson(2)` indents. Never put it in a double-quoted attribute (its `"`s end
+  it), and don't hand-build JSON strings in views for this.
 - **Template helpers** are the app's own filters, functions and macros, usable in every
   template (pages, layouts, includes, mail) without an import, and known to `kiln check`
   (`kiln introspect template_helpers` lists them). Rust ones are plain fns with typed
@@ -384,7 +442,10 @@ generated tests passing.
   its name (keyword arguments and `{% call %}` blocks work; `caller()` takes no arguments) and
   sees only its arguments, not the page's variables. A name Kiln already uses (`path`,
   `upper`, `markdown`, ..) or two helpers with one name stop the app at boot (K0406);
-  `#[kiln::template_filter(name = "hue")]` registers a fn under another name.
+  `#[kiln::template_filter(name = "hue")]` registers a fn under another name. The formatting
+  filters (`time_ago`, `time_ago_tag`, `number`, `compact_number`, `filesize`, `duration`, `tojson`) are
+  built-ins too: an app filter of the same name written before Kiln had them now fails K0406;
+  delete it and use Kiln's (or rename it if it prints something different).
 - **Inside a record's own file**, column and relation names are constants (`title`,
   `owner`), so a binding or parameter with one of those names won't compile there; pick
   another name (the generated `owned_by` uses `who`).

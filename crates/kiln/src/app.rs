@@ -17,7 +17,7 @@ use crate::{
     routing::route_for,
     session::{self, COOKIE, Flash, REQUEST, RequestScope, SecretKey, Session, tokens_match},
     turbo::{self, PendingStream, Turbo},
-    view::PendingRender,
+    view::{LAYOUT_DATA, PendingRender},
 };
 
 /// Request context: the app's dependencies, built once at boot. Extract it in any action.
@@ -72,7 +72,11 @@ pub struct App {
     assets: Option<Assets>,
     tools: Option<ToolsAccess>,
     stop_on_pending_migrations: bool,
+    layout_data: Option<LayoutData>,
 }
+
+/// The app's `layout_data` hook: the request's context and session to the template value.
+type LayoutData = Arc<dyn Fn(Ctx, Session) -> BoxFuture<'static, Result<minijinja::Value>> + Send + Sync>;
 
 /// Decides who may use `/kiln` in production: `(who, seed)` for an allowed viewer, where
 /// `seed` (their sign-in token) keys the control forms' token.
@@ -147,6 +151,7 @@ struct RouteState {
     ctx: Ctx,
     key: SecretKey,
     sign_ins: Arc<[Arc<dyn SignIn>]>,
+    layout_data: Option<LayoutData>,
 }
 
 /// Largest form body kiln buffers for CSRF and method-override checks.
@@ -164,6 +169,7 @@ impl App {
             assets: None,
             tools: None,
             stop_on_pending_migrations: false,
+            layout_data: None,
         }
     }
 
@@ -258,6 +264,46 @@ impl App {
         self
     }
 
+    /// Request-wide data for layouts, computed by an async fn: every template can read what it
+    /// returns as `layout_data` (an unread count in the nav, the viewer's teams in a menu).
+    /// It gets the app's context and the signed-in `T` (none when signed out):
+    ///
+    /// ```ignore
+    /// // src/app.rs
+    /// app.layout_data(views::layout::data)
+    /// // src/views/layout.rs
+    /// #[derive(Serialize)]
+    /// pub struct LayoutData { pub unread: i64 }
+    /// pub async fn data(ctx: Ctx, user: Option<User>) -> Result<LayoutData> {
+    ///     let unread = match &user { Some(user) => ctx.db.unread_notifications(user).await?, None => 0 };
+    ///     Ok(LayoutData { unread })
+    /// }
+    /// ```
+    ///
+    /// It runs at most once per request, after the action and before rendering, and only when
+    /// a template that renders reads `layout_data`: full HTML pages (whose layout usually does),
+    /// not JSON, redirects, Turbo Frame requests or Turbo Streams unless the page or stream
+    /// content reads it itself. A view field named `layout_data` wins, and the hook doesn't
+    /// run. An error fails the page with the error's report.
+    pub fn layout_data<T, S, F, Fut>(mut self, hook: F) -> Self
+    where
+        T: Record,
+        S: Serialize + 'static,
+        F: Fn(Ctx, Option<T>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<S>> + Send + 'static,
+    {
+        let hook = Arc::new(hook);
+        self.layout_data = Some(Arc::new(move |ctx: Ctx, session: Session| {
+            let hook = hook.clone();
+            Box::pin(async move {
+                let viewer = session::signed_in::<T>(&session, &ctx.db).await?;
+                let data = hook(ctx, viewer).await?;
+                Ok(minijinja::Value::from_serialize(&data))
+            })
+        }));
+        self
+    }
+
     /// The prefix new API tokens start with (default `kiln_pat_`), e.g. `"forked_pat_"`. A
     /// distinctive prefix lets secret scanners find leaked tokens; register it with them.
     /// Tokens issued under an earlier prefix keep working.
@@ -280,7 +326,12 @@ impl App {
     pub fn router(&self) -> axum::Router {
         crate::storage::set_signing_key(&self.key);
         let sign_ins: Arc<[Arc<dyn SignIn>]> = self.sign_ins.clone().into();
-        let route_state = RouteState { ctx: self.ctx.clone(), key: self.key.clone(), sign_ins: sign_ins.clone() };
+        let route_state = RouteState {
+            ctx: self.ctx.clone(),
+            key: self.key.clone(),
+            sign_ins: sign_ins.clone(),
+            layout_data: self.layout_data.clone(),
+        };
         let routes = routes()
             .into_iter()
             .fold(axum::Router::<Ctx>::new(), |router, route| (route.mount)(router))
@@ -430,12 +481,36 @@ async fn render_page(mut response: Response, state: &RouteState, scope: &Request
     if page.is_none() && stream.is_none() {
         return response;
     }
+    // What the templates that will render read: a page's layout only for full pages.
     let mut used = std::collections::HashSet::new();
-    for render in page.iter().chain(stream.iter().flat_map(|s| s.0.contents())) {
-        match render.variables() {
+    let pages = page.iter().map(|p| (p, !scope.frame));
+    for (render, with_layout) in pages.chain(stream.iter().flat_map(|s| s.0.contents()).map(|c| (c, false))) {
+        match render.variables(with_layout) {
             Ok(vars) => used.extend(vars),
             Err(e) => return e.into_response(),
         }
+    }
+    let defined_by_view = page.iter().chain(stream.iter().flat_map(|s| s.0.contents())).all(|r| r.defines(LAYOUT_DATA));
+    if used.contains(LAYOUT_DATA) && !defined_by_view {
+        let Some(hook) = &state.layout_data else {
+            return Error::Config(format!(
+                "a template reads `{LAYOUT_DATA}`, but src/app.rs registers no `app.layout_data(..)` hook to compute it"
+            ))
+            .into_response();
+        };
+        let value = match hook(state.ctx.clone(), scope.session.clone()).await {
+            Ok(value) => value,
+            Err(e) => {
+                let mut response = e.into_response();
+                if let Some(report) = response.extensions_mut().get_mut::<ErrorReport>() {
+                    report.hint(format!(
+                        "Raised by the app's `app.layout_data(..)` hook (src/app.rs), which runs before rendering pages whose templates read `{LAYOUT_DATA}`."
+                    ));
+                }
+                return response;
+            }
+        };
+        scope.cache.templates.lock().unwrap_or_else(|e| e.into_inner()).insert(LAYOUT_DATA.to_owned(), value);
     }
     for sign_in in state.sign_ins.iter() {
         let value = if used.contains(sign_in.variable()) {
@@ -607,6 +682,10 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
                 None => None,
             };
             page.or_else(|| assets::serve_kiln(path))
+        } else if crate::routing::route_for("GET", path).is_none() {
+            // A `public/` file wins over routes that merely match it (`/{owner}` and
+            // `/favicon.svg`); a route written for exactly this path still wins.
+            shared.assets.as_ref().and_then(|a| a.serve_public_file(path))
         } else {
             None
         };

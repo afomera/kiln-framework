@@ -239,8 +239,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         });
         builds.push(quote! { #ident: #local.expect("parsed when there are no errors") });
-        to_fields
-            .push(quote! { __kiln_fields.set_all(#field_name, ::kiln::form::FormField::to_values(&self.#ident)); });
+        to_fields.push(quote! {
+            __kiln_fields.set_all(#field_name, ::kiln::form::FormField::to_values(&self.#ident));
+        });
         names.push(field_name);
     }
 

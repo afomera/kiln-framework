@@ -22,6 +22,7 @@ mod error;
 mod error_page;
 mod files;
 pub mod form;
+pub mod format;
 pub mod http;
 pub mod jobs;
 pub mod join;
@@ -32,6 +33,7 @@ mod migrate;
 pub mod notify;
 pub mod policy;
 mod query;
+mod query_params;
 pub mod rate_limit;
 mod realtime;
 mod redirect;
@@ -66,8 +68,9 @@ pub use query::{
     Column, Delete, Expr, Insert, InsertAll, IntoInsert, ListValue, MinMax, Order, Query, Select, Subquery, Summable,
     TextColumn, Update, like,
 };
+pub use query_params::QueryParams;
 pub use rate_limit::RateLimit;
-pub use redirect::{Redirect, ViewOrRedirect};
+pub use redirect::{Redirect, RequestHeaders, ViewOrRedirect};
 pub use rel::{Append, BoxFuture, HasRel, HasRelation, Loaded, RelSet, Relation};
 pub use rich_text::RichText;
 pub use routing::{Param, PathArg, RouteDef, routes, routes_table};
@@ -149,8 +152,8 @@ pub mod prelude {
 
     pub use crate::{
         App, Attachment, Batch, BatchId, Ctx, Current, Db, DbEnum, Enqueue, Error, Id, Json, Loaded, Mail, Markdown,
-        Notify, Param, Perform, Preview, Query, Record, Redirect, Result, RichText, Schedule, Secret, Session,
-        Timestamp, Turbo, TurboStream, Via, View, ViewOrRedirect, action,
+        Notify, Param, Perform, Preview, Query, QueryParams, Record, Redirect, Result, RichText, Schedule, Secret,
+        Session, Timestamp, Turbo, TurboStream, Via, View, ViewOrRedirect, action,
         form::{Form, FormState, OrRender, Valid},
         part,
         policy::{Allows, Authorize, Authorized},
@@ -168,7 +171,7 @@ pub mod __private {
     pub use tokio;
 
     pub use crate::db::Row;
-    pub use crate::routing::{RawParams, RequiredScope};
+    pub use crate::routing::{RawParams, RequiredScope, action_arg, last_action_arg};
     pub use crate::view::assert_no_overlap;
 
     pub type Router = axum::Router<crate::Ctx>;

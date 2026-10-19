@@ -37,40 +37,45 @@ pub trait CheckWith: FormInput + Sync {
     fn check(&self, ctx: &Ctx, errors: &mut Errors) -> impl Future<Output = Result<()>> + Send;
 }
 
-/// Raw submitted values by field name. A name can hold several values (`tag=a&tag=b`), for
-/// `Vec<T>` fields; single-value fields read the last one.
+/// Raw submitted values by field name. A name can have several values (`?tag=a&tag=b`),
+/// which a `Vec<T>` field reads; other fields read the last one.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Fields(BTreeMap<String, Vec<String>>);
 
 impl Fields {
-    /// The field's value (the last one, when it was submitted more than once).
+    /// The field's last value.
     pub fn get(&self, name: &str) -> Option<&str> {
         self.0.get(name).and_then(|values| values.last()).map(String::as_str)
     }
 
-    /// Every value submitted under `name`, in order; empty when it wasn't submitted.
+    /// Every value the field has, in the order given.
     pub fn get_all(&self, name: &str) -> &[String] {
         self.0.get(name).map_or(&[], Vec::as_slice)
     }
 
-    /// Replaces the field's values with one value.
+    /// Replaces the field's values with `value`.
     pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.0.insert(name.into(), vec![value.into()]);
     }
 
-    /// Adds a value after the field's others, as a repeated key in a form body does.
-    pub fn append(&mut self, name: impl Into<String>, value: impl Into<String>) {
+    /// Adds a value after the field's others.
+    pub fn add(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.0.entry(name.into()).or_default().push(value.into());
     }
 
-    /// Replaces the field's values.
+    /// Replaces the field's values; none removes it.
     pub fn set_all(&mut self, name: impl Into<String>, values: Vec<String>) {
-        self.0.insert(name.into(), values);
+        let name = name.into();
+        if values.is_empty() {
+            self.0.remove(&name);
+        } else {
+            self.0.insert(name, values);
+        }
     }
 
     /// Parses one field, recording a message in `errors` when it doesn't parse.
     pub fn parse<T: FormField>(&self, name: &str, errors: &mut Errors) -> Option<T> {
-        match T::from_values(self.0.get(name).map(Vec::as_slice)) {
+        match T::from_values(self.get_all(name)) {
             Ok(value) => Some(value),
             Err(message) => {
                 errors.add(name, message);
@@ -84,8 +89,8 @@ impl Fields {
 impl<K: Into<String>, V: Into<String>> FromIterator<(K, V)> for Fields {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let mut fields = Self::default();
-        for (k, v) in iter {
-            fields.append(k, v);
+        for (name, value) in iter {
+            fields.add(name, value);
         }
         fields
     }
@@ -168,10 +173,10 @@ pub trait FormField: Sized {
     fn from_field(raw: Option<&str>) -> std::result::Result<Self, String>;
     fn to_field(&self) -> String;
 
-    /// Parses every value submitted under the field's name (`None` when it wasn't
-    /// submitted). Single-value fields read the last one.
-    fn from_values(raw: Option<&[String]>) -> std::result::Result<Self, String> {
-        Self::from_field(raw.and_then(|values| values.last()).map(String::as_str))
+    /// Every value submitted under the field's name (none when it wasn't). Fields that
+    /// take one value read the last; `Vec<T>` reads them all.
+    fn from_values(values: &[String]) -> std::result::Result<Self, String> {
+        Self::from_field(values.last().map(String::as_str))
     }
 
     /// The values that prefill the form.
@@ -294,10 +299,7 @@ impl<T: FormField> FormField for Vec<T> {
     const MULTIPLE: bool = true;
 
     fn from_field(raw: Option<&str>) -> std::result::Result<Self, String> {
-        match raw {
-            None => Self::from_values(None),
-            Some(raw) => Self::from_values(Some(&[raw.to_owned()])),
-        }
+        Self::from_values(&raw.map(str::to_owned).into_iter().collect::<Vec<_>>())
     }
 
     /// Comma-separated, for display; forms prefill from [`FormField::to_values`].
@@ -305,8 +307,8 @@ impl<T: FormField> FormField for Vec<T> {
         self.to_values().join(",")
     }
 
-    fn from_values(raw: Option<&[String]>) -> std::result::Result<Self, String> {
-        let values = raw.unwrap_or_default().iter().map(|v| v.trim()).filter(|v| !v.is_empty());
+    fn from_values(values: &[String]) -> std::result::Result<Self, String> {
+        let values = values.iter().map(|v| v.trim()).filter(|v| !v.is_empty());
         values.map(|v| T::from_field(Some(v)).map_err(|message| item_message(v, &message))).collect()
     }
 
@@ -664,7 +666,7 @@ pub(crate) fn decode_pairs<T: FormInput>(pairs: impl IntoIterator<Item = (String
             _ => name,
         };
         if accepts::<T>(&name)? {
-            fields.append(name, value);
+            fields.add(name, value);
         }
     }
     Ok(fields)
@@ -759,7 +761,7 @@ async fn read_multipart<T: FormInput>(
                     fields.set(&name, file_token(ctx, &text).await?);
                 }
             } else {
-                fields.append(name, text);
+                fields.add(name, text);
             }
         }
     }
