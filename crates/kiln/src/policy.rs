@@ -25,6 +25,26 @@ impl<A, T: Record, Rs: RelSet<T>, U: Allows<A, T>> Allows<A, Loaded<T, Rs>> for 
     }
 }
 
+/// A proof about this *access value* covers writes to the record `R` (or to each record in
+/// a tuple). For apps whose policies check a resolved access value rather than the record:
+/// when permissions need database lookups (memberships, teams, grants), the action resolves
+/// `RepoAccess` asynchronously, the policy is `impl Allows<Write, RepoAccess> for User`, and
+/// ops that change the repository's rows take `Authorized<Write, RepoAccess>`.
+///
+/// ```ignore
+/// // src/policies/repository.rs, next to the access type
+/// impl Covers<(Repository, RepositoryCollaborator, RepositoryInvitation)> for RepoAccess {}
+///
+/// pub async fn invite(ctx: &Ctx, repo: Authorized<Admin, RepoAccess>, ..) -> Result<RepositoryInvitation> {
+///     RepositoryInvitation::insert(..).run(&ctx.db).await     // proven by the `RepoAccess` proof
+/// }
+/// ```
+///
+/// A marker for `kiln check`: it makes each covered record policy-guarded, so a function that
+/// writes one must take `Authorized<_, R>` or `Authorized<_, X>` for an `X` that covers it
+/// (K0301). Declare it in src/policies/.
+pub trait Covers<R: ?Sized> {}
+
 pub struct Create;
 pub struct Read;
 pub struct Update;

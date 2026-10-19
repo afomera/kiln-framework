@@ -131,6 +131,13 @@ generated tests passing.
   gives `Authorized<Update, Post>` or a 403; ops take the proof, and `kiln check` (K0301)
   flags writes without one. For showing UI: `user.can::<Update, _>(&post)`. Other users get
   403, not 404, on records they may not touch.
+- **Access values:** when a permission needs queries (memberships, teams, grants), resolve
+  an access value first (`RepoAccess::resolve(&ctx.db, Some(&user), repo).await?`, holding the
+  record and the viewer's role) and write the policy for it: `impl Allows<Admin, RepoAccess>
+  for User`. Then declare which records its proof covers, in the same file:
+  `impl kiln::policy::Covers<(Repository, RepositoryCollaborator)> for RepoAccess {}`. K0301
+  then accepts `Authorized<_, RepoAccess>` for writes to those records and requires a proof for
+  every write to them.
 - **Signed-in user, in Rust:** an action takes `user: Current<User>` (or
   `Option<Current<User>>` for pages that work signed out). Ops never look the user up; they
   get it, or an `Authorized<..>` proof, as an argument.

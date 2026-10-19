@@ -133,7 +133,21 @@ only by checking the policy, that the signed-in user may do this.
   pub async fn update_post(ctx: &Ctx, post: Authorized<Update, Post>, input: Valid<PostForm>) -> Result<Post>
 
 This makes \"forgot to check permissions\" a missing argument instead of a security bug.
-Code that runs without a viewer (jobs, seeds) uses `policy::as_system`.",
+Code that runs without a viewer (jobs, seeds) uses `policy::as_system`.
+
+Access values. When a permission needs database lookups (memberships, teams, grants), the
+app resolves an access value first and the policy checks that: `impl Allows<Admin,
+RepoAccess> for User`, with ops taking `Authorized<Admin, RepoAccess>`. Declare which records
+that proof covers, next to the policy in src/policies/:
+
+  impl kiln::policy::Covers<(Repository, RepositoryCollaborator, RepositoryInvitation)> for RepoAccess {}
+
+Each covered record is then guarded, and a function that writes it must take
+`Authorized<_, Repository>` or `Authorized<_, RepoAccess>`. Without the declaration, writes
+to `Repository` aren't checked at all, and a record with a policy of its own
+(`Allows<Update, RepositoryInvitation>` for the invitee) is flagged where an admin writes it
+under the `RepoAccess` proof. When the finding names a proof the function does take, declaring
+that it covers the record is usually the fix.",
     ),
     (
         "K0302",

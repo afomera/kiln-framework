@@ -366,25 +366,101 @@ fn lint_items(file: &str, items: &[Item], tests: &str, findings: &mut Findings) 
     }
 }
 
-/// Records that have a policy: every `X` and `NewX` named in `impl Allows<_, X>`.
-fn guarded_records(app: &App) -> BTreeSet<String> {
-    let mut guarded = BTreeSet::new();
+/// What src/policies/ guards: every record with a policy, and which access values' proofs
+/// cover writes to which records.
+#[derive(Default)]
+struct Guarded {
+    /// `X` for every `impl Allows<_, X>` or `impl Allows<_, NewX>`, and every covered record.
+    records: BTreeSet<String>,
+    /// Record → the access values whose proof covers it (`impl Covers<Repository> for RepoAccess`).
+    covered_by: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn guarded_records(app: &App) -> Guarded {
+    let mut guarded = Guarded::default();
     for path in rust_files(&app.path("src/policies")) {
         let Ok(text) = fs::read_to_string(path) else { continue };
-        for chunk in text.split("Allows<").skip(1) {
-            let Some(args) = chunk.split('>').next() else { continue };
-            let Some(record) = args.split(',').nth(1).map(str::trim) else { continue };
-            let record = record.strip_prefix("New").filter(|r| r.starts_with(char::is_uppercase)).unwrap_or(record);
-            guarded.insert(record.to_owned());
-        }
+        guarded.read_policies(&text);
     }
     guarded
 }
 
+impl Guarded {
+    fn read_policies(&mut self, text: &str) {
+        for chunk in text.split("Allows<").skip(1) {
+            let Some(args) = chunk.split('>').next() else { continue };
+            let Some(record) = args.split(',').nth(1).map(str::trim) else { continue };
+            let record = record.strip_prefix("New").filter(|r| r.starts_with(char::is_uppercase)).unwrap_or(record);
+            self.records.insert(record.to_owned());
+        }
+        let Ok(file) = syn::parse_file(text) else { return };
+        for item in &file.items {
+            let Item::Impl(i) = item else { continue };
+            let Some((_, path, _)) = &i.trait_ else { continue };
+            let Some(last) = path.segments.last().filter(|s| s.ident == "Covers") else { continue };
+            let syn::PathArguments::AngleBracketed(args) = &last.arguments else { continue };
+            let Some(syn::GenericArgument::Type(covered)) = args.args.first() else { continue };
+            let Some(access) = type_name(&i.self_ty) else { continue };
+            let covered = match covered {
+                syn::Type::Tuple(t) => t.elems.iter().filter_map(type_name).collect(),
+                other => type_name(other).into_iter().collect::<Vec<_>>(),
+            };
+            for record in covered {
+                self.records.insert(record.clone());
+                self.covered_by.entry(record).or_default().insert(access.clone());
+            }
+        }
+    }
+}
+
+/// `Repository` for `Repository`, `crate::records::Repository` or `Loaded<Repository, ..>`.
+fn type_name(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(p) => {
+            let last = p.path.segments.last()?;
+            if last.ident == "Loaded"
+                && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+                && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+            {
+                return type_name(inner);
+            }
+            Some(last.ident.to_string())
+        }
+        syn::Type::Reference(r) => type_name(&r.elem),
+        syn::Type::Paren(p) => type_name(&p.elem),
+        _ => None,
+    }
+}
+
+/// What each `Authorized<_, X>` in a signature proves: the `X`s.
+fn proofs(sig: &syn::Signature) -> BTreeSet<String> {
+    use syn::visit::Visit;
+
+    struct Proofs(BTreeSet<String>);
+    impl<'ast> Visit<'ast> for Proofs {
+        fn visit_path_segment(&mut self, segment: &'ast syn::PathSegment) {
+            if segment.ident == "Authorized"
+                && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(syn::GenericArgument::Type(proven)) = args.args.iter().nth(1)
+                && let Some(name) = type_name(proven)
+            {
+                self.0.insert(name);
+            }
+            syn::visit::visit_path_segment(self, segment);
+        }
+    }
+
+    let mut proofs = Proofs(BTreeSet::new());
+    for input in &sig.inputs {
+        proofs.visit_fn_arg(input);
+    }
+    proofs.0
+}
+
 /// K0301: writes to a policy-guarded record need the proof that the policy passed.
-fn lint_writes(file: &str, items: &[Item], guarded: &BTreeSet<String>, findings: &mut Findings) {
+fn lint_writes(file: &str, items: &[Item], guarded: &Guarded, findings: &mut Findings) {
     let exempt = file.starts_with("src/records/") || file == "src/seed.rs" || file == "src/factories.rs";
-    if exempt || guarded.is_empty() {
+    if exempt || guarded.records.is_empty() {
         return;
     }
     for item in items {
@@ -407,32 +483,48 @@ fn lint_writes(file: &str, items: &[Item], guarded: &BTreeSet<String>, findings:
     }
 }
 
-fn check_write(file: &str, sig: &syn::Signature, body: &str, guarded: &BTreeSet<String>, findings: &mut Findings) {
-    let params = sig.inputs.iter().map(|i| i.to_token_stream().to_string()).collect::<Vec<_>>().join(" ");
-    for record in guarded {
+fn check_write(file: &str, sig: &syn::Signature, body: &str, guarded: &Guarded, findings: &mut Findings) {
+    let proofs = proofs(sig);
+    let none = BTreeSet::new();
+    for record in &guarded.records {
         let direct = ["insert", "update", "delete"].into_iter().find(|w| body.contains(&format!("{record} :: {w} (")));
         // `Record::query().filter(..).delete_all(db)`, in one statement.
         let bulk = body.split(';').any(|statement| {
             statement.find(&format!("{record} :: query (")).is_some_and(|at| statement[at..].contains(". delete_all ("))
         });
         let Some(write) = direct.or(bulk.then_some("query().delete_all")) else { continue };
-        let proven = params.contains("Authorized")
+        let covered_by = guarded.covered_by.get(record).unwrap_or(&none);
+        let proven = !proofs.is_empty()
             && (direct.is_none()
                 // Deleting dependent rows (an event's RSVPs) under the parent's proof is fine.
-                || params.contains(&format!("{record} >"))
-                || params.contains(&format!("New{record} >")));
-        if !proven {
-            findings.error(
-                "K0301",
-                format!(
-                    "`{}` calls `{record}::{write}` without an `Authorized<_, {record}>` argument; authorize \
-                     first (`user.authorize::<Update, _>(record)?`) and pass the proof to an op that does the write",
-                    sig.ident
-                ),
-                Some(file),
-                Some(sig.ident.span().start().line),
-            );
+                || proofs.contains(record)
+                || proofs.contains(&format!("New{record}"))
+                || proofs.iter().any(|p| covered_by.contains(p)));
+        if proven {
+            continue;
         }
+        let wanted = std::iter::once(format!("`Authorized<_, {record}>`"))
+            .chain(covered_by.iter().map(|access| format!("`Authorized<_, {access}>`")))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        // A proof about something else is there: maybe it should cover this record.
+        let hint = match proofs.iter().next() {
+            Some(access) => format!(
+                "; if the `{access}` proof is what allows this write, declare that it covers the record in \
+                 src/policies/: `impl kiln::policy::Covers<{record}> for {access} {{}}`"
+            ),
+            None => String::new(),
+        };
+        findings.error(
+            "K0301",
+            format!(
+                "`{}` calls `{record}::{write}` without an {wanted} argument; authorize first \
+                 (`user.authorize::<Update, _>(record)?`) and pass the proof to an op that does the write{hint}",
+                sig.ident
+            ),
+            Some(file),
+            Some(sig.ident.span().start().line),
+        );
     }
 }
 
@@ -946,11 +1038,68 @@ pub async fn delete_event(ctx: &Ctx, event: Authorized<Delete, Event>) -> Result
     Event::delete(event.id).run(&ctx.db).await
 }
 "#;
-        let guarded: BTreeSet<String> = ["Rsvp".to_owned(), "Event".to_owned()].into();
+        let mut guarded = Guarded::default();
+        guarded.read_policies("impl Allows<Delete, Rsvp> for User {}\nimpl Allows<Delete, Event> for User {}");
         let mut findings = Findings::default();
         lint_writes("src/actions/rsvps/destroy.rs", &syn::parse_file(source).unwrap().items, &guarded, &mut findings);
         assert_eq!(codes(&findings), [("K0301".into(), Some(2))]);
         assert!(findings.0[0].message.contains("Rsvp::query().delete_all"), "{}", findings.0[0].message);
+    }
+
+    #[test]
+    fn access_values_cover_the_records_they_declare() {
+        let policies = r#"
+impl Allows<Admin, RepoAccess> for User { fn allows(&self, a: &RepoAccess) -> bool { true } }
+impl Allows<Write, PullAccess> for User { fn allows(&self, a: &PullAccess) -> bool { true } }
+// The invitee answers their own invitation.
+impl Allows<Update, RepositoryInvitation> for User { fn allows(&self, i: &RepositoryInvitation) -> bool { true } }
+impl kiln::policy::Covers<(Repository, RepositoryCollaborator, RepositoryInvitation)> for RepoAccess {}
+impl Covers<Repository> for crate::policies::OrgAccess {}
+"#;
+        let mut guarded = Guarded::default();
+        guarded.read_policies(policies);
+        assert_eq!(guarded.covered_by["Repository"], ["OrgAccess".to_owned(), "RepoAccess".to_owned()].into());
+        assert!(guarded.records.contains("RepositoryCollaborator"));
+        let source = r#"
+// Admins invite through the repository's access value: no `Authorized<_, RepositoryInvitation>` needed.
+pub async fn invite(ctx: &Ctx, repo: Authorized<Admin, RepoAccess>, invitee: &User) -> Result<RepositoryInvitation> {
+    RepositoryInvitation::insert(new).run(&ctx.db).await
+}
+pub async fn rename(ctx: &Ctx, repo: &Authorized<Admin, crate::policies::RepoAccess>, name: &str) -> Result {
+    Repository::update(repo.repository.id).set(repository::name, name).run(&ctx.db).await
+}
+pub async fn accept(ctx: &Ctx, invitation: Authorized<Update, RepositoryInvitation>) -> Result {
+    RepositoryInvitation::update(invitation.id).set(x, y).run(&ctx.db).await?;
+    RepositoryCollaborator::insert(new).run(&ctx.db).await
+}
+pub async fn merge(ctx: &Ctx, pull: Authorized<Write, PullAccess>) -> Result {
+    Repository::update(pull.repository.id).set(repository::pushed_at, now).run(&ctx.db).await
+}
+pub async fn star(ctx: &Ctx, user: &User, repo: &Repository) -> Result {
+    Repository::update(repo.id).set(repository::stars, 1).run(&ctx.db).await
+}
+"#;
+        let mut findings = Findings::default();
+        lint_writes("src/ops/repos.rs", &syn::parse_file(source).unwrap().items, &guarded, &mut findings);
+        assert_eq!(
+            codes(&findings),
+            [("K0301".into(), Some(9)), ("K0301".into(), Some(13)), ("K0301".into(), Some(16))]
+        );
+        let messages: Vec<&str> = findings.0.iter().map(|f| f.message.as_str()).collect();
+        assert!(messages[0].contains("`accept` calls `RepositoryCollaborator::insert` without an `Authorized<_, RepositoryCollaborator>` or `Authorized<_, RepoAccess>` argument"), "{}", messages[0]);
+        assert!(
+            messages[0].contains("`impl kiln::policy::Covers<RepositoryCollaborator> for RepositoryInvitation {}`"),
+            "{}",
+            messages[0]
+        );
+        assert!(
+            messages[1]
+                .contains("`Authorized<_, Repository>` or `Authorized<_, OrgAccess>` or `Authorized<_, RepoAccess>`"),
+            "{}",
+            messages[1]
+        );
+        assert!(messages[1].contains("Covers<Repository> for PullAccess"), "{}", messages[1]);
+        assert!(!messages[2].contains("Covers<"), "{}", messages[2]);
     }
 
     #[test]
