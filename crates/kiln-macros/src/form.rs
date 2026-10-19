@@ -153,7 +153,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         } else if password {
             quote!("password")
         } else if email {
-            quote!("email")
+            // A list of emails is still a list.
+            quote!(if <#ty as ::kiln::form::FormField>::MULTIPLE { <#ty as ::kiln::form::FormField>::INPUT } else { "email" })
         } else {
             quote!(<#ty as ::kiln::form::FormField>::INPUT)
         };
@@ -197,6 +198,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 name: #field_name,
                 label: #label,
                 input: #input,
+                multiple: <#ty as ::kiln::form::FormField>::MULTIPLE,
                 required: #required,
                 min_length: #min_length,
                 max_length: #max_length,
@@ -237,7 +239,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         });
         builds.push(quote! { #ident: #local.expect("parsed when there are no errors") });
-        to_fields.push(quote! { (#field_name, ::kiln::form::FormField::to_field(&self.#ident)) });
+        to_fields
+            .push(quote! { __kiln_fields.set_all(#field_name, ::kiln::form::FormField::to_values(&self.#ident)); });
         names.push(field_name);
     }
 
@@ -259,7 +262,10 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
 
             fn to_fields(&self) -> ::kiln::form::Fields {
-                [#( #to_fields ),*].into_iter().collect()
+                #[allow(unused_mut)]
+                let mut __kiln_fields = ::kiln::form::Fields::default();
+                #( #to_fields )*
+                __kiln_fields
             }
         }
     })

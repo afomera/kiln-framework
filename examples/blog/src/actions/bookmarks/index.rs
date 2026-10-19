@@ -6,5 +6,5 @@ use crate::{records::*, views::bookmarks::Index};
 #[action(GET "/bookmarks")]
 pub async fn index(ctx: Ctx, user: Current<User>) -> Result<Index> {
     let bookmarks = Bookmark::owned_by(&user).all(&ctx.db).await?;
-    Ok(Index { bookmarks })
+    Ok(Index::new(bookmarks))
 }

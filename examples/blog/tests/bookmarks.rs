@@ -146,3 +146,38 @@ async fn other_users_cannot_see_or_change_a_bookmark(app: TestApp) -> Result {
     assert_eq!(Bookmark::query().count(&app.db).await?, 1);
     Ok(())
 }
+
+#[kiln::test]
+async fn owner_pins_bookmarks_from_the_checkbox_group(app: TestApp) -> Result {
+    let owner = app.create::<User>().await?;
+    let a = app.create_with::<Bookmark>(|b| (b.owner_id, b.title) = (owner.id, "Alpha".into())).await?;
+    let b = app.create_with::<Bookmark>(|b| (b.owner_id, b.title, b.pinned) = (owner.id, "Beta".into(), true)).await?;
+    let c = app.create_with::<Bookmark>(|b| (b.owner_id, b.title) = (owner.id, "Gamma".into())).await?;
+    let client = app.sign_in_as(&owner);
+    client
+        .get_html(bookmarks::index::path())
+        .await
+        .assert_contains("<legend>Pinned</legend>")
+        .assert_contains(&format!(r#"name="pinned" value="{}" checked> Beta</label>"#, b.id))
+        .assert_contains(&format!(r#"name="pinned" value="{}"> Alpha</label>"#, a.id));
+
+    // Repeated keys (and the blank a browser sends from the hidden input) make the list.
+    let (a_id, c_id) = (a.id.to_string(), c.id.to_string());
+    client
+        .patch_form(bookmarks::pins::path(), &[("pinned", ""), ("pinned", &a_id), ("pinned[]", &c_id)])
+        .await
+        .assert_redirect(&bookmarks::index::path())
+        .assert_flash("Pins saved (3 changed).");
+    let pinned = Bookmark::query().filter(bookmark::pinned.eq(true)).order(bookmark::id.asc()).select(bookmark::id);
+    assert_eq!(pinned.all(&app.db).await?, [a.id, c.id]);
+
+    // Unchecking everything sends only the blank: nothing is pinned.
+    client.patch_form(bookmarks::pins::path(), &[("pinned", "")]).await.assert_redirect(&bookmarks::index::path());
+    assert!(!Bookmark::query().filter(bookmark::pinned.eq(true)).exists(&app.db).await?);
+
+    // Someone else's bookmark among the ids is refused; so is a value that isn't an id.
+    let theirs = app.create::<Bookmark>().await?;
+    client.patch_form(bookmarks::pins::path(), &[("pinned", &theirs.id.to_string())]).await.assert_status(403);
+    client.patch_form(bookmarks::pins::path(), &[("pinned", "x")]).await.assert_status(422);
+    Ok(())
+}

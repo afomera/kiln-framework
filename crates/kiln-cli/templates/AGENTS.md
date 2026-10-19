@@ -157,6 +157,12 @@ generated tests passing.
   Field attributes:
   - `#[validate(length(min = 1, max = 200))]`, `range(min = 1, max = 5)`, `email`, `required`
   - `#[form(textarea)]`, `#[form(label = "Starts at")]`, `#[form(hint = "..")]`, `#[form(placeholder = "..")]`
+  - Several values: `pub reviewers: Vec<Id<User>>` (or `Vec<String>`, `Vec<SomeEnum>`) reads repeated keys
+    (`reviewers=3&reviewers=7`, also `reviewers[]=..`, or a JSON array); nothing checked is an empty `Vec`, blanks
+    are skipped. `length(min = 1, max = 10)` counts the values (`required` = at least one); `range`/`email`
+    check each. `{{ field(form.reviewers, options=users, option_value="id", option_label="name") }}` renders
+    checkboxes (`as="select"` for `<select multiple>`); `options=` also takes `["a", "b"]` or `[[value, label], ..]`,
+    and works for a single `select` too. Enum lists get their variants without `options=`.
 
   In templates, never write raw `<form>` tags. Use `{{ form_start(path("posts::update", slug=post.slug), method="patch") }}`, then `{{ fields(form) }}` (or `{{ field(form.title, label="..") }}`), then `{{ form_end() }}`. These add the CSRF token, the method override, labels, errors and the `required`/`maxlength` attributes.
 - **Time:**
