@@ -879,29 +879,148 @@ fn quoted_columns<T: Record>() -> String {
     T::COLUMNS.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ")
 }
 
+#[must_use = "an insert does nothing until it's run with `.run(&db)`"]
 pub struct Insert<T> {
     values: Vec<(&'static str, Value)>,
+    /// `updated_at` was set explicitly, so a `created_at` override leaves it alone.
+    updated_at_set: bool,
+    /// A timestamp override for a column the record doesn't have.
+    missing: Option<&'static str>,
     _marker: PhantomData<fn() -> T>,
 }
 
 impl<T: Record> Insert<T> {
     pub(crate) fn new(values: Vec<(&'static str, Value)>) -> Self {
-        Self { values, _marker: PhantomData }
+        Self { values, updated_at_set: false, missing: None, _marker: PhantomData }
+    }
+
+    /// Stores `ts` as the row's `created_at` instead of now (back-dated seeds, imports).
+    /// `updated_at` follows it unless also set.
+    pub fn created_at(mut self, ts: Timestamp) -> Self {
+        self.set_timestamp("created_at", ts);
+        if !self.updated_at_set && self.values.iter().any(|(n, _)| *n == "updated_at") {
+            self.set_timestamp("updated_at", ts);
+        }
+        self
+    }
+
+    /// Stores `ts` as the row's `updated_at` instead of now (or the `created_at` override).
+    pub fn updated_at(mut self, ts: Timestamp) -> Self {
+        self.set_timestamp("updated_at", ts);
+        self.updated_at_set = true;
+        self
+    }
+
+    fn set_timestamp(&mut self, column: &'static str, ts: Timestamp) {
+        match self.values.iter_mut().find(|(n, _)| *n == column) {
+            Some((_, value)) => *value = ts.to_value(),
+            None => self.missing = Some(column),
+        }
+    }
+
+    fn check(&self) -> Result<()> {
+        match self.missing {
+            Some(column) => Err(Error::Config(format!(
+                "`{}` has no `{column}` column to set at insert; add `pub {column}: Timestamp` to the record",
+                T::TABLE
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Inserts the row and returns the stored record.
     pub async fn run(self, db: &Db) -> Result<T> {
+        self.check()?;
         let names: Vec<String> = self.values.iter().map(|(n, _)| format!("\"{n}\"")).collect();
-        let marks = vec!["?"; self.values.len()].join(", ");
         let sql = format!(
-            "INSERT INTO \"{}\" ({}) VALUES ({marks}) RETURNING {}",
+            "INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING {}",
             T::TABLE,
             names.join(", "),
+            marks(self.values.len()),
             quoted_columns::<T>()
         );
         let binds = self.values.into_iter().map(|(_, v)| v).collect();
         let rows = db.fetch_all(&sql, binds).await?;
         Ok(T::from_row(rows.first().ok_or(Error::NotFound)?)?)
+    }
+}
+
+/// A row [`Record::insert_all`] takes: a `New{Record}`, or an [`Insert`] for one with
+/// its own timestamps (`Post::insert(new).created_at(ts)`).
+pub trait IntoInsert<T> {
+    fn into_insert(self) -> Insert<T>;
+}
+
+impl<T> IntoInsert<T> for Insert<T> {
+    fn into_insert(self) -> Insert<T> {
+        self
+    }
+}
+
+/// Many rows in one statement per chunk, from [`Record::insert_all`].
+#[must_use = "an insert does nothing until it's run with `.run(&db)`"]
+pub struct InsertAll<T> {
+    rows: Vec<Insert<T>>,
+}
+
+impl<T: Record> InsertAll<T> {
+    pub(crate) fn new(rows: Vec<Insert<T>>) -> Self {
+        Self { rows }
+    }
+
+    /// Stores `ts` as every row's `created_at` (and `updated_at`, unless a row sets its own).
+    pub fn created_at(mut self, ts: Timestamp) -> Self {
+        self.rows = self.rows.into_iter().map(|row| row.created_at(ts)).collect();
+        self
+    }
+
+    /// Inserts the rows and returns them as stored, in the order given. Each chunk is one
+    /// multi-row `INSERT .. RETURNING` (sized to the backend's limit on binds); several
+    /// chunks run in a transaction, so either every row goes in or none does. On a
+    /// transaction handle they're part of it.
+    pub async fn run(self, db: &Db) -> Result<Vec<T>> {
+        for row in &self.rows {
+            row.check()?;
+        }
+        let Some(first) = self.rows.first() else { return Ok(vec![]) };
+        let columns: Vec<&'static str> = first.values.iter().map(|(n, _)| *n).collect();
+        if self.rows.iter().any(|row| row.values.iter().map(|(n, _)| *n).ne(columns.iter().copied())) {
+            return Err(Error::Integrity(format!("rows for `{}` don't all set the same columns", T::TABLE)));
+        }
+        let per_chunk = (db.dialect().max_binds() / columns.len().max(1)).clamp(1, 1000);
+        let chunks: Vec<Vec<Value>> = self
+            .rows
+            .chunks(per_chunk)
+            .map(|chunk| chunk.iter().flat_map(|row| row.values.iter().map(|(_, v)| v.clone())).collect())
+            .collect();
+        let row_marks = format!("({})", marks(columns.len()));
+        let names = columns.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
+        let statements: Vec<(String, Vec<Value>)> = chunks
+            .into_iter()
+            .map(|binds| {
+                let rows = binds.len() / columns.len().max(1);
+                let values = vec![row_marks.as_str(); rows].join(", ");
+                let sql = format!(
+                    "INSERT INTO \"{}\" ({names}) VALUES {values} RETURNING {}",
+                    T::TABLE,
+                    quoted_columns::<T>()
+                );
+                (sql, binds)
+            })
+            .collect();
+        let single = statements.len() == 1;
+        let run = |db: Db| async move {
+            let mut records = Vec::new();
+            for (sql, binds) in statements {
+                let rows = db.fetch_all(&sql, binds).await?;
+                let mut chunk = rows.iter().map(T::from_row).collect::<std::result::Result<Vec<T>, _>>()?;
+                // RETURNING's row order isn't promised; ids are handed out in VALUES order.
+                chunk.sort_by_key(|record| record.id().get());
+                records.extend(chunk);
+            }
+            Ok(records)
+        };
+        if single || db.in_transaction() { run(db.clone()).await } else { db.transaction(run).await }
     }
 }
 

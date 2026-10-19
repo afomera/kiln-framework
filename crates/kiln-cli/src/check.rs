@@ -410,7 +410,9 @@ fn lint_writes(file: &str, items: &[Item], guarded: &BTreeSet<String>, findings:
 fn check_write(file: &str, sig: &syn::Signature, body: &str, guarded: &BTreeSet<String>, findings: &mut Findings) {
     let params = sig.inputs.iter().map(|i| i.to_token_stream().to_string()).collect::<Vec<_>>().join(" ");
     for record in guarded {
-        let direct = ["insert", "update", "delete"].into_iter().find(|w| body.contains(&format!("{record} :: {w} (")));
+        let direct = ["insert", "insert_all", "update", "delete"]
+            .into_iter()
+            .find(|w| body.contains(&format!("{record} :: {w} (")));
         // `Record::query().filter(..).delete_all(db)`, in one statement.
         let bulk = body.split(';').any(|statement| {
             statement.find(&format!("{record} :: query (")).is_some_and(|at| statement[at..].contains(". delete_all ("))

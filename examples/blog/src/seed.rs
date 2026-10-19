@@ -52,25 +52,28 @@ pub async fn seed(db: Db) -> Result {
         ),
         ("draft-post", "Draft post", "Not ready yet.", PostStatus::Draft, &grace, None),
     ];
-    for (slug, title, body, status, author, editor_id) in posts {
+    // Back-dated a day apart, oldest first.
+    let days = (1..=posts.len() as i64).rev();
+    for (days_ago, (slug, title, body, status, author, editor_id)) in days.zip(posts) {
+        // Optional fields (`cover`, `editor_id`, ..) default to `None`; only these are required.
+        let required =
+            PostRequired { slug: slug.into(), title: title.into(), body: body.into(), status, author_id: author.id };
+        let written = Timestamp::days_ago(days_ago);
         let post = Post::insert(NewPost {
-            slug: slug.into(),
-            title: title.into(),
-            body: body.into(),
-            cover: None,
-            status,
-            author_id: author.id,
             editor_id,
-            published_at: (status == PostStatus::Published).then(Timestamp::now),
+            published_at: (status == PostStatus::Published).then_some(written),
+            ..NewPost::new(required)
         })
+        .created_at(written)
         .run(db)
         .await?;
 
-        for (commenter, text) in [(&grace, "Nice."), (&ada, "Thanks!")] {
-            Comment::insert(NewComment { post_id: post.id, author_id: commenter.id, body: text.into() })
-                .run(db)
-                .await?;
-        }
+        // Every comment in one statement, each with its own time.
+        let comments = [(&grace, "Nice.", 2), (&ada, "Thanks!", 1)].map(|(commenter, text, hours)| {
+            let new = NewComment { post_id: post.id, author_id: commenter.id, body: text.into() };
+            Comment::insert(new).created_at(written + kiln::time::SignedDuration::from_hours(hours))
+        });
+        Comment::insert_all(comments).run(db).await?;
     }
     Ok(())
 }

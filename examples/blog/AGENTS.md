@@ -408,6 +408,14 @@ generated tests passing.
     `.filter`, `.order`, `.limit` work before or after `.select`.
   - Aggregates: `.count_by(reaction::emoji, &db)` → `Vec<(String, i64)>`; `.sum(col, &db)` (0 when empty),
     `.max(col, &db)` / `.min(..)` → `Option`. Queries are `Clone` to reuse a base scope.
+  - Inserts: build `NewPost` as `NewPost { editor_id: Some(id), ..NewPost::new(PostRequired { slug, title, .. }) }` so
+    adding an optional field later doesn't touch every insert. `PostRequired` (from `#[derive(Record)]`, next to
+    `NewPost`) has the fields with no default and must list them all; `Option` fields default to `None`, and
+    `#[default]` / `#[default(PostStatus::Draft)]` on a record field gives others one. A record whose fields all have
+    defaults gets `NewTag::default()` instead. `Post::insert(new).created_at(ts)` back-dates a row (`updated_at`
+    follows unless `.updated_at(ts)`). Many rows: `Post::insert_all(news).run(&db).await?` returns them in order, one
+    multi-row `INSERT` per chunk, all-or-nothing; rows may be `Post::insert(new).created_at(ts)` each. Seeds
+    don't need raw multi-row SQL.
   - Counters: `Repository::update(id).increment(repository::issue_count, 1).run(&tx).await?.issue_count` is
     atomic and returns the new value. To read then write: `Repository::find(id).for_update().one_or_404(&tx)`
     inside `db.transaction`, as its first query (Postgres `FOR UPDATE`; SQLite takes its write lock).

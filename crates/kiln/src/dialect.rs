@@ -26,6 +26,11 @@ pub trait Dialect: Send + Sync + 'static {
         logical.to_owned()
     }
 
+    /// The most `?` binds one statement may carry; multi-row inserts are chunked to fit.
+    fn max_binds(&self) -> usize {
+        999
+    }
+
     /// The definition of an auto-numbered `id` primary key.
     fn primary_key(&self, column: &str) -> String;
 
@@ -88,6 +93,11 @@ impl Dialect for Sqlite {
         format!("\"{column}\" INTEGER PRIMARY KEY AUTOINCREMENT")
     }
 
+    /// `SQLITE_MAX_VARIABLE_NUMBER` is 32766 in SQLite 3.32+, 999 before.
+    fn max_binds(&self) -> usize {
+        32_766
+    }
+
     fn columns_query(&self, table: &str) -> String {
         format!("SELECT \"name\" FROM pragma_table_info('{}')", table.replace('\'', "''"))
     }
@@ -145,6 +155,11 @@ impl Dialect for Postgres {
             }
         }
         (Cow::Owned(out), kept)
+    }
+
+    /// The wire protocol counts parameters in 16 bits.
+    fn max_binds(&self) -> usize {
+        65_535
     }
 
     fn column_type(&self, logical: &str) -> String {
