@@ -3,12 +3,28 @@
 {% if current_user %}
 <p><a href="{{ path("bookmarks::new") }}">New bookmark</a></p>
 {% endif %}
+<nav class="filters">
+  Sort:
+  {% for sort in ["newest", "title", "rating"] %}
+  {% if filters.sort == sort %}<strong>{{ sort }}</strong>{% else %}<a href="{{ filters.with("sort", sort) }}">{{ sort }}</a>{% endif %}
+  {% endfor %}
+  ·
+  {% if filters.pinned %}<a href="{{ filters.without("pinned") }}">All</a>{% else %}<a href="{{ filters.with("pinned", true) }}">Pinned only</a>{% endif %}
+  ·
+  Rating:
+  {% for stars in [5, 4, 3, 2, 1] %}
+  <a href="{{ filters.toggle("rating", stars) }}"{% if filters.has("rating", stars) %} aria-current="true"{% endif %}>{{ stars }}★</a>
+  {% endfor %}
+  {% if filters.query_string() %}· <a href="{{ path("bookmarks::index") }}">Clear</a>{% endif %}
+</nav>
 {% if bookmarks %}
 <ul>
   {% for bookmark in bookmarks %}
   <li><a href="{{ path("bookmarks::show", id=bookmark.id) }}">{{ bookmark.title }}</a></li>
   {% endfor %}
 </ul>
+{% elif filters.query_string() %}
+<p>No bookmarks match. <a href="{{ path("bookmarks::index") }}">Show all</a></p>
 {% else %}
 <p>No bookmarks yet.</p>
 {% endif %}

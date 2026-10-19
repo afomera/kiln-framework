@@ -126,8 +126,8 @@ generated tests passing.
 - **Slashes in a param:** end the route with a catch-all, `/{owner}/{repo}/tree/{*path}`
   with `path: Param<String>` (`"src/lib.rs"`); `tree::path(o, r, "src/lib.rs")` keeps the slashes.
 - **Action arguments** are extractors: `Ctx`, `Current<User>`, `Param<T>` (one per route
-  capture, named like it: `{slug}` is `slug: Param<String>`), `HeaderMap`, `Session`,
-  `Turbo`, `RateLimit`. A body extractor (`Form<T>`, `Json<T>`) must be the last argument.
+  capture, named like it: `{slug}` is `slug: Param<String>`), `QueryParams<T>`, `HeaderMap`,
+  `Session`, `Turbo`, `RateLimit`. A body extractor (`Form<T>`, `Json<T>`) must be the last argument.
   Records aren't arguments: take `id: Param<Id<Post>>` and load it in the action. The
   action can share a capture's name (`fn tab(.., tab: Param<String>)`), but not be named `path`.
 - **Redirects:** `Redirect::to(path)` is a 303, right after any form submission.
@@ -169,6 +169,22 @@ generated tests passing.
   - `#[form(textarea)]`, `#[form(label = "Starts at")]`, `#[form(hint = "..")]`, `#[form(placeholder = "..")]`
 
   In templates, never write raw `<form>` tags. Use `{{ form_start(path("posts::update", slug=post.slug), method="patch") }}`, then `{{ fields(form) }}` (or `{{ field(form.title, label="..") }}`), then `{{ form_end() }}`. These add the CSRF token, the method override, labels, errors and the `required`/`maxlength` attributes.
+- **Query strings** (filters, sorting, tabs, search) are typed: a `#[derive(Form, Default)]`
+  struct in `src/forms/{name}_filters.rs`, taken as `filters: QueryParams<RepoFilters>` (any
+  argument position; it derefs to the struct). Never parse `RawQuery` by hand. Field types,
+  `#[validate]` rules and `DbEnum` enums (`#[default]` on a variant) work as in forms; a key
+  given twice fills a `Vec<T>` field (`?tag=a&tag=b`). Unlike forms, unknown keys are ignored,
+  missing keys take the `Default`, and **a bad value (`?sort=oldest`, `?page=0` against
+  `range(min = 1)`) falls back to its default** instead of failing the page;
+  `filters.errors()` has the messages if an action would rather refuse
+  (`return Err(Error::Invalid(filters.errors().clone()))`). Put it in the view
+  (`pub filters: QueryParams<RepoFilters>`) to build links that change one parameter and
+  keep the rest, leaving defaults out: `{{ filters.with("sort", "stars") }}`,
+  `filters.without("q")`, `filters.toggle("tag", "rust")` (for `Vec` fields),
+  `filters.has("tag", "rust")`, `filters.values("tag")`, `{{ filters.sort }}` (the value as
+  text), `filters.href()`, `filters.query_string()` (no `?`; empty at the defaults). The same
+  methods exist in Rust; `QueryParams::of(path, value).href()` links to another page with
+  given filters.
 - **Time:**
   - `Timestamp` values are UTC.
   - Build them with `Timestamp::now()`, `Timestamp::days_from_now(7)`, `hours_ago(2)`, or `ts + kiln::time::SignedDuration::from_mins(30)`.

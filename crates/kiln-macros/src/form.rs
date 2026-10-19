@@ -237,7 +237,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         });
         builds.push(quote! { #ident: #local.expect("parsed when there are no errors") });
-        to_fields.push(quote! { (#field_name, ::kiln::form::FormField::to_field(&self.#ident)) });
+        to_fields.push(quote! {
+            __kiln_fields.set_all(#field_name, ::kiln::form::FormField::to_values(&self.#ident));
+        });
         names.push(field_name);
     }
 
@@ -259,7 +261,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
 
             fn to_fields(&self) -> ::kiln::form::Fields {
-                [#( #to_fields ),*].into_iter().collect()
+                let mut __kiln_fields = ::kiln::form::Fields::default();
+                #( #to_fields )*
+                __kiln_fields
             }
         }
     })

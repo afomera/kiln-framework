@@ -37,22 +37,45 @@ pub trait CheckWith: FormInput + Sync {
     fn check(&self, ctx: &Ctx, errors: &mut Errors) -> impl Future<Output = Result<()>> + Send;
 }
 
-/// Raw submitted values by field name.
+/// Raw submitted values by field name. A name can have several values (`?tag=a&tag=b`),
+/// which a `Vec<T>` field reads; other fields read the last one.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Fields(BTreeMap<String, String>);
+pub struct Fields(BTreeMap<String, Vec<String>>);
 
 impl Fields {
+    /// The field's last value.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.0.get(name).map(String::as_str)
+        self.0.get(name).and_then(|values| values.last()).map(String::as_str)
     }
 
+    /// Every value the field has, in the order given.
+    pub fn get_all(&self, name: &str) -> &[String] {
+        self.0.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// Replaces the field's values with `value`.
     pub fn set(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        self.0.insert(name.into(), value.into());
+        self.0.insert(name.into(), vec![value.into()]);
+    }
+
+    /// Adds a value after the field's others.
+    pub fn add(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.0.entry(name.into()).or_default().push(value.into());
+    }
+
+    /// Replaces the field's values; none removes it.
+    pub fn set_all(&mut self, name: impl Into<String>, values: Vec<String>) {
+        let name = name.into();
+        if values.is_empty() {
+            self.0.remove(&name);
+        } else {
+            self.0.insert(name, values);
+        }
     }
 
     /// Parses one field, recording a message in `errors` when it doesn't parse.
     pub fn parse<T: FormField>(&self, name: &str, errors: &mut Errors) -> Option<T> {
-        match T::from_field(self.get(name)) {
+        match T::from_values(self.get_all(name)) {
             Ok(value) => Some(value),
             Err(message) => {
                 errors.add(name, message);
@@ -64,7 +87,11 @@ impl Fields {
 
 impl<K: Into<String>, V: Into<String>> FromIterator<(K, V)> for Fields {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        Self(iter.into_iter().map(|(k, v)| (k.into(), v.into())).collect())
+        let mut fields = Self::default();
+        for (name, value) in iter {
+            fields.add(name, value);
+        }
+        fields
     }
 }
 
@@ -140,6 +167,41 @@ pub trait FormField: Sized {
     /// `raw` is `None` when the field wasn't submitted at all.
     fn from_field(raw: Option<&str>) -> std::result::Result<Self, String>;
     fn to_field(&self) -> String;
+
+    /// Every value submitted under the field's name (none when it wasn't). Fields that
+    /// take one value read the last; `Vec<T>` reads them all.
+    fn from_values(values: &[String]) -> std::result::Result<Self, String> {
+        Self::from_field(values.last().map(String::as_str))
+    }
+
+    /// The values to submit for it: one, except for `Vec<T>`.
+    fn to_values(&self) -> Vec<String> {
+        vec![self.to_field()]
+    }
+}
+
+/// Repeated fields (`?tag=rust&tag=web`, a group of checkboxes, `<select multiple>`): each
+/// value parses as `T`; blank ones are skipped, and none is an empty list.
+impl<T: FormField> FormField for Vec<T> {
+    const INPUT: &'static str = T::INPUT;
+    const REQUIRED: bool = false;
+    const OPTIONS: &'static [&'static str] = T::OPTIONS;
+
+    fn from_field(raw: Option<&str>) -> std::result::Result<Self, String> {
+        Self::from_values(&raw.map(str::to_owned).into_iter().collect::<Vec<_>>())
+    }
+
+    fn to_field(&self) -> String {
+        self.to_values().join(",")
+    }
+
+    fn from_values(values: &[String]) -> std::result::Result<Self, String> {
+        values.iter().filter(|v| !v.trim().is_empty()).map(|v| T::from_field(Some(v))).collect()
+    }
+
+    fn to_values(&self) -> Vec<String> {
+        self.iter().map(T::to_field).collect()
+    }
 }
 
 impl FormField for String {

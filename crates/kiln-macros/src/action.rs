@@ -237,7 +237,10 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             if !captures.contains(&name.as_str()) {
                 return Err(Error::new_spanned(
                     ident,
-                    format!("`{name}` is a `Param`, but the route `{}` has no `{{{name}}}` segment", path.value()),
+                    format!(
+                        "`{name}` is a `Param`, but the route `{}` has no `{{{name}}}` segment; add one, or read `?{name}=` from the query string with `QueryParams<T>`",
+                        path.value()
+                    ),
                 ));
             }
             // Bound under its own name, so a capture named like the action (`tab` in

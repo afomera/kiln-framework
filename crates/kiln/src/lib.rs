@@ -32,6 +32,7 @@ mod migrate;
 pub mod notify;
 pub mod policy;
 mod query;
+mod query_params;
 pub mod rate_limit;
 mod realtime;
 mod redirect;
@@ -63,6 +64,7 @@ pub use migrate::{
     write_migration,
 };
 pub use query::{Column, Delete, Expr, Insert, MinMax, Order, Query, Select, Subquery, Summable, Update};
+pub use query_params::QueryParams;
 pub use rate_limit::RateLimit;
 pub use redirect::{Redirect, RequestHeaders, ViewOrRedirect};
 pub use rel::{Append, BoxFuture, HasRel, HasRelation, Loaded, RelSet, Relation};
@@ -135,8 +137,8 @@ pub mod prelude {
 
     pub use crate::{
         App, Attachment, Batch, BatchId, Ctx, Current, Db, DbEnum, Enqueue, Error, Id, Json, Loaded, Mail, Markdown,
-        Notify, Param, Perform, Preview, Query, Record, Redirect, Result, RichText, Schedule, Secret, Session,
-        Timestamp, Turbo, TurboStream, Via, View, ViewOrRedirect, action,
+        Notify, Param, Perform, Preview, Query, QueryParams, Record, Redirect, Result, RichText, Schedule, Secret,
+        Session, Timestamp, Turbo, TurboStream, Via, View, ViewOrRedirect, action,
         form::{Form, FormState, OrRender, Valid},
         part,
         policy::{Allows, Authorize, Authorized},

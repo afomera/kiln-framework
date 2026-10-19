@@ -18,6 +18,57 @@ async fn index_lists_only_your_bookmarks(app: TestApp) -> Result {
 }
 
 #[kiln::test]
+async fn the_query_string_filters_and_sorts_the_list(app: TestApp) -> Result {
+    let owner = app.create::<User>().await?;
+    let mut ids = vec![];
+    for (title, rating, pinned) in
+        [("Zig notes", Some(5), true), ("Axum guide", Some(4), false), ("Rust book", None, true)]
+    {
+        let made = app
+            .create_with::<Bookmark>(|n| {
+                n.title = title.into();
+                n.rating = rating;
+                n.pinned = pinned;
+                n.owner_id = owner.id;
+            })
+            .await?;
+        ids.push(made.id);
+    }
+    let client = app.sign_in_as(&owner);
+    let shown = |text: &str| -> Vec<usize> {
+        let mut found: Vec<(usize, usize)> = ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, id)| text.find(&format!("\"{}\"", bookmarks::show::path(*id))).map(|at| (at, i)))
+            .collect();
+        found.sort();
+        found.into_iter().map(|(_, i)| i).collect()
+    };
+
+    let page = client.get("/bookmarks?sort=title&utm_source=newsletter").await;
+    page.assert_status(200);
+    assert_eq!(shown(&page.text), [1, 2, 0], "by title; unknown keys are ignored");
+    // Links change one parameter and keep the others.
+    page.assert_contains(r#"href="/bookmarks?sort=title&amp;pinned=true""#)
+        .assert_contains(r#"href="/bookmarks?sort=title&amp;rating=5""#)
+        .assert_contains(r#"href="/bookmarks?sort=rating""#)
+        .assert_contains(r#"<a href="/bookmarks">newest</a>"#);
+
+    let page = client.get("/bookmarks?pinned=true&q=o").await;
+    assert_eq!(shown(&page.text), [2, 0], "pinned, matching `o`, newest first");
+    // Repeated keys fill a `Vec`, and toggling one off keeps the rest.
+    let page = client.get("/bookmarks?rating=5&rating=4&sort=rating").await;
+    assert_eq!(shown(&page.text), [0, 1]);
+    page.assert_contains(r#"href="/bookmarks?sort=rating&amp;rating=4""#);
+    // A value that doesn't parse falls back to its default instead of failing the page.
+    let page = client.get("/bookmarks?sort=oldest&rating=lots").await;
+    page.assert_status(200);
+    assert_eq!(shown(&page.text), [2, 1, 0]);
+    client.get("/bookmarks?pinned=true&q=nothing-like-this").await.assert_contains("No bookmarks match.");
+    Ok(())
+}
+
+#[kiln::test]
 async fn signed_out_users_cannot_list_bookmarks(app: TestApp) -> Result {
     app.get(bookmarks::index::path()).await.assert_status(401);
     Ok(())
