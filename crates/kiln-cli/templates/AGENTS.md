@@ -130,6 +130,11 @@ generated tests passing.
   `Turbo`, `RateLimit`. A body extractor (`Form<T>`, `Json<T>`) must be the last argument.
   Records aren't arguments: take `id: Param<Id<Post>>` and load it in the action. The
   action can share a capture's name (`fn tab(.., tab: Param<String>)`), but not be named `path`.
+- **Redirects:** `Redirect::to(path)` is a 303, right after any form submission.
+  `Redirect::back(&headers, fallback)` (with a `headers: HeaderMap` argument) returns to the
+  page a small POST came from (follow, star, mark read): the `Referer`'s path when it's this
+  site, else `fallback`, so it's never an open redirect. For moved URLs, `Redirect::permanent(path)`
+  (308) and `Redirect::temporary(path)` (307). `.notice(..)` / `.alert(..)` work on all of them.
 - **Permissions are policies:** `impl Allows<A, Post> for User` in `src/policies/post.rs`,
   where `A` is `Read`, `Create` (checked against `NewPost`), `Update` or `Delete` from
   `kiln::policy` (or your own unit struct, e.g. `Publish`). `user.authorize::<Update, _>(post)?`

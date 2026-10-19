@@ -48,7 +48,23 @@ async fn the_inbox_page_marks_notifications_read(app: TestApp) -> Result {
         .await
         .assert_redirect(&blog::actions::posts::show::path(&post.slug));
     assert_eq!(app.db.unread_notifications(&ada).await?, 0);
-    client.patch_form(notifications::read_all::path(), &[]).await.assert_flash("Marked 0 read.");
+    client
+        .patch_form(notifications::read_all::path(), &[])
+        .await
+        .assert_flash("Marked 0 read.")
+        .assert_redirect(&notifications::index::path());
+    Ok(())
+}
+
+#[kiln::test]
+async fn mark_all_read_goes_back_to_the_page_it_was_on(app: TestApp) -> Result {
+    let ada = app.create::<User>().await?;
+    let client = || app.sign_in_as(&ada).header("host", "blog.test");
+    let from_post = client().header("referer", "https://blog.test/posts/engines?page=2#comments");
+    from_post.patch_form(notifications::read_all::path(), &[]).await.assert_redirect("/posts/engines?page=2");
+    // Another site's page is never a destination.
+    let elsewhere = client().header("referer", "https://evil.example/posts/engines");
+    elsewhere.patch_form(notifications::read_all::path(), &[]).await.assert_redirect(&notifications::index::path());
     Ok(())
 }
 

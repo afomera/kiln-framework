@@ -64,7 +64,7 @@ pub use migrate::{
 };
 pub use query::{Column, Delete, Expr, Insert, MinMax, Order, Query, Select, Subquery, Summable, Update};
 pub use rate_limit::RateLimit;
-pub use redirect::{Redirect, ViewOrRedirect};
+pub use redirect::{Redirect, RequestHeaders, ViewOrRedirect};
 pub use rel::{Append, BoxFuture, HasRel, HasRelation, Loaded, RelSet, Relation};
 pub use rich_text::RichText;
 pub use routing::{Param, PathArg, RouteDef, routes, routes_table};
