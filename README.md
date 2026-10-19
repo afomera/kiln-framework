@@ -40,7 +40,7 @@ M0–M1 built the core, M2 the full stack, M3 the tools agents use; work since M
 | Transactions: `ctx.db.transaction(\|tx\| async move { .. })` | `crates/kiln/src/db.rs` |
 | `#[action(PATCH "/posts/{slug}")]`, typed `path(..)` helpers, link-time route registry | `crates/kiln-macros/src/action.rs` |
 | API pipeline: `#[action(GET "/api/posts", pipeline = Api)]`, `Json<T>`, JSON/form bodies through `Form<T>`, problem+json errors, no session cookie | `crates/kiln/src/app.rs`, `error_page.rs` |
-| Sessions (signed cookies), flash, CSRF, `_method` override, `Current<User>` | `crates/kiln/src/session.rs`, `app.rs` |
+| Sessions (signed cookies), flash, CSRF, `_method` override, `Current<User>`; `app.layout_data(..)` for per-request layout values (`{{ layout_data.unread }}`) | `crates/kiln/src/session.rs`, `app.rs` |
 | Forms: `#[derive(Form)]` + `#[validate]` + `#[form(textarea, label, hint, placeholder)]`, `Form<T>` rejects unknown fields, `or_render` (422), async `CheckWith`; template helpers `form_start`/`fields`/`field`/`form_end` render inputs with `required`/`maxlength` from the rules; `form_start`/`button_to` take `id`, `data={..}`, `attrs={..}`, and `button_to` a `{% call %}` block for icon buttons | `crates/kiln/src/form.rs`, `view.rs` |
 | Time: `Timestamp::days_from_now(7)`, `hours_ago(2)`, `+ kiln::time::SignedDuration`; `{{ ts \| datetime }}`, `\| time_ago`, `\| time_ago_tag`; numbers: `\| number`, `\| compact_number`, `\| filesize`, `\| duration` (also `kiln::format::*`) | `crates/kiln/src/types.rs`, `format.rs` |
 | Policies with proof types: `Allows<Update, Post>`, `authorize` → `Authorized<Update, Post>` | `crates/kiln/src/policy.rs` |

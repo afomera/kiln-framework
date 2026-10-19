@@ -17,6 +17,7 @@
     <nav>
       {% if current_user %}
       <a href="{{ path("sign_ins::index") }}">{{ current_user.name }}</a>
+      <a href="{{ path("notifications::index") }}" id="nav-notifications">Notifications{% if layout_data.unread %} ({{ layout_data.unread | number }}){% endif %}</a>
       <a href="{{ path("posts::new") }}">New post</a>
       {{ form_start(path("sessions::destroy"), method="delete", class="inline") }}<button>Sign out</button>{{ form_end() }}
       {% else %}

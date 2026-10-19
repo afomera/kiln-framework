@@ -145,6 +145,14 @@ generated tests passing.
   (a marketplace's `Merchant`) get their own registration, sign-in page, `current_merchant`
   value and session; one person in several roles (a course's student and instructor) is one
   `User` plus records such as `Enrollment`, checked in policies.
+- **Layout data** (an unread count in the nav, the viewer's teams in a menu) comes from one async
+  fn, not a lazy turbo-frame or a field on every view: `app.layout_data(views::layout::data)` in
+  `src/app.rs`, with `pub async fn data(ctx: Ctx, user: Option<User>) -> Result<LayoutData>` in
+  `src/views/layout.rs` (`LayoutData` is `#[derive(Serialize)]`). Every template reads it as
+  `layout_data` (`{{ layout_data.unread }}`). It runs once per request, after the action, and only
+  when a template that renders reads `layout_data`: full HTML pages, not JSON, redirects, Turbo Frame
+  requests or Turbo Streams. An error fails the page with its report; a view field named
+  `layout_data` wins over it. `kiln check` knows the name.
 - **Sign-in redirects:** a signed-out browser asking for a page (GET with
   `Accept: text/html`) whose action takes `Current<T>` is sent to `T`'s sign-in page; every
   other request gets 401. `#[kiln::test]` applies `src/app.rs`, so tests see the same

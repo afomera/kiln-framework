@@ -58,16 +58,22 @@ impl PendingRender {
         render_value(self.root, self.template, None, self.context.clone())
     }
 
-    /// Variables read by the page, its layout, and everything they include or extend.
-    pub(crate) fn variables(&self) -> Result<HashSet<String>> {
+    /// Variables read by the page, its layout when `with_layout` (it renders with one), and
+    /// everything they include or extend.
+    pub(crate) fn variables(&self, with_layout: bool) -> Result<HashSet<String>> {
         let env = environment(self.root)?;
         let mut seen = HashSet::new();
         let mut variables = HashSet::new();
         collect_variables(&env, self.template, &mut seen, &mut variables)?;
-        if let Some(layout) = self.layout {
+        if let Some(layout) = self.layout.filter(|_| with_layout) {
             collect_variables(&env, layout, &mut seen, &mut variables)?;
         }
         Ok(variables)
+    }
+
+    /// Whether the view itself has a field `name` (which wins over request-wide values).
+    pub(crate) fn defines(&self, name: &str) -> bool {
+        self.context.get_attr(name).is_ok_and(|v| !v.is_undefined())
     }
 }
 
@@ -192,6 +198,9 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
+/// What templates call the value `App::layout_data` computes.
+pub(crate) const LAYOUT_DATA: &str = "layout_data";
+
 /// The response for a view: rendered by kiln after the action (see [`PendingRender`]).
 #[doc(hidden)]
 pub fn respond<V: View>(view: &V) -> Response {
@@ -237,7 +246,7 @@ pub(crate) fn template_variables(root: &'static str) -> serde_json::Value {
     let (env, problems) = build_environment(root);
     let mut globals: Vec<String> = env.globals().map(|(name, _)| name.to_owned()).collect();
     // Set per render or by the template engine itself.
-    globals.extend(["flash", "loop", "self", "super", "caller", "varargs", "kwargs"].map(str::to_owned));
+    globals.extend(["flash", LAYOUT_DATA, "loop", "self", "super", "caller", "varargs", "kwargs"].map(str::to_owned));
     let mut templates = serde_json::Map::new();
     for path in crate::files::walk(std::path::Path::new(root)) {
         let Some(name) =
@@ -1463,6 +1472,8 @@ mod tests {
             assert!(globals.contains(&name), "{name} is a global for kiln check: {globals:?}");
         }
         assert_eq!(analysis["helper_errors"], serde_json::json!([]));
+        // `kiln check` treats `layout_data` (from `app.layout_data(..)`) like `flash`.
+        assert!(analysis["globals"].as_array().unwrap().iter().any(|g| g == "layout_data"), "{analysis}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
