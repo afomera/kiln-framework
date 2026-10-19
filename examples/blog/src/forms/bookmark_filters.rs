@@ -28,13 +28,14 @@ impl BookmarkFilters {
     pub fn apply(&self, who: &User) -> Query<Bookmark> {
         let mut query = Bookmark::query().filter(bookmark::owner_id.eq(who.id));
         if let Some(q) = &self.q {
-            query = query.filter(bookmark::title.like(&format!("%{q}%")));
+            // Escaped, so a `%` or `_` someone types matches only itself.
+            query = query.filter(bookmark::title.ilike(kiln::like::contains(q)));
         }
         if self.pinned {
             query = query.filter(bookmark::pinned.eq(true));
         }
         if !self.rating.is_empty() {
-            query = query.filter(bookmark::rating.is_in(self.rating.iter().copied()));
+            query = query.filter(bookmark::rating.is_in(&self.rating));
         }
         match self.sort {
             BookmarkSort::Newest => query.order(bookmark::created_at.desc()),

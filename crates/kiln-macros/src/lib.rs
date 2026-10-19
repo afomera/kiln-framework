@@ -39,7 +39,7 @@ mod view;
 ///
 /// Because columns and relations are emitted as module items, each record lives in its own
 /// file named after it (`records/post.rs`).
-#[proc_macro_derive(Record, attributes(record, index, hidden, on_delete))]
+#[proc_macro_derive(Record, attributes(record, index, hidden, on_delete, default))]
 pub fn derive_record(input: TokenStream) -> TokenStream {
     record::expand(parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
 }

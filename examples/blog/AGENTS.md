@@ -37,7 +37,8 @@ Run them from the app directory.
 | Schedules, batches | `kiln schedules [pause\|resume\|run <job>]`, `kiln batches [cancel <id>]` |
 | Inspect the running app | `/kiln` in development: routes, records, jobs, schedules, batches, mail, broadcasts, sign-ins, each searchable, with controls (retry, cancel, pause, run now) |
 | Secrets | `kiln secrets set SMTP_URL smtp://..`, `kiln secrets show` (key in `config/master.key`, never committed) |
-| Fresh database | `kiln db reset` (drop, migrate + seed the `DATABASE_URL` database, else the default one); sign in at /session/new as ada@example.com. Refused in production; a Postgres server not on this machine needs `--allow-remote` |
+| Fresh database | `kiln db reset` (drop, migrate + seed the `DATABASE_URL` database, else the default one); sign in at /session/new as ada@example.com. Refused in production; a Postgres server not on this machine needs `--allow-remote`. Files Kiln stored for the old database's attachments are deleted too when storage is local disk (only `kiln_blobs` keys; nothing else under `storage/`) |
+| Seed data | `src/seed.rs`: `pub async fn seed(ctx: &Ctx) -> Result`, run with the app as `src/app.rs` configures it, so `ctx.get::<T>()` services, `ctx.attach(..)` and config work; call it from tests as `seed(app.ctx())`. (`fn seed(db: Db)` still works.) |
 | Database | SQLite (`storage/development.sqlite3`, beside uploaded files) or Postgres (`kiln new app --database postgres`: `postgres://localhost/<app>_development`, tests in `<app>_test`); `DATABASE_URL` / `TEST_DATABASE_URL` override. `db/snapshot.json` records which. Kiln's queue, cache and broadcast log can each live in their own database (`QUEUE_DATABASE_URL`, `CACHE_DATABASE_URL`, `STREAMS_DATABASE_URL`, same backend); then jobs and broadcasts sent inside a transaction are handed over when it commits (a rollback still sends nothing). |
 
 Field types: `string`, `text`, `rich_text` (the editor; `?` means it may be left empty), `markdown` (a textarea, shown rendered), `integer`, `float`, `bool`, `timestamp`, `file`, `image` (uploads; `image` accepts only images), `ref:<Record>`. A
@@ -175,6 +176,12 @@ generated tests passing.
   Field attributes:
   - `#[validate(length(min = 1, max = 200))]`, `range(min = 1, max = 5)`, `email`, `required`
   - `#[form(textarea)]`, `#[form(label = "Starts at")]`, `#[form(hint = "..")]`, `#[form(placeholder = "..")]`
+  - Several values: `pub reviewers: Vec<Id<User>>` (or `Vec<String>`, `Vec<SomeEnum>`) reads repeated keys
+    (`reviewers=3&reviewers=7`, also `reviewers[]=..`, or a JSON array); nothing checked is an empty `Vec`, blanks
+    are skipped. `length(min = 1, max = 10)` counts the values (`required` = at least one); `range`/`email`
+    check each. `{{ field(form.reviewers, options=users, option_value="id", option_label="name") }}` renders
+    checkboxes (`as="select"` for `<select multiple>`); `options=` also takes `["a", "b"]` or `[[value, label], ..]`,
+    and works for a single `select` too. Enum lists get their variants without `options=`.
 
   In templates, never write raw `<form>` tags. Use `{{ form_start(path("posts::update", slug=post.slug), method="patch") }}`, then `{{ fields(form) }}` (or `{{ field(form.title, label="..") }}`), then `{{ form_end() }}`. These add the CSRF token, the method override, labels, errors and the `required`/`maxlength` attributes.
   Other attributes on the `<form>`: `id="search"`, `class="inline"`, `data={"controller": "search", "search_url_value": "/s"}`
@@ -442,9 +449,15 @@ generated tests passing.
 - **Inside a record's own file**, column and relation names are constants (`title`,
   `owner`), so a binding or parameter with one of those names won't compile there; pick
   another name (the generated `owned_by` uses `who`).
-- **Queries:** filters `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `like`, `is_null`, `is_not_null`, combined with
+- **Queries:** filters `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `is_in`, `not_in`, `like`, `ilike`, `is_null`, `is_not_null`, combined with
   `.and(..)` / `.or(..)`; then `.order(..)`, `.limit(n)`, and `.all`, `.one`, `.one_or_404`, `.count`, `.exists`,
-  `.delete_all` (each takes `&ctx.db`). A request that clashes with a record's state (already sent) is
+  `.delete_all` (each takes `&ctx.db`).
+  - Lists: `issue::state.is_in([State::Open, State::Draft])`, `repository::id.is_in(&ids)` (values or references, any
+    column type); `not_in(..)` likewise. An empty list is no rows for `is_in` and every row for `not_in`, never invalid
+    SQL. On a nullable column `is_in([None, Some(id)])` also matches NULL; `not_in` never matches NULL (like `ne`).
+  - Text: `like`/`ilike` work on `String` and `Option<String>` columns. `like` is case-sensitive on Postgres but not on
+    SQLite (ASCII); `ilike` is case-insensitive on both. Never put user input in a pattern raw:
+    `user::name.ilike(kiln::like::contains(&q))` (also `starts_with`, `ends_with`, `escape`) escapes `%`, `_` and `\`. A request that clashes with a record's state (already sent) is
   `Err(Error::Conflict("Already sent.".into()))`: a 409. For a browser, turn it into a flash:
   `Redirect::to(back).notice_or_alert(ops::send(&ctx, x).await, "Sent.")`.
   - Joins, through a `belongs_to`/`has_one`: `Repository::query().join(repository::namespace).filter(namespace::path.eq(p))
@@ -453,9 +466,18 @@ generated tests passing.
     conditions; `.filter` again for another's.
   - Through a `has_many` (no join, it would repeat rows): `post::id.in_query(Comment::query().filter(..).select(comment::post_id))`,
     or `repository::namespace_id.in_query(Namespace::query().filter(..))` (a `Query<U>` yields its ids); `not_in_query`
-    too. Union access rules with `.or(..)`. `.select(col).all(&db)` plucks one column (of a joined table too).
+    too. Union access rules with `.or(..)`. `.select(col).all(&db)` plucks one column (of a joined table too);
+    `.filter`, `.order`, `.limit` work before or after `.select`.
   - Aggregates: `.count_by(reaction::emoji, &db)` → `Vec<(String, i64)>`; `.sum(col, &db)` (0 when empty),
     `.max(col, &db)` / `.min(..)` → `Option`. Queries are `Clone` to reuse a base scope.
+  - Inserts: build `NewPost` as `NewPost { editor_id: Some(id), ..NewPost::new(PostRequired { slug, title, .. }) }` so
+    adding an optional field later doesn't touch every insert. `PostRequired` (from `#[derive(Record)]`, next to
+    `NewPost`) has the fields with no default and must list them all; `Option` fields default to `None`, and
+    `#[default]` / `#[default(PostStatus::Draft)]` on a record field gives others one. A record whose fields all have
+    defaults gets `NewTag::default()` instead. `Post::insert(new).created_at(ts)` back-dates a row (`updated_at`
+    follows unless `.updated_at(ts)`). Many rows: `Post::insert_all(news).run(&db).await?` returns them in order, one
+    multi-row `INSERT` per chunk, all-or-nothing; rows may be `Post::insert(new).created_at(ts)` each. Seeds
+    don't need raw multi-row SQL.
   - Counters: `Repository::update(id).increment(repository::issue_count, 1).run(&tx).await?.issue_count` is
     atomic and returns the new value. To read then write: `Repository::find(id).for_update().one_or_404(&tx)`
     inside `db.transaction`, as its first query (Postgres `FOR UPDATE`; SQLite takes its write lock).

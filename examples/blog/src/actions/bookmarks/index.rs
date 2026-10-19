@@ -7,5 +7,5 @@ use crate::{forms::BookmarkFilters, records::*, views::bookmarks::Index};
 #[action(GET "/bookmarks")]
 pub async fn index(ctx: Ctx, user: Current<User>, filters: QueryParams<BookmarkFilters>) -> Result<Index> {
     let bookmarks = filters.apply(&user).all(&ctx.db).await?;
-    Ok(Index { bookmarks, filters })
+    Ok(Index::new(bookmarks, filters))
 }

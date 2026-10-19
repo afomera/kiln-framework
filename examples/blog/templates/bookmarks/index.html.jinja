@@ -20,9 +20,16 @@
 {% if bookmarks %}
 <ul>
   {% for bookmark in bookmarks %}
-  <li><a href="{{ path("bookmarks::show", id=bookmark.id) }}">{{ bookmark.title }}</a></li>
+  <li><a href="{{ path("bookmarks::show", id=bookmark.id) }}">{{ bookmark.title }}</a>{% if bookmark.pinned %} (pinned){% endif %}</li>
   {% endfor %}
 </ul>
+{% if not filters.query_string() %}
+{# Every bookmark is listed here, so unchecking one unpins it. #}
+{{ form_start(path("bookmarks::pins"), method="patch") }}
+  {{ field(form.pinned, label="Pinned", options=bookmarks, option_value="id", option_label="title") }}
+  <button>Save pins</button>
+{{ form_end() }}
+{% endif %}
 {% elif filters.query_string() %}
 <p>No bookmarks match. <a href="{{ path("bookmarks::index") }}">Show all</a></p>
 {% else %}

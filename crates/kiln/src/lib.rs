@@ -64,7 +64,10 @@ pub use migrate::{
     ColumnSnapshot, Diff, Migration, RecordDef, Snapshot, TableSnapshot, diff, diff_for, load_migrations, records,
     write_migration,
 };
-pub use query::{Column, Delete, Expr, Insert, MinMax, Order, Query, Select, Subquery, Summable, Update};
+pub use query::{
+    Column, Delete, Expr, Insert, InsertAll, IntoInsert, ListValue, MinMax, Order, Query, Select, Subquery, Summable,
+    TextColumn, Update, like,
+};
 pub use query_params::QueryParams;
 pub use rate_limit::RateLimit;
 pub use redirect::{Redirect, RequestHeaders, ViewOrRedirect};
@@ -122,6 +125,17 @@ pub trait Record: Sized + Clone + Send + Sync + serde::Serialize + 'static {
 
     fn insert(new: Self::New) -> Insert<Self> {
         Insert::new(Self::new_values(new))
+    }
+
+    /// Many rows at once, one multi-row `INSERT` per chunk: `Post::insert_all(news).run(&db)`
+    /// returns the stored records in order. Rows are `New{Record}`s, or `Insert`s with their
+    /// own timestamps: `Post::insert_all(rows.map(|(new, at)| Post::insert(new).created_at(at)))`.
+    fn insert_all<I>(rows: I) -> InsertAll<Self>
+    where
+        I: IntoIterator,
+        I::Item: IntoInsert<Self>,
+    {
+        InsertAll::new(rows.into_iter().map(IntoInsert::into_insert).collect())
     }
 
     fn update(id: Id<Self>) -> Update<Self> {

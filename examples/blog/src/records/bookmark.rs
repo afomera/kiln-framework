@@ -10,6 +10,7 @@ pub struct Bookmark {
     pub url: String,
     pub notes: Option<String>,
     pub rating: Option<i64>,
+    #[default]
     pub pinned: bool,
     pub owner_id: Id<User>,
     pub created_at: Timestamp,

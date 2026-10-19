@@ -7,9 +7,16 @@ use blog::records::*;
 use kiln::prelude::*;
 
 fn blog(database_url: &str, args: &[&str]) -> (bool, String) {
+    // The seed stores a cover image; keep it out of the blog's own storage/.
+    let files = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("db-reset-files-{}", std::process::id()));
+    blog_with_storage(database_url, &format!("file://{}", files.display()), args)
+}
+
+fn blog_with_storage(database_url: &str, storage_url: &str, args: &[&str]) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_blog"))
         .args(args)
         .env("DATABASE_URL", database_url)
+        .env("STORAGE_URL", storage_url)
         .env("KILN_ENV", "development")
         .env_remove("QUEUE_DATABASE_URL")
         .env_remove("CACHE_DATABASE_URL")
@@ -57,6 +64,57 @@ async fn resets_the_sqlite_file_database_url_names() -> Result {
     assert!(ok, "{out}");
     let db = Db::connect(&url).await?;
     assert_eq!(User::query().count(&db).await?, seeded);
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// Every stored file (relative path) under `dir`.
+fn files_under(dir: &std::path::Path) -> Vec<String> {
+    let mut found = vec![];
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+            if entry.path().is_dir() {
+                stack.push(entry.path());
+            } else {
+                found.push(entry.path().strip_prefix(dir).unwrap().display().to_string());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[tokio::test]
+async fn reset_removes_the_old_databases_stored_files_and_nothing_else() -> Result {
+    let dir = scratch("storage");
+    let url = format!("sqlite://{}", dir.join("dev.sqlite3").display());
+    let storage = dir.join("storage");
+    let storage_url = format!("file://{}", storage.display());
+
+    let (ok, out) = blog_with_storage(&url, &storage_url, &["db", "reset"]);
+    assert!(ok, "{out}");
+    // The seed ran with the configured app, so it could store the first post's cover.
+    let first = files_under(&storage);
+    assert_eq!(first.len(), 1, "{first:?}");
+    let db = Db::connect(&url).await?;
+    let cover = Post::find_by(post::slug.eq("hello-kiln")).one_or_404(&db).await?.cover.expect("a cover");
+    assert_eq!(cover.filename(), "kiln.svg");
+    drop(db);
+
+    // App files beside Kiln's are left alone, even ones that look like blob directories.
+    std::fs::create_dir_all(storage.join("repos/ab")).unwrap();
+    std::fs::write(storage.join("repos/ab/keep.txt"), "app data").unwrap();
+    std::fs::create_dir_all(storage.join("zz/yy")).unwrap();
+    std::fs::write(storage.join("zz/yy/notes.txt"), "not a blob").unwrap();
+
+    let (ok, out) = blog_with_storage(&url, &storage_url, &["db", "reset"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("Removed 1 stored file(s) under"), "{out}");
+    let second = files_under(&storage);
+    assert!(!second.contains(&first[0]), "the old cover is gone: {second:?}");
+    assert!(second.contains(&"repos/ab/keep.txt".to_owned()) && second.contains(&"zz/yy/notes.txt".to_owned()));
+    assert_eq!(second.len(), 3, "the new seed's cover, plus the app's two files: {second:?}");
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }

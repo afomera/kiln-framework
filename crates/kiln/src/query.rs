@@ -102,17 +102,105 @@ impl<T: Record, V: ToValue> Column<T, V> {
         self.compare(">=", value.into().to_value())
     }
 
+    /// The column's value is one of `values`: `issue::state.is_in([State::Open, State::Draft])`,
+    /// `repository::id.is_in(&ids)`. Takes values or references to them, of the column's type
+    /// (`&str` for text, plain values for an `Option` column). An empty list matches no
+    /// rows; `None` in the list on a nullable column matches NULL.
     pub fn is_in<I>(self, values: I) -> Expr<T>
     where
         I: IntoIterator,
-        I::Item: Into<V>,
+        I::Item: ListValue<V>,
     {
-        let binds: Vec<Value> = values.into_iter().map(|v| v.into().to_value()).collect();
-        if binds.is_empty() {
-            return Expr::new("0 = 1".to_owned(), vec![]);
+        let (binds, null) = list_binds::<V, _>(values);
+        let column = self.sql();
+        match (binds.is_empty(), null) {
+            (true, false) => Expr::new("0 = 1".to_owned(), vec![]),
+            (true, true) => Expr::new(format!("{column} IS NULL"), vec![]),
+            (false, false) => Expr::new(format!("{column} IN ({})", marks(binds.len())), binds),
+            (false, true) => Expr::new(format!("({column} IN ({}) OR {column} IS NULL)", marks(binds.len())), binds),
         }
-        let marks = vec!["?"; binds.len()].join(", ");
-        Expr::new(format!("{} IN ({marks})", self.sql()), binds)
+    }
+
+    /// The column's value is none of `values`. An empty list matches every row. Like `ne`,
+    /// a NULL never matches (SQL's `NOT IN`); keep those rows with `col.is_null().or(col.not_in(..))`.
+    /// `None` in the list is ignored.
+    pub fn not_in<I>(self, values: I) -> Expr<T>
+    where
+        I: IntoIterator,
+        I::Item: ListValue<V>,
+    {
+        let (binds, null) = list_binds::<V, _>(values);
+        let column = self.sql();
+        match (binds.is_empty(), null) {
+            (true, false) => Expr::new("1 = 1".to_owned(), vec![]),
+            (true, true) => Expr::new(format!("{column} IS NOT NULL"), vec![]),
+            // NOT IN already leaves out NULLs; a NULL bind would make it match nothing.
+            (false, _) => Expr::new(format!("{column} NOT IN ({})", marks(binds.len())), binds),
+        }
+    }
+}
+
+/// `?, ?, ?`.
+fn marks(n: usize) -> String {
+    vec!["?"; n].join(", ")
+}
+
+/// A list's binds without its NULLs, and whether it had one.
+fn list_binds<V, I>(values: I) -> (Vec<Value>, bool)
+where
+    I: IntoIterator,
+    I::Item: ListValue<V>,
+{
+    let mut null = false;
+    let mut binds = Vec::new();
+    for value in values {
+        match value.list_value() {
+            Value::Null => null = true,
+            value => binds.push(value),
+        }
+    }
+    (binds, null)
+}
+
+/// A value [`Column::is_in`] and [`Column::not_in`] accept for a column of type `V`: a `V`
+/// or `&V`, a `&str` for text, and a `V` or `&V` for an `Option<V>` column.
+pub trait ListValue<V> {
+    fn list_value(self) -> Value;
+}
+
+impl<V: ToValue> ListValue<V> for V {
+    fn list_value(self) -> Value {
+        self.to_value()
+    }
+}
+
+impl<V: ToValue> ListValue<V> for &V {
+    fn list_value(self) -> Value {
+        self.to_value()
+    }
+}
+
+impl<V: ToValue> ListValue<Option<V>> for V {
+    fn list_value(self) -> Value {
+        self.to_value()
+    }
+}
+
+impl<V: ToValue> ListValue<Option<V>> for &V {
+    fn list_value(self) -> Value {
+        self.to_value()
+    }
+}
+
+impl ListValue<String> for &str {
+    fn list_value(self) -> Value {
+        Value::Text(self.to_owned())
+    }
+}
+
+impl ListValue<Option<String>> for &str {
+    fn list_value(self) -> Value {
+        Value::Text(self.to_owned())
     }
 }
 
@@ -126,9 +214,63 @@ impl<T: Record, V> Column<T, Option<V>> {
     }
 }
 
-impl<T: Record> Column<T, String> {
-    pub fn like(self, pattern: &str) -> Expr<T> {
-        self.compare("LIKE", Value::Text(pattern.to_owned()))
+/// Text columns, `String` or `Option<String>` (a NULL never matches).
+pub trait TextColumn {}
+impl TextColumn for String {}
+impl TextColumn for Option<String> {}
+
+impl<T: Record, V: TextColumn> Column<T, V> {
+    /// SQL `LIKE`: `%` is any run of characters, `_` any one, `\` escapes them; build
+    /// patterns from user input with [`like::contains`] (and friends), which escape it.
+    /// Postgres compares case-sensitively; SQLite ignores ASCII case. For the same answer
+    /// everywhere, use [`Column::ilike`].
+    pub fn like(self, pattern: impl AsRef<str>) -> Expr<T> {
+        Expr::new(format!("{} LIKE ? ESCAPE '\\'", self.sql()), vec![Value::Text(pattern.as_ref().to_owned())])
+    }
+
+    /// Case-insensitive `LIKE` on every backend: `user::name.ilike(like::contains(&q))`.
+    /// Written `LOWER(col) LIKE LOWER(?)`, so Postgres folds any letters and SQLite ASCII
+    /// ones (as ILIKE and SQLite's LIKE do).
+    pub fn ilike(self, pattern: impl AsRef<str>) -> Expr<T> {
+        Expr::new(
+            format!("LOWER({}) LIKE LOWER(?) ESCAPE '\\'", self.sql()),
+            vec![Value::Text(pattern.as_ref().to_owned())],
+        )
+    }
+}
+
+/// `LIKE` patterns from user input, for [`Column::like`] and [`Column::ilike`]: `%`, `_` and
+/// `\` in the input match only themselves.
+///
+/// ```ignore
+/// Repository::query().filter(repository::name.ilike(kiln::like::contains(&params.q)))
+/// ```
+pub mod like {
+    /// The input with `%`, `_` and `\` escaped, to put inside a pattern of your own.
+    pub fn escape(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        for c in input.chars() {
+            if matches!(c, '%' | '_' | '\\') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    /// Matches text containing `input`.
+    pub fn contains(input: &str) -> String {
+        format!("%{}%", escape(input))
+    }
+
+    /// Matches text starting with `input`.
+    pub fn starts_with(input: &str) -> String {
+        format!("{}%", escape(input))
+    }
+
+    /// Matches text ending with `input`.
+    pub fn ends_with(input: &str) -> String {
+        format!("%{}", escape(input))
     }
 }
 
@@ -589,6 +731,42 @@ pub struct Select<T, V, J = ()> {
     _marker: PhantomData<fn() -> V>,
 }
 
+/// A `select` keeps building like its query, so `.limit(..)`, `.order(..)` and `.filter(..)`
+/// work before or after it.
+impl<T: Record, V, J> Select<T, V, J> {
+    pub fn filter<U, I>(mut self, expr: Expr<U>) -> Self
+    where
+        U: InScope<T, J, I>,
+    {
+        self.query = self.query.filter(expr);
+        self
+    }
+
+    pub fn order<U, I>(mut self, order: Order<U>) -> Self
+    where
+        U: InScope<T, J, I>,
+    {
+        self.query = self.query.order(order);
+        self
+    }
+
+    pub fn limit(mut self, n: u64) -> Self {
+        self.query = self.query.limit(n);
+        self
+    }
+
+    pub fn offset(mut self, n: u64) -> Self {
+        self.query = self.query.offset(n);
+        self
+    }
+
+    /// One-based page of `per` rows.
+    pub fn page(mut self, page: u64, per: u64) -> Self {
+        self.query = self.query.page(page, per);
+        self
+    }
+}
+
 impl<T: Record, V: FromColumn, J> Select<T, V, J> {
     /// The column's values, in the query's order (`pluck`).
     pub async fn all(self, db: &Db) -> Result<Vec<V>> {
@@ -701,29 +879,148 @@ fn quoted_columns<T: Record>() -> String {
     T::COLUMNS.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ")
 }
 
+#[must_use = "an insert does nothing until it's run with `.run(&db)`"]
 pub struct Insert<T> {
     values: Vec<(&'static str, Value)>,
+    /// `updated_at` was set explicitly, so a `created_at` override leaves it alone.
+    updated_at_set: bool,
+    /// A timestamp override for a column the record doesn't have.
+    missing: Option<&'static str>,
     _marker: PhantomData<fn() -> T>,
 }
 
 impl<T: Record> Insert<T> {
     pub(crate) fn new(values: Vec<(&'static str, Value)>) -> Self {
-        Self { values, _marker: PhantomData }
+        Self { values, updated_at_set: false, missing: None, _marker: PhantomData }
+    }
+
+    /// Stores `ts` as the row's `created_at` instead of now (back-dated seeds, imports).
+    /// `updated_at` follows it unless also set.
+    pub fn created_at(mut self, ts: Timestamp) -> Self {
+        self.set_timestamp("created_at", ts);
+        if !self.updated_at_set && self.values.iter().any(|(n, _)| *n == "updated_at") {
+            self.set_timestamp("updated_at", ts);
+        }
+        self
+    }
+
+    /// Stores `ts` as the row's `updated_at` instead of now (or the `created_at` override).
+    pub fn updated_at(mut self, ts: Timestamp) -> Self {
+        self.set_timestamp("updated_at", ts);
+        self.updated_at_set = true;
+        self
+    }
+
+    fn set_timestamp(&mut self, column: &'static str, ts: Timestamp) {
+        match self.values.iter_mut().find(|(n, _)| *n == column) {
+            Some((_, value)) => *value = ts.to_value(),
+            None => self.missing = Some(column),
+        }
+    }
+
+    fn check(&self) -> Result<()> {
+        match self.missing {
+            Some(column) => Err(Error::Config(format!(
+                "`{}` has no `{column}` column to set at insert; add `pub {column}: Timestamp` to the record",
+                T::TABLE
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Inserts the row and returns the stored record.
     pub async fn run(self, db: &Db) -> Result<T> {
+        self.check()?;
         let names: Vec<String> = self.values.iter().map(|(n, _)| format!("\"{n}\"")).collect();
-        let marks = vec!["?"; self.values.len()].join(", ");
         let sql = format!(
-            "INSERT INTO \"{}\" ({}) VALUES ({marks}) RETURNING {}",
+            "INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING {}",
             T::TABLE,
             names.join(", "),
+            marks(self.values.len()),
             quoted_columns::<T>()
         );
         let binds = self.values.into_iter().map(|(_, v)| v).collect();
         let rows = db.fetch_all(&sql, binds).await?;
         Ok(T::from_row(rows.first().ok_or(Error::NotFound)?)?)
+    }
+}
+
+/// A row [`Record::insert_all`] takes: a `New{Record}`, or an [`Insert`] for one with
+/// its own timestamps (`Post::insert(new).created_at(ts)`).
+pub trait IntoInsert<T> {
+    fn into_insert(self) -> Insert<T>;
+}
+
+impl<T> IntoInsert<T> for Insert<T> {
+    fn into_insert(self) -> Insert<T> {
+        self
+    }
+}
+
+/// Many rows in one statement per chunk, from [`Record::insert_all`].
+#[must_use = "an insert does nothing until it's run with `.run(&db)`"]
+pub struct InsertAll<T> {
+    rows: Vec<Insert<T>>,
+}
+
+impl<T: Record> InsertAll<T> {
+    pub(crate) fn new(rows: Vec<Insert<T>>) -> Self {
+        Self { rows }
+    }
+
+    /// Stores `ts` as every row's `created_at` (and `updated_at`, unless a row sets its own).
+    pub fn created_at(mut self, ts: Timestamp) -> Self {
+        self.rows = self.rows.into_iter().map(|row| row.created_at(ts)).collect();
+        self
+    }
+
+    /// Inserts the rows and returns them as stored, in the order given. Each chunk is one
+    /// multi-row `INSERT .. RETURNING` (sized to the backend's limit on binds); several
+    /// chunks run in a transaction, so either every row goes in or none does. On a
+    /// transaction handle they're part of it.
+    pub async fn run(self, db: &Db) -> Result<Vec<T>> {
+        for row in &self.rows {
+            row.check()?;
+        }
+        let Some(first) = self.rows.first() else { return Ok(vec![]) };
+        let columns: Vec<&'static str> = first.values.iter().map(|(n, _)| *n).collect();
+        if self.rows.iter().any(|row| row.values.iter().map(|(n, _)| *n).ne(columns.iter().copied())) {
+            return Err(Error::Integrity(format!("rows for `{}` don't all set the same columns", T::TABLE)));
+        }
+        let per_chunk = (db.dialect().max_binds() / columns.len().max(1)).clamp(1, 1000);
+        let chunks: Vec<Vec<Value>> = self
+            .rows
+            .chunks(per_chunk)
+            .map(|chunk| chunk.iter().flat_map(|row| row.values.iter().map(|(_, v)| v.clone())).collect())
+            .collect();
+        let row_marks = format!("({})", marks(columns.len()));
+        let names = columns.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
+        let statements: Vec<(String, Vec<Value>)> = chunks
+            .into_iter()
+            .map(|binds| {
+                let rows = binds.len() / columns.len().max(1);
+                let values = vec![row_marks.as_str(); rows].join(", ");
+                let sql = format!(
+                    "INSERT INTO \"{}\" ({names}) VALUES {values} RETURNING {}",
+                    T::TABLE,
+                    quoted_columns::<T>()
+                );
+                (sql, binds)
+            })
+            .collect();
+        let single = statements.len() == 1;
+        let run = |db: Db| async move {
+            let mut records = Vec::new();
+            for (sql, binds) in statements {
+                let rows = db.fetch_all(&sql, binds).await?;
+                let mut chunk = rows.iter().map(T::from_row).collect::<std::result::Result<Vec<T>, _>>()?;
+                // RETURNING's row order isn't promised; ids are handed out in VALUES order.
+                chunk.sort_by_key(|record| record.id().get());
+                records.extend(chunk);
+            }
+            Ok(records)
+        };
+        if single || db.in_transaction() { run(db.clone()).await } else { db.transaction(run).await }
     }
 }
 

@@ -84,6 +84,9 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         }
 
+        /// So `#[validate(length(..))]` can count a `Vec` of them.
+        impl ::kiln::form::rules::RuleTarget for #name {}
+
         impl ::kiln::SqlType for #name {
             const SQL: &'static str = "TEXT";
             const VARIANTS: &'static [&'static str] = &[#( #values ),*];

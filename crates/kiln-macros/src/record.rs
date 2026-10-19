@@ -85,6 +85,10 @@ struct Field<'a> {
     on_delete: Option<(&'static str, proc_macro2::Span)>,
     /// `#[hidden]`: stored, but never serialized (templates, JSON, broadcasts).
     hidden: bool,
+    /// What the field starts as in `New{Record}::new(..)` / `Default`: `Option` fields are
+    /// `None`; `#[default]` is `Default::default()`, `#[default(expr)]` is `expr`. `None`
+    /// for a required field.
+    default: Option<TokenStream>,
 }
 
 impl Field<'_> {
@@ -230,6 +234,27 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
         }
         let hidden = f.attrs.iter().any(|a| a.path().is_ident("hidden"));
+        let mut default = is_option(&f.ty).then(|| quote! { ::core::option::Option::None });
+        for attr in f.attrs.iter().filter(|a| a.path().is_ident("default")) {
+            if AUTO_FIELDS.contains(&ident.to_string().as_str()) {
+                return Err(Error::new_spanned(
+                    attr,
+                    format!(
+                        "`{ident}` isn't on `New{name}`; set it at insert with `.{ident}(ts)` (`created_at`/`updated_at`)"
+                    ),
+                ));
+            }
+            default = Some(match &attr.meta {
+                syn::Meta::Path(_) => quote! { ::core::default::Default::default() },
+                syn::Meta::List(list) => {
+                    let expr: syn::Expr = list.parse_args()?;
+                    quote! { ::core::convert::Into::into(#expr) }
+                }
+                syn::Meta::NameValue(_) => {
+                    return Err(Error::new_spanned(attr, "write `#[default]` or `#[default(expr)]`"));
+                }
+            });
+        }
         let mut on_delete = None;
         for attr in f.attrs.iter().filter(|a| a.path().is_ident("on_delete")) {
             attr.parse_nested_meta(|meta| {
@@ -250,7 +275,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 Ok(())
             })?;
         }
-        fields.push(Field { ident, ty: &f.ty, index, on_delete, hidden });
+        fields.push(Field { ident, ty: &f.ty, index, on_delete, hidden, default });
     }
 
     if !fields.iter().any(|f| f.ident == "id") {
@@ -466,6 +491,60 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let new_doc = format!("Insertable fields for `{name}`; `id` and timestamps are set by the database and kiln.");
     let name_str = name.to_string();
 
+    // `NewPost::new(PostRequired { .. })` fills the optional fields, so adding one doesn't
+    // touch every insert; with nothing required, `NewPost::default()` instead.
+    let insertable: Vec<&Field> = fields.iter().filter(|f| !f.is_auto()).collect();
+    let required: Vec<&Field> = insertable.iter().copied().filter(|f| f.default.is_none()).collect();
+    let required_name = format_ident!("{}Required", name);
+    let defaults: Vec<TokenStream> = insertable
+        .iter()
+        .filter_map(|f| f.default.as_ref().map(|d| (f.ident, d)))
+        .map(|(ident, d)| quote! { #ident: #d })
+        .collect();
+    let constructors = if required.is_empty() {
+        quote! {
+            impl ::core::default::Default for #new_name {
+                fn default() -> Self {
+                    Self { #( #defaults, )* }
+                }
+            }
+        }
+    } else {
+        let required_fields = required.iter().map(|f| {
+            let (ident, ty) = (f.ident, f.ty);
+            quote! { pub #ident: #ty }
+        });
+        let moves = required.iter().map(|f| {
+            let ident = f.ident;
+            quote! { #ident: __kiln_required.#ident }
+        });
+        let required_doc = format!(
+            "The fields `New{name}` can't do without (no `Option`, no `#[default]`): \
+             `New{name} {{ optional: .., ..New{name}::new({name}Required {{ .. }}) }}`."
+        );
+        quote! {
+            #[doc = #required_doc]
+            #[derive(Debug, Clone)]
+            #vis struct #required_name {
+                #( #required_fields, )*
+            }
+
+            impl #new_name {
+                /// The required fields, with every optional one at its default (`None`, or
+                /// its `#[default(..)]`). Set others with struct update syntax.
+                #vis fn new(__kiln_required: #required_name) -> Self {
+                    Self { #( #moves, )* #( #defaults, )* }
+                }
+            }
+
+            impl ::core::convert::From<#required_name> for #new_name {
+                fn from(__kiln_required: #required_name) -> Self {
+                    Self::new(__kiln_required)
+                }
+            }
+        }
+    };
+
     Ok(quote! {
         #( #column_consts )*
 
@@ -477,6 +556,14 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         #[derive(Debug, Clone)]
         #vis struct #new_name {
             #( #new_fields, )*
+        }
+
+        #constructors
+
+        impl ::kiln::IntoInsert<#name> for #new_name {
+            fn into_insert(self) -> ::kiln::Insert<#name> {
+                <#name as ::kiln::Record>::insert(self)
+            }
         }
 
         impl ::kiln::Record for #name {

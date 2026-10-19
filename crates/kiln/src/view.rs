@@ -1118,13 +1118,19 @@ mod forms {
     }
 
     /// `{{ field(form.title, label="Headline", hint="Shown on the home page") }}`.
-    /// Also `as="textarea"` and `placeholder="..."`.
+    /// Also `as="textarea"` and `placeholder="..."`. `options=` gives a select or a list
+    /// field's choices at render time: values (`["a", "b"]`), `[value, label]` pairs, or maps
+    /// with `value` and `label`; records with `option_value="id", option_label="name"`
+    /// (`options=users, ..`). A `Vec<T>` field renders as checkboxes, or `<select multiple>`
+    /// with `as="select"`.
     pub fn field(state: &State, field: Value, kwargs: Kwargs) -> Result<Value, Error> {
         let overrides = Overrides {
             label: kwargs.get("label")?,
             input: kwargs.get("as")?,
             hint: kwargs.get("hint")?,
             placeholder: kwargs.get("placeholder")?,
+            options: kwargs.get("options")?,
+            option_keys: (kwargs.get("option_value")?, kwargs.get("option_label")?),
         };
         kwargs.assert_all_used()?;
         if field.get_attr("input")?.is_undefined() {
@@ -1142,6 +1148,56 @@ mod forms {
         input: Option<String>,
         hint: Option<String>,
         placeholder: Option<String>,
+        options: Option<Value>,
+        /// The keys `options` maps hold their value and label under (`value`, `label`).
+        option_keys: (Option<String>, Option<String>),
+    }
+
+    /// `(value, label)` pairs: from `options=` when given, else the field's own (an enum's
+    /// variants, shown humanized).
+    fn choices(
+        field: &Value,
+        options: Option<&Value>,
+        (value_key, label_key): (Option<&str>, Option<&str>),
+    ) -> Result<Vec<(String, String)>, Error> {
+        let Some(options) = options.filter(|o| !o.is_none() && !o.is_undefined()) else {
+            let mut choices = Vec::new();
+            for option in field.get_attr("options")?.try_iter()? {
+                let option = option.to_string();
+                let shown = option.replace('_', " ");
+                let mut chars = shown.chars();
+                let shown = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
+                choices.push((option, shown));
+            }
+            return Ok(choices);
+        };
+        let mut choices = Vec::new();
+        for option in options.try_iter()? {
+            let choice = match option.kind() {
+                ValueKind::Seq => {
+                    let pair: Vec<Value> = option.try_iter()?.collect();
+                    match pair.as_slice() {
+                        [value, label] => (value.to_string(), label.to_string()),
+                        _ => {
+                            return Err(Error::new(
+                                ErrorKind::InvalidOperation,
+                                "each of field()'s options is a value, a [value, label] pair or a map with `value` and `label`",
+                            ));
+                        }
+                    }
+                }
+                ValueKind::Map => {
+                    let value = text(&option, value_key.unwrap_or("value"))?;
+                    let label = Some(text(&option, label_key.unwrap_or("label"))?)
+                        .filter(|l| !l.is_empty())
+                        .unwrap_or_else(|| value.clone());
+                    (value, label)
+                }
+                _ => (option.to_string(), option.to_string()),
+            };
+            choices.push(choice);
+        }
+        Ok(choices)
     }
 
     fn text(field: &Value, key: &str) -> Result<String, Error> {
@@ -1159,6 +1215,7 @@ mod forms {
     }
 
     fn render(state: &State, field: &Value, o: Overrides) -> Result<String, Error> {
+        let (options, option_keys) = (o.options, o.option_keys);
         let name = text(field, "name")?;
         let label = o.label.unwrap_or(text(field, "label")?);
         let input = o.input.unwrap_or(text(field, "input")?);
@@ -1170,12 +1227,25 @@ mod forms {
             input: None,
             hint: o.hint.or(spec_text("hint")?).or(default_hint),
             placeholder: o.placeholder.or(spec_text("placeholder")?),
+            options: None,
+            option_keys: (None, None),
+        };
+        let choices = choices(field, options.as_ref(), (option_keys.0.as_deref(), option_keys.1.as_deref()))?;
+        let multiple = field.get_attr("multiple")?.is_true();
+        let values: Vec<String> = match field.get_attr("values")? {
+            v if v.is_undefined() || v.is_none() => vec![],
+            v => v.try_iter()?.map(|v| v.to_string()).collect(),
         };
 
         // An app-wide field template replaces the built-in markup.
         if let Ok(custom) = state.env().get_template("kiln/field.html.jinja") {
+            let choices: Vec<Value> = choices
+                .iter()
+                .map(|(value, label)| context! { value => value, label => label, selected => values.contains(value) })
+                .collect();
             return custom.render(context! {
                 field => field, label => label, input => input, hint => o.hint, placeholder => o.placeholder,
+                choices => choices,
             });
         }
 
@@ -1286,22 +1356,40 @@ mod forms {
                 );
             }
             "select" => {
-                let _ = write!(html, "  <label for=\"{id}\">{}</label>\n  <select {attrs}>\n", esc(&label));
-                if !required || value.is_empty() {
-                    html.push_str("    <option value=\"\">Choose…</option>\n");
+                let _ = writeln!(html, "  <label for=\"{id}\">{}</label>", esc(&label));
+                if multiple {
+                    // Deselecting everything submits nothing; the blank keeps the field in the body.
+                    let _ = writeln!(html, "  <input type=\"hidden\" name=\"{id}\" value=\"\">");
+                    let _ = writeln!(html, "  <select {attrs} multiple>");
+                } else {
+                    let _ = writeln!(html, "  <select {attrs}>");
+                    if !required || value.is_empty() {
+                        html.push_str("    <option value=\"\">Choose…</option>\n");
+                    }
                 }
-                for option in field.get_attr("options")?.try_iter()? {
-                    let option = option.to_string();
-                    let selected = if option == value { " selected" } else { "" };
-                    let shown = option.replace('_', " ");
-                    let shown = shown
-                        .chars()
-                        .next()
-                        .map(|c| c.to_uppercase().chain(shown.chars().skip(1)).collect::<String>())
-                        .unwrap_or_default();
-                    let _ = writeln!(html, "    <option value=\"{}\"{selected}>{}</option>", esc(&option), esc(&shown));
+                for (option, shown) in &choices {
+                    let chosen = if multiple { values.contains(option) } else { *option == value };
+                    let selected = if chosen { " selected" } else { "" };
+                    let _ = writeln!(html, "    <option value=\"{}\"{selected}>{}</option>", esc(option), esc(shown));
                 }
                 html.push_str("  </select>\n");
+            }
+            // A list (`Vec<T>`) field: one checkbox per choice, all under the field's name.
+            "checkboxes" => {
+                let described =
+                    if errors.is_empty() { String::new() } else { format!(" aria-describedby=\"{id}-error\"") };
+                let _ = writeln!(html, "  <fieldset id=\"{id}\"{described}>\n    <legend>{}</legend>", esc(&label));
+                let _ = writeln!(html, "    <input type=\"hidden\" name=\"{id}\" value=\"\">");
+                for (i, (option, shown)) in choices.iter().enumerate() {
+                    let checked = if values.contains(option) { " checked" } else { "" };
+                    let _ = writeln!(
+                        html,
+                        "    <label><input type=\"checkbox\" id=\"{id}-{i}\" name=\"{id}\" value=\"{}\"{checked}> {}</label>",
+                        esc(option),
+                        esc(shown)
+                    );
+                }
+                html.push_str("  </fieldset>\n");
             }
             other => {
                 let kind = match other {

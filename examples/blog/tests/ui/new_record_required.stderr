@@ -1,0 +1,5 @@
+error[E0063]: missing fields `author_id`, `body` and `status` in initializer of `PostRequired`
+  --> tests/ui/new_record_required.rs:21:59
+   |
+21 |     let _post = NewPost { editor_id: None, ..NewPost::new(PostRequired { slug: "s".into(), title: "T".into() }) };
+   |                                                           ^^^^^^^^^^^^ missing `author_id`, `body` and `status`

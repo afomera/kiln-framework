@@ -333,6 +333,13 @@ impl Db {
     }
 
     /// Runs a script of several statements on one connection, e.g. a migration.
+    /// Closes the pool's connections (`db reset`, before deleting a SQLite file).
+    pub(crate) async fn close(&self) {
+        if let Conn::Pool(pool) = &self.conn {
+            pool.close().await;
+        }
+    }
+
     pub async fn execute_script(&self, sql: &str) -> Result<()> {
         self.queries.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(target: "kiln::sql", "{sql}");

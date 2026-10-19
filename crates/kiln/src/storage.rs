@@ -39,6 +39,8 @@ pub struct Storage {
     /// Cloud stores hand out signed URLs, so downloads skip the app.
     signer: Option<Arc<dyn Signer>>,
     describe: String,
+    /// The directory of a `file://` store.
+    dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Storage {
@@ -57,7 +59,12 @@ impl Storage {
                 let dir = if rest.starts_with('/') { PathBuf::from(rest) } else { root.join(rest) };
                 std::fs::create_dir_all(&dir)?;
                 let store = object_store::local::LocalFileSystem::new_with_prefix(&dir).map_err(bad)?;
-                Ok(Self { store: Arc::new(store), signer: None, describe: format!("file://{}", dir.display()) })
+                Ok(Self {
+                    store: Arc::new(store),
+                    signer: None,
+                    describe: format!("file://{}", dir.display()),
+                    dir: Some(dir),
+                })
             }
             "memory" => Ok(Self::memory()),
             "s3" => {
@@ -74,7 +81,7 @@ impl Storage {
                     }
                 }
                 let store = Arc::new(builder.build().map_err(bad)?);
-                Ok(Self { store: store.clone(), signer: Some(store), describe: url.to_owned() })
+                Ok(Self { store: store.clone(), signer: Some(store), describe: url.to_owned(), dir: None })
             }
             "gs" => {
                 let mut builder = object_store::gcp::GoogleCloudStorageBuilder::from_env().with_url(url);
@@ -82,7 +89,7 @@ impl Storage {
                     builder = builder.with_config("google_service_account".parse().map_err(bad)?, account);
                 }
                 let store = Arc::new(builder.build().map_err(bad)?);
-                Ok(Self { store: store.clone(), signer: Some(store), describe: url.to_owned() })
+                Ok(Self { store: store.clone(), signer: Some(store), describe: url.to_owned(), dir: None })
             }
             other => Err(Error::Config(format!(
                 "STORAGE_URL `{url}`: `{other}://` isn't a store Kiln knows; use file://, s3://, gs:// or memory://"
@@ -92,7 +99,12 @@ impl Storage {
 
     /// An in-memory store (tests).
     pub fn memory() -> Self {
-        Self { store: Arc::new(object_store::memory::InMemory::new()), signer: None, describe: "memory://".into() }
+        Self {
+            store: Arc::new(object_store::memory::InMemory::new()),
+            signer: None,
+            describe: "memory://".into(),
+            dir: None,
+        }
     }
 
     async fn put(&self, key: &str, bytes: Bytes) -> Result<()> {
@@ -115,6 +127,11 @@ impl Storage {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(e) => Err(storage_error(e)),
         }
+    }
+
+    /// The directory a `file://` store keeps files in; `None` for cloud and memory stores.
+    pub fn local_dir(&self) -> Option<&std::path::Path> {
+        self.dir.as_deref()
     }
 
     /// Deletes everything under `prefix` (an image's variants).
@@ -991,6 +1008,47 @@ pub async fn purge_unattached(ctx: &Ctx, older_than: jiff::SignedDuration) -> Re
         tracing::info!(target: "kiln::storage", purged, "removed unattached files");
     }
     Ok(purged)
+}
+
+/// Every stored file's key the database knows (`kiln_blobs`), for `db reset`. Empty when
+/// the table doesn't exist yet.
+pub(crate) async fn blob_keys(db: &Db) -> Vec<String> {
+    let Ok(rows) = db.fetch_all("SELECT \"key\" FROM \"kiln_blobs\"", vec![]).await else { return vec![] };
+    rows.iter().filter_map(|r| sqlx::Row::try_get::<String, _>(r, 0).ok()).filter(|k| is_blob_key(k)).collect()
+}
+
+/// `ab/cd/abcd…` as [`new_key`] makes them, so nothing else in the store is ever touched.
+fn is_blob_key(key: &str) -> bool {
+    let parts: Vec<&str> = key.split('/').collect();
+    let plain = |s: &str| s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    matches!(parts.as_slice(), [a, b, name]
+        if name.len() == 26 && plain(name) && name.starts_with(&format!("{a}{b}")) && a.len() == 2 && b.len() == 2)
+}
+
+/// Deletes the files (and their image variants) under `keys`, then the fan-out directories
+/// they leave empty. Returns how many files were there.
+pub(crate) async fn remove_blobs(storage: &Storage, keys: &[String]) -> Result<usize> {
+    let mut removed = 0;
+    for key in keys.iter().filter(|k| is_blob_key(k)) {
+        if storage.store.head(&StorePath::from(key.as_str())).await.is_ok() {
+            removed += 1;
+        }
+        storage.delete(key).await?;
+        storage.delete_prefix(&format!("variants/{key}")).await?;
+        if let Some(dir) = storage.local_dir() {
+            // Only directories that are now empty go; `remove_dir` refuses any other.
+            let (fan, _) = key.rsplit_once('/').unwrap_or_default();
+            let (top, _) = fan.split_once('/').unwrap_or_default();
+            for empty in
+                [format!("variants/{key}"), format!("variants/{fan}"), format!("variants/{top}"), "variants".into()]
+                    .into_iter()
+                    .chain([fan.to_owned(), top.to_owned()])
+            {
+                let _ = std::fs::remove_dir(dir.join(empty));
+            }
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

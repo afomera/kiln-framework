@@ -153,7 +153,8 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         } else if password {
             quote!("password")
         } else if email {
-            quote!("email")
+            // A list of emails is still a list.
+            quote!(if <#ty as ::kiln::form::FormField>::MULTIPLE { <#ty as ::kiln::form::FormField>::INPUT } else { "email" })
         } else {
             quote!(<#ty as ::kiln::form::FormField>::INPUT)
         };
@@ -197,6 +198,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
                 name: #field_name,
                 label: #label,
                 input: #input,
+                multiple: <#ty as ::kiln::form::FormField>::MULTIPLE,
                 required: #required,
                 min_length: #min_length,
                 max_length: #max_length,
@@ -261,6 +263,7 @@ pub fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             }
 
             fn to_fields(&self) -> ::kiln::form::Fields {
+                #[allow(unused_mut)]
                 let mut __kiln_fields = ::kiln::form::Fields::default();
                 #( #to_fields )*
                 __kiln_fields
