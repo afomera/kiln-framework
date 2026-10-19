@@ -19,7 +19,7 @@ Run them from the app directory.
 | Email | `kiln g mail welcome_email` (with a preview at `/kiln/mail/previews`) |
 | Notification (inbox + email + live) | `kiln g notification comment_posted [--to User]` (adds the `/notifications` inbox and `/settings/notifications` the first time) |
 | Stimulus controller | `kiln g controller clipboard` → `assets/controllers/clipboard_controller.js` (`data-controller="clipboard"`; `admin/users` is `admin--users`) |
-| JavaScript package (no npm) | `kiln importmap pin @pierre/diffs[@1.5.2]` downloads it from jsDelivr into `assets/vendor/npm/` and pins it in `config/importmap.toml`; then `import { .. } from "@pierre/diffs"`. `--cdn` pins the CDN URL instead; `kiln importmap unpin <pkg>` |
+| JavaScript package (no npm) | `kiln importmap pin @pierre/diffs[@1.5.2]` downloads it from jsDelivr into `assets/vendor/npm/` and pins it in `config/importmap.toml`; then `import { .. } from "@pierre/diffs"`. `--cdn` pins the CDN URL instead; `kiln importmap unpin <pkg>`. Modules a package loads on demand (Shiki's grammars and themes) come from jsDelivr unless pinned by subpath: `kiln importmap pin @shikijs/langs/rust,tsx @shikijs/themes/github-dark` (at the version the vendored package asks for) |
 | Passwords, sign-up, resets, sign-in list | `kiln g auth` (once; replaces the demo sign-in) |
 | API tokens (personal access tokens) | `kiln g api_tokens` (after `kiln g auth`): `/settings/api_tokens` to create (shown once) and revoke, `GET /api/me`, tests. Scopes are listed in `src/forms/api_token_form.rs` |
 | Schema change | edit the record struct → `kiln db diff <snake_case_name>` → review the SQL → `kiln db migrate` |
