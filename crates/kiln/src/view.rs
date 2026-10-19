@@ -58,16 +58,22 @@ impl PendingRender {
         render_value(self.root, self.template, None, self.context.clone())
     }
 
-    /// Variables read by the page, its layout, and everything they include or extend.
-    pub(crate) fn variables(&self) -> Result<HashSet<String>> {
+    /// Variables read by the page, its layout when `with_layout` (it renders with one), and
+    /// everything they include or extend.
+    pub(crate) fn variables(&self, with_layout: bool) -> Result<HashSet<String>> {
         let env = environment(self.root)?;
         let mut seen = HashSet::new();
         let mut variables = HashSet::new();
         collect_variables(&env, self.template, &mut seen, &mut variables)?;
-        if let Some(layout) = self.layout {
+        if let Some(layout) = self.layout.filter(|_| with_layout) {
             collect_variables(&env, layout, &mut seen, &mut variables)?;
         }
         Ok(variables)
+    }
+
+    /// Whether the view itself has a field `name` (which wins over request-wide values).
+    pub(crate) fn defines(&self, name: &str) -> bool {
+        self.context.get_attr(name).is_ok_and(|v| !v.is_undefined())
     }
 }
 
@@ -192,6 +198,9 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
+/// What templates call the value `App::layout_data` computes.
+pub(crate) const LAYOUT_DATA: &str = "layout_data";
+
 /// The response for a view: rendered by kiln after the action (see [`PendingRender`]).
 #[doc(hidden)]
 pub fn respond<V: View>(view: &V) -> Response {
@@ -237,7 +246,7 @@ pub(crate) fn template_variables(root: &'static str) -> serde_json::Value {
     let (env, problems) = build_environment(root);
     let mut globals: Vec<String> = env.globals().map(|(name, _)| name.to_owned()).collect();
     // Set per render or by the template engine itself.
-    globals.extend(["flash", "loop", "self", "super", "caller", "varargs", "kwargs"].map(str::to_owned));
+    globals.extend(["flash", LAYOUT_DATA, "loop", "self", "super", "caller", "varargs", "kwargs"].map(str::to_owned));
     let mut templates = serde_json::Map::new();
     for path in crate::files::walk(std::path::Path::new(root)) {
         let Some(name) =
@@ -304,6 +313,22 @@ fn build_environment(root: &str) -> (Environment<'static>, Vec<HelperProblem>) {
     });
     env.add_function("javascript_importmap", move || javascript_importmap(&assets));
     env.add_filter("datetime", datetime);
+    // Relative times and numbers, in English (see `kiln::format`).
+    env.add_filter("time_ago", |value: Value| -> std::result::Result<String, minijinja::Error> {
+        Ok(timestamp("time_ago", &value)?.map(crate::format::time_ago).unwrap_or_default())
+    });
+    env.add_filter("time_ago_tag", time_ago_tag);
+    env.add_filter("tojson", tojson);
+    env.add_filter("number", number_filter);
+    env.add_filter("compact_number", |value: Value| -> std::result::Result<String, minijinja::Error> {
+        Ok(integer("compact_number", &value)?.map(crate::format::compact_number).unwrap_or_default())
+    });
+    env.add_filter("filesize", |value: Value| -> std::result::Result<String, minijinja::Error> {
+        Ok(integer("filesize", &value)?.map(|n| crate::format::filesize(n.max(0) as u64)).unwrap_or_default())
+    });
+    env.add_filter("duration", |value: Value| -> std::result::Result<String, minijinja::Error> {
+        Ok(integer("duration", &value)?.map(crate::format::duration).unwrap_or_default())
+    });
     // `{{ post.body | rich_text }}`: rich text as HTML, sanitized again on the way out.
     env.add_filter("rich_text", |state: &minijinja::State, html: String| -> Value {
         let clean = crate::RichText::new(&html);
@@ -624,13 +649,100 @@ fn csrf_token() -> std::result::Result<String, minijinja::Error> {
 /// `{{ post.published_at | datetime }}` → `Oct 20, 2026 18:00 UTC`. Takes an optional
 /// strftime format: `{{ starts_at | datetime("%Y-%m-%d") }}`. Missing values render empty.
 fn datetime(value: Value, format: Option<String>) -> std::result::Result<String, minijinja::Error> {
+    let Some(ts) = timestamp("datetime", &value)? else { return Ok(String::new()) };
+    Ok(ts.as_jiff().strftime(format.as_deref().unwrap_or("%b %-d, %Y %H:%M UTC")).to_string())
+}
+
+/// A filter's timestamp argument; none for a missing value.
+fn timestamp(filter: &str, value: &Value) -> std::result::Result<Option<crate::Timestamp>, minijinja::Error> {
+    if value.is_none() || value.is_undefined() {
+        return Ok(None);
+    }
+    value.to_string().parse().map(Some).map_err(|e| {
+        minijinja::Error::new(ErrorKind::InvalidOperation, format!("{filter}: `{value}` isn't a timestamp ({e})"))
+    })
+}
+
+/// A filter's whole-number argument (a float is rounded down); none for a missing value.
+fn integer(filter: &str, value: &Value) -> std::result::Result<Option<i64>, minijinja::Error> {
+    if value.is_none() || value.is_undefined() {
+        return Ok(None);
+    }
+    if let Ok(n) = i64::try_from(value.clone()) {
+        return Ok(Some(n));
+    }
+    match f64::try_from(value.clone()) {
+        Ok(n) if n.is_finite() => Ok(Some(n.floor() as i64)),
+        _ => Err(minijinja::Error::new(ErrorKind::InvalidOperation, format!("{filter}: `{value}` isn't a number"))),
+    }
+}
+
+/// `{{ post.published_at | time_ago_tag }}`: `<time datetime=".." title="Oct 18, 2026 14:03
+/// UTC">2 hours ago</time>`, so the exact time shows on hover.
+fn time_ago_tag(value: Value) -> std::result::Result<Value, minijinja::Error> {
+    let Some(ts) = timestamp("time_ago_tag", &value)? else { return Ok(Value::from_safe_string(String::new())) };
+    Ok(Value::from_safe_string(format!(
+        "<time datetime=\"{ts}\" title=\"{}\">{}</time>",
+        escape_html(&crate::format::full_time(ts)),
+        escape_html(&crate::format::time_ago(ts))
+    )))
+}
+
+/// `{{ config | tojson }}` (`tojson(2)` indents): the value as JSON that can sit inside a
+/// `<script>` element or a single-quoted attribute. `<`, `>`, `&` and `'` are written as
+/// `<`-style escapes (JSON reads them back as the same characters), so neither
+/// `</script>` nor `<!--` can appear and a `'` can't end the attribute; U+2028/U+2029 are
+/// escaped for older JavaScript parsers. A double-quoted attribute is the one place it
+/// doesn't fit (JSON's own `"`s would end it): quote with `'`, or pass the value in
+/// `data={..}` to `form_start`/`button_to`, which writes JSON attributes itself.
+fn tojson(value: &Value, indent: Option<usize>) -> std::result::Result<Value, minijinja::Error> {
+    let json = match indent {
+        Some(width) => {
+            let indent = " ".repeat(width);
+            let mut out = Vec::new();
+            let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+            let mut serializer = serde_json::Serializer::with_formatter(&mut out, formatter);
+            value.serialize(&mut serializer).map(|_| String::from_utf8(out).unwrap_or_default())
+        }
+        None => serde_json::to_string(value),
+    }
+    .map_err(|e| minijinja::Error::new(ErrorKind::InvalidOperation, format!("tojson: {e}")))?;
+    Ok(Value::from_safe_string(json_for_html(&json)))
+}
+
+/// JSON text made safe to place in HTML: in a `<script>` element (`type="application/json"`
+/// or JavaScript) or a single-quoted attribute. Only escapes JSON already allows are used, so
+/// the text parses to the same value.
+pub(crate) fn json_for_html(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        match c {
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '&' => out.push_str("\\u0026"),
+            '\'' => out.push_str("\\u0027"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `{{ stars | number }}` → `2,841`; `{{ ratio | number(2) }}` → `0.67`.
+fn number_filter(value: Value, decimals: Option<usize>) -> std::result::Result<String, minijinja::Error> {
     if value.is_none() || value.is_undefined() {
         return Ok(String::new());
     }
-    let ts: jiff::Timestamp = value.to_string().parse().map_err(|e| {
-        minijinja::Error::new(ErrorKind::InvalidOperation, format!("datetime: `{value}` isn't a timestamp ({e})"))
-    })?;
-    Ok(ts.strftime(format.as_deref().unwrap_or("%b %-d, %Y %H:%M UTC")).to_string())
+    if decimals.is_none()
+        && let Ok(n) = i64::try_from(value.clone())
+    {
+        return Ok(crate::format::number(n));
+    }
+    match f64::try_from(value.clone()) {
+        Ok(n) => Ok(crate::format::number_f64(n, decimals)),
+        Err(_) => Err(minijinja::Error::new(ErrorKind::InvalidOperation, format!("number: `{value}` isn't a number"))),
+    }
 }
 
 /// How `{{ value }}` prints. In HTML templates text is escaped for element content and quoted
@@ -780,7 +892,10 @@ fn path(name: String, kwargs: Kwargs) -> std::result::Result<String, minijinja::
 mod forms {
     use std::fmt::Write as _;
 
-    use minijinja::{Error, ErrorKind, State, Value, context, value::Kwargs};
+    use minijinja::{
+        Error, ErrorKind, State, Value, context,
+        value::{Kwargs, Rest, ValueKind},
+    };
 
     use super::{csrf_token, escape_html as esc};
 
@@ -790,35 +905,129 @@ mod forms {
     /// `confirm_button="Delete"` labels its button and `tone="danger"` marks it destructive.
     pub fn form_start(action: String, kwargs: Kwargs) -> Result<Value, Error> {
         let method: Option<String> = kwargs.get("method")?;
-        let class: Option<String> = kwargs.get("class")?;
+        let mut attrs = Attributes::new("form_start");
+        attrs.set("class", kwargs.get::<Option<String>>("class")?)?;
+        confirm_attributes(&kwargs, &mut attrs)?;
         // `multipart=true` for forms with file fields.
-        let multipart: Option<bool> = kwargs.get("multipart")?;
+        if kwargs.get::<Option<bool>>("multipart")? == Some(true) {
+            attrs.set("enctype", Some("multipart/form-data"))?;
+        }
         // `turbo=false` submits as a full page load, for a response page that must not be a
         // redirect (one showing a new API token once).
-        let turbo: Option<bool> = kwargs.get("turbo")?;
-        let mut extra = confirm_attributes(&kwargs)?;
-        if multipart == Some(true) {
-            extra.push_str(" enctype=\"multipart/form-data\"");
+        if kwargs.get::<Option<bool>>("turbo")? == Some(false) {
+            attrs.set("data-turbo", Some("false"))?;
         }
-        if turbo == Some(false) {
-            extra.push_str(" data-turbo=\"false\"");
-        }
+        attrs.set("id", kwargs.get::<Option<String>>("id")?)?;
+        attrs.extend(&kwargs, "data", "attrs")?;
         kwargs.assert_all_used()?;
-        Ok(Value::from_safe_string(form_open(&action, method.as_deref(), class.as_deref(), &extra)?))
+        Ok(Value::from_safe_string(form_open(&action, method.as_deref(), attrs)?))
+    }
+
+    /// The attributes a helper writes on one element, in order. Each name appears once: the
+    /// same attribute from two arguments (`class=` and `attrs={"class": ..}`) is an error.
+    struct Attributes {
+        helper: &'static str,
+        list: Vec<(String, Option<String>)>,
+    }
+
+    impl Attributes {
+        fn new(helper: &'static str) -> Self {
+            Self { helper, list: vec![] }
+        }
+
+        fn error(&self, message: String) -> Error {
+            Error::new(ErrorKind::InvalidOperation, format!("{}: {message}", self.helper))
+        }
+
+        /// `name="value"`; nothing for none.
+        fn set(&mut self, name: &str, value: Option<impl Into<String>>) -> Result<(), Error> {
+            match value {
+                Some(value) => self.push(name.to_owned(), Some(value.into())),
+                None => Ok(()),
+            }
+        }
+
+        fn push(&mut self, name: String, value: Option<String>) -> Result<(), Error> {
+            let valid = !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'));
+            if !valid {
+                return Err(self.error(format!("`{name}` isn't an attribute name")));
+            }
+            if self.list.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+                return Err(self.error(format!("the `{name}` attribute is given twice")));
+            }
+            self.list.push((name, value));
+            Ok(())
+        }
+
+        /// `data={"controller": "search", "search_url_value": "/s"}` → `data-controller="search"
+        /// data-search-url-value="/s"` (`_` becomes `-`), and `attrs={"aria-label": "Close",
+        /// "hidden": true}` as written. `true` in `attrs` is a bare attribute; `false` and none
+        /// leave it out. Lists and maps are written as JSON.
+        fn extend(&mut self, kwargs: &Kwargs, data: &str, attrs: &str) -> Result<(), Error> {
+            for (arg, prefix) in [(data, "data-"), (attrs, "")] {
+                let Some(map) = kwargs.get::<Option<Value>>(arg)? else { continue };
+                if map.kind() != ValueKind::Map {
+                    return Err(
+                        self.error(format!("`{arg}=` takes a mapping, e.g. {arg}={{\"controller\": \"menu\"}}"))
+                    );
+                }
+                for key in map.try_iter()? {
+                    let value = map.get_item(&key)?;
+                    let key = key.to_string();
+                    let name = if prefix.is_empty() { key } else { format!("{prefix}{}", key.replace('_', "-")) };
+                    if prefix.is_empty() && matches!(name.to_ascii_lowercase().as_str(), "action" | "method" | "type") {
+                        return Err(self.error(format!("`{name}` is set by the helper, not `{arg}=`")));
+                    }
+                    let value = match value.kind() {
+                        ValueKind::Undefined | ValueKind::None => continue,
+                        ValueKind::Bool if prefix.is_empty() => {
+                            if !value.is_true() {
+                                continue;
+                            }
+                            None
+                        }
+                        ValueKind::Bool => Some(value.is_true().to_string()),
+                        ValueKind::Map | ValueKind::Seq => {
+                            Some(serde_json::to_string(&value).map_err(|e| self.error(format!("`{name}`: {e}")))?)
+                        }
+                        _ => Some(value.as_str().map_or_else(|| value.to_string(), str::to_owned)),
+                    };
+                    self.push(name, value)?;
+                }
+            }
+            Ok(())
+        }
+
+        /// ` id="x" class="y" hidden`, escaped for a double-quoted attribute.
+        fn html(&self) -> String {
+            let mut out = String::new();
+            for (name, value) in &self.list {
+                match value {
+                    Some(value) => {
+                        let _ = write!(out, " {name}=\"{}\"", esc(value));
+                    }
+                    None => {
+                        let _ = write!(out, " {name}");
+                    }
+                }
+            }
+            out
+        }
     }
 
     /// `<form ..>` with the CSRF token and method override.
-    fn form_open(action: &str, method: Option<&str>, class: Option<&str>, extra: &str) -> Result<String, Error> {
+    fn form_open(action: &str, method: Option<&str>, attrs: Attributes) -> Result<String, Error> {
         let method = method.unwrap_or("post").to_ascii_lowercase();
-        let class = class.map(|c| format!(" class=\"{}\"", esc(c))).unwrap_or_default();
+        let extra = attrs.html();
         if method == "get" {
-            return Ok(format!("<form method=\"get\" action=\"{}\"{class}{extra}>", esc(action)));
+            return Ok(format!("<form method=\"get\" action=\"{}\"{extra}>", esc(action)));
         }
         if !matches!(method.as_str(), "post" | "patch" | "put" | "delete") {
-            return Err(Error::new(ErrorKind::InvalidOperation, format!("form_start: unknown method `{method}`")));
+            return Err(attrs.error(format!("unknown method `{method}`")));
         }
         let mut html = format!(
-            "<form method=\"post\" action=\"{}\"{class}{extra}>\n<input type=\"hidden\" name=\"_csrf\" value=\"{}\">",
+            "<form method=\"post\" action=\"{}\"{extra}>\n<input type=\"hidden\" name=\"_csrf\" value=\"{}\">",
             esc(action),
             esc(&csrf_token()?)
         );
@@ -830,39 +1039,55 @@ mod forms {
     }
 
     /// `data-turbo-confirm` and friends from `confirm=`, `confirm_button=`, `tone=`.
-    fn confirm_attributes(kwargs: &Kwargs) -> Result<String, Error> {
-        let mut attrs = String::new();
-        if let Some(message) = kwargs.get::<Option<String>>("confirm")? {
-            let _ = write!(attrs, " data-turbo-confirm=\"{}\"", esc(&message));
-        }
-        if let Some(label) = kwargs.get::<Option<String>>("confirm_button")? {
-            let _ = write!(attrs, " data-confirm-button=\"{}\"", esc(&label));
-        }
-        if let Some(tone) = kwargs.get::<Option<String>>("tone")? {
-            let _ = write!(attrs, " data-confirm-tone=\"{}\"", esc(&tone));
-        }
-        Ok(attrs)
+    fn confirm_attributes(kwargs: &Kwargs, attrs: &mut Attributes) -> Result<(), Error> {
+        attrs.set("data-turbo-confirm", kwargs.get::<Option<String>>("confirm")?)?;
+        attrs.set("data-confirm-button", kwargs.get::<Option<String>>("confirm_button")?)?;
+        attrs.set("data-confirm-tone", kwargs.get::<Option<String>>("tone")?)
     }
 
     /// `{{ button_to("Delete", path("posts::destroy", slug=post.slug), method="delete",
     /// confirm="Delete this post?", tone="danger") }}`: a one-button form, CSRF included.
-    /// `class=` goes on the form (always also `button-to`), `button_class=` on the button.
-    pub fn button_to(label: String, action: String, kwargs: Kwargs) -> Result<Value, Error> {
+    /// `class=`, `id=`, `data={..}` and `attrs={..}` go on the form (its class is always also
+    /// `button-to`); `button_class=`, `button_data={..}` and `button_attrs={..}` on the button.
+    /// A safe label (a helper macro's output) is used as markup, and so is a call block:
+    /// `{% call button_to(path("posts::destroy", slug=post.slug), method="delete") %}{{ icon("trash") }} Delete{% endcall %}`.
+    pub fn button_to(state: &State, args: Rest<Value>, kwargs: Kwargs) -> Result<Value, Error> {
+        let caller: Option<Value> = kwargs.get("caller")?;
+        let (label, action) = match (&caller, args.0.as_slice()) {
+            (Some(caller), [action]) => (caller.call(state, &[])?, action.clone()),
+            (None, [label, action]) => (label.clone(), action.clone()),
+            (Some(_), _) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidOperation,
+                    "button_to: with a call block, pass just the path: `{% call button_to(path(..), method=\"delete\") %}..{% endcall %}`",
+                ));
+            }
+            (None, _) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidOperation,
+                    "button_to: takes a label and a path, e.g. `button_to(\"Delete\", path(..), method=\"delete\")`",
+                ));
+            }
+        };
+        let label = if label.is_safe() { label.to_string() } else { esc(&label.to_string()) };
+        let action = action.as_str().map_or_else(|| action.to_string(), str::to_owned);
         let method: Option<String> = kwargs.get("method")?;
-        let class: Option<String> = kwargs.get("class")?;
-        let button_class: Option<String> = kwargs.get("button_class")?;
-        let confirm = confirm_attributes(&kwargs)?;
-        kwargs.assert_all_used()?;
-        let class = match class {
+        let mut form = Attributes::new("button_to");
+        let class = match kwargs.get::<Option<String>>("class")? {
             Some(class) => format!("button-to {class}"),
             None => "button-to".to_owned(),
         };
-        let open = form_open(&action, Some(method.as_deref().unwrap_or("post")), Some(&class), &confirm)?;
-        let button_class = button_class.map(|c| format!(" class=\"{}\"", esc(&c))).unwrap_or_default();
-        Ok(Value::from_safe_string(format!(
-            "{open}\n<button type=\"submit\"{button_class}>{}</button></form>",
-            esc(&label)
-        )))
+        form.set("class", Some(class))?;
+        confirm_attributes(&kwargs, &mut form)?;
+        form.set("id", kwargs.get::<Option<String>>("id")?)?;
+        form.extend(&kwargs, "data", "attrs")?;
+        let mut button = Attributes::new("button_to");
+        button.set("type", Some("submit"))?;
+        button.set("class", kwargs.get::<Option<String>>("button_class")?)?;
+        button.extend(&kwargs, "button_data", "button_attrs")?;
+        kwargs.assert_all_used()?;
+        let open = form_open(&action, Some(method.as_deref().unwrap_or("post")), form)?;
+        Ok(Value::from_safe_string(format!("{open}\n<button{}>{label}</button></form>", button.html())))
     }
 
     pub fn form_end() -> Value {
@@ -1247,6 +1472,8 @@ mod tests {
             assert!(globals.contains(&name), "{name} is a global for kiln check: {globals:?}");
         }
         assert_eq!(analysis["helper_errors"], serde_json::json!([]));
+        // `kiln check` treats `layout_data` (from `app.layout_data(..)`) like `flash`.
+        assert!(analysis["globals"].as_array().unwrap().iter().any(|g| g == "layout_data"), "{analysis}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1326,5 +1553,136 @@ mod tests {
         let mail = render_mail(root, "md.html.jinja", None, &context).unwrap();
         assert!(mail.starts_with("<div class=\"kiln-markdown\">"), "{mail}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Renders `source` as an HTML template with `context`.
+    fn render_html(name: &str, source: &str, context: Value) -> Result<String> {
+        let dir = std::env::temp_dir().join(format!("kiln-view-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("t.html.jinja"), source).unwrap();
+        let root: &'static str = Box::leak(dir.display().to_string().into_boxed_str());
+        let html = render(root, "t.html.jinja", None, &context);
+        let _ = std::fs::remove_dir_all(&dir);
+        html
+    }
+
+    #[test]
+    fn time_and_number_filters() {
+        let two_hours = crate::Timestamp::hours_ago(2) - jiff::SignedDuration::from_mins(10);
+        let context = context! {
+            at => two_hours, missing => (), stars => 2841, big => 1_250_000, ratio => 0.6667, bytes => 2765, secs => 271,
+        };
+        let html = render_html(
+            "format",
+            "{{ at | time_ago }}|{{ missing | time_ago }}|{{ stars | number }}|{{ ratio | number(2) }}|{{ big | compact_number }}|{{ bytes | filesize }}|{{ secs | duration }}|{{ 271.9 | duration }}",
+            context.clone(),
+        )
+        .unwrap();
+        assert_eq!(html, "2 hours ago||2,841|0.67|1.2M|2.7 KB|4m 31s|4m 31s");
+
+        let tag = render_html("format-tag", "{{ at | time_ago_tag }}", context.clone()).unwrap();
+        assert_eq!(
+            tag,
+            format!(
+                "<time datetime=\"{two_hours}\" title=\"{}\">2 hours ago</time>",
+                crate::format::full_time(two_hours)
+            )
+        );
+        let error = render_html("format-error", "{{ \"soon\" | time_ago }}", context.clone()).unwrap_err();
+        assert!(format!("{error:#}").contains("time_ago: `soon` isn't a timestamp"), "{error:#}");
+        let error = render_html("format-error2", "{{ \"many\" | number }}", context).unwrap_err();
+        assert!(format!("{error:#}").contains("number: `many` isn't a number"), "{error:#}");
+    }
+
+    #[test]
+    fn form_helpers_take_ids_data_and_attributes() {
+        let form = render_html(
+            "form-attrs",
+            r#"{{ form_start("/search", method="get", id="search", class="f", data={"controller": "search", "search_url_value": "/s?q=<x>", "search_config_value": {"a": "</script>"}, "turbo_frame": "results", "skip": none}, attrs={"aria-label": "Search \"posts\"", "novalidate": true, "hidden": false}) }}"#,
+            context! {},
+        )
+        .unwrap();
+        assert!(form.starts_with("<form method=\"get\" action=\"/search\" class=\"f\" id=\"search\" "), "{form}");
+        for attr in [
+            " data-controller=\"search\"",
+            " data-search-url-value=\"/s?q=&lt;x&gt;\"",
+            " data-search-config-value=\"{&quot;a&quot;:&quot;&lt;/script&gt;&quot;}\"",
+            " data-turbo-frame=\"results\"",
+            " aria-label=\"Search &quot;posts&quot;\"",
+            " novalidate",
+        ] {
+            assert!(form.contains(attr), "{attr} in {form}");
+        }
+        assert!(!form.contains("skip") && !form.contains("hidden"), "{form}");
+
+        for (args, message) in [
+            (r#"attrs={"on click": "x"}"#, "form_start: `on click` isn't an attribute name"),
+            (r#"class="a", attrs={"class": "b"}"#, "form_start: the `class` attribute is given twice"),
+            (r#"attrs={"action": "/elsewhere"}"#, "form_start: `action` is set by the helper"),
+            (r#"data="menu""#, "form_start: `data=` takes a mapping"),
+        ] {
+            let source = format!("{{{{ form_start(\"/x\", method=\"get\", {args}) }}}}");
+            let error = render_html("form-attrs-error", &source, context! {}).unwrap_err();
+            assert!(format!("{error:#}").contains(message), "{message}: {error:#}");
+        }
+    }
+
+    #[test]
+    fn button_to_takes_markup_from_a_call_block_or_a_safe_label() {
+        let scope = session::RequestScope::default();
+        let html = session::REQUEST
+            .sync_scope(scope, || {
+                render_html(
+                    "button-to",
+                    concat!(
+                        r#"{% call button_to("/posts/1", method="delete", id="del", data={"action": "menu#close"}, button_class="icon", button_attrs={"aria-label": "Delete"}) %}<svg></svg> Delete <b>{{ name }}</b>{% endcall %}"#,
+                        "|{{ button_to(icon, \"/a\") }}|{{ button_to(\"<i>\", \"/b\") }}"
+                    ),
+                    context! { name => "<x>", icon => Value::from_safe_string("<svg></svg>".into()) },
+                )
+            })
+            .unwrap();
+        let (call, rest) = html.split_once('|').unwrap();
+        assert!(
+            call.starts_with(
+                "<form method=\"post\" action=\"/posts/1\" class=\"button-to\" id=\"del\" data-action=\"menu#close\">"
+            ),
+            "{call}"
+        );
+        assert!(call.contains("<input type=\"hidden\" name=\"_method\" value=\"DELETE\">"), "{call}");
+        assert!(
+            call.ends_with(
+                "<button type=\"submit\" class=\"icon\" aria-label=\"Delete\"><svg></svg> Delete <b>&lt;x&gt;</b></button></form>"
+            ),
+            "{call}"
+        );
+        let (safe, plain) = rest.split_once('|').unwrap();
+        assert!(safe.ends_with("<button type=\"submit\"><svg></svg></button></form>"), "{safe}");
+        assert!(plain.ends_with("<button type=\"submit\">&lt;i&gt;</button></form>"), "{plain}");
+
+        let error = render_html("button-to-error", "{{ button_to(\"/a\") }}", context! {}).unwrap_err();
+        assert!(format!("{error:#}").contains("button_to: takes a label and a path"), "{error:#}");
+    }
+
+    #[test]
+    fn tojson_cannot_break_out_of_a_script_or_attribute() {
+        let nasty = "</script><script>alert(1)</script> <!-- & ' \" \u{2028}\u{2029}";
+        let context = context! { v => context! { name => nasty, n => 3, list => vec![1, 2] } };
+        let html = render_html(
+            "tojson",
+            "<script type=\"application/json\">{{ v | tojson }}</script><div data-v='{{ v | tojson }}'></div>|{{ none | tojson }}|{{ [1] | tojson(2) }}",
+            context,
+        )
+        .unwrap();
+        let (script, rest) =
+            html.strip_prefix("<script type=\"application/json\">").unwrap().split_once("</script>").unwrap();
+        for bad in ["<", ">", "&", "'", "\u{2028}", "\u{2029}"] {
+            assert!(!script.contains(bad), "{bad:?} in {script}");
+        }
+        let parsed: serde_json::Value = serde_json::from_str(script).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "name": nasty, "n": 3, "list": [1, 2] }));
+        let (attribute, rest) = rest.strip_prefix("<div data-v='").unwrap().split_once('\'').unwrap();
+        assert_eq!(attribute, script);
+        assert_eq!(rest, "></div>|null|[\n  1\n]");
     }
 }

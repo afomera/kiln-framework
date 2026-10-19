@@ -5,7 +5,7 @@ use blog::{
     notifications::CommentPosted,
     records::*,
 };
-use kiln::{prelude::*, testing::TestApp};
+use kiln::{prelude::*, testing::TestApp, time::SignedDuration};
 
 async fn comment_on_ada_post(app: &TestApp) -> Result<(User, Post)> {
     let ada = app.create_with::<User>(|u| u.email = "ada@example.com".into()).await?;
@@ -49,6 +49,37 @@ async fn the_inbox_page_marks_notifications_read(app: TestApp) -> Result {
         .assert_redirect(&blog::actions::posts::show::path(&post.slug));
     assert_eq!(app.db.unread_notifications(&ada).await?, 0);
     client.patch_form(notifications::read_all::path(), &[]).await.assert_flash("Marked 0 read.");
+    Ok(())
+}
+
+#[kiln::test]
+async fn the_nav_counts_unread_notifications_from_layout_data(app: TestApp) -> Result {
+    let (ada, post) = comment_on_ada_post(&app).await?;
+    app.perform_enqueued_jobs().await?;
+    let client = app.sign_in_as(&ada);
+    let page = blog::actions::posts::show::path(&post.slug);
+    client.get_html(&page).await.assert_status(200).assert_contains("id=\"nav-notifications\">Notifications (1)</a>");
+    client.patch_form(notifications::read_all::path(), &[]).await.assert_flash("Marked 1 read.");
+    client.get_html(&page).await.assert_contains("id=\"nav-notifications\">Notifications</a>");
+    // Signed out, the hook gets no user (and the nav has no link).
+    app.client().get_html(&page).await.assert_status(200).assert_not_contains("nav-notifications");
+    // A Turbo Frame request renders no layout (so its `layout_data` isn't computed).
+    let frame = app.sign_in_as(&ada).header("Turbo-Frame", "comments").get_html(&page).await;
+    frame.assert_status(200).assert_not_contains("nav-notifications");
+    Ok(())
+}
+
+#[kiln::test]
+async fn the_inbox_says_how_long_ago_by_the_test_clock(app: TestApp) -> Result {
+    let (ada, _) = comment_on_ada_post(&app).await?;
+    app.perform_enqueued_jobs().await?;
+    let client = app.sign_in_as(&ada);
+    client.get_html(notifications::index::path()).await.assert_contains(">just now</time>");
+    // Rounded down: 2h29m is still "2 hours".
+    app.travel(SignedDuration::from_mins(149));
+    client.get_html(notifications::index::path()).await.assert_contains(">2 hours ago</time>");
+    app.travel(SignedDuration::from_hours(24 * 4));
+    client.get_html(notifications::index::path()).await.assert_contains(">4 days ago</time>");
     Ok(())
 }
 

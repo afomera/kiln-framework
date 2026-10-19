@@ -6,7 +6,7 @@
   {% for sign_in in sign_ins %}
   <li id="sign_in_{{ sign_in.id }}">
     <strong>{{ sign_in.device }}</strong>{% if sign_in.current %} · this browser{% endif %}
-    <br><small>{{ sign_in.ip or "Unknown address" }} · signed in {{ sign_in.created_at | datetime }} · last active {{ sign_in.last_seen_at | datetime }}</small>
+    <br><small>{{ sign_in.ip or "Unknown address" }} · signed in {{ sign_in.created_at | datetime }} · last active {{ sign_in.last_seen_at | time_ago }}</small>
     {% if not sign_in.current %}
     {{ button_to("Sign out", path("sign_ins::destroy", id=sign_in.id), method="delete", class="inline", confirm="Sign out " ~ sign_in.device ~ "?", confirm_button="Sign out") }}
     {% endif %}

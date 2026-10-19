@@ -3,6 +3,7 @@ pub mod api_tokens;
 pub mod bookmarks;
 pub mod comments;
 pub mod current_user;
+pub mod layout;
 pub mod notification_settings;
 pub mod notifications;
 pub mod password_settings;

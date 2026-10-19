@@ -21,7 +21,12 @@ async fn create_use_and_revoke_a_token(app: TestApp) -> Result {
     let secret = secret_in(&page.text);
 
     // The list shows the token's name and hint, never the token.
-    browser.get_html(api_tokens::index::path()).await.assert_contains("Laptop").assert_not_contains(&secret);
+    browser
+        .get_html(api_tokens::index::path())
+        .await
+        .assert_contains("Laptop")
+        .assert_not_contains(&secret)
+        .assert_contains("title=\"Revoke Laptop\"><span aria-hidden=\"true\">&times;</span> Revoke</button>");
 
     let api = app.client().bearer(&secret);
     let me = api.get(api::me::show::path()).await;

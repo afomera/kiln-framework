@@ -192,16 +192,25 @@ async fn current_user_is_loaded_once_per_page(app: TestApp) -> Result {
     let client = app.sign_in_as(&user);
     client.get(posts::index::path()).await; // stores the sign-in
 
-    // posts::new takes Current<User>; the layout reads current_user: one user query total.
+    // posts::new takes Current<User>; the layout reads current_user: one user query total,
+    // plus the unread count `layout_data` (src/views/layout.rs) adds.
     let before = app.db.query_count();
     client.get_html(posts::new::path()).await.assert_status(200);
+    assert_eq!(app.db.query_count() - before, 2);
+
+    // A Turbo Frame request renders no layout: no unread count.
+    let frame = app.sign_in_as(&user).header("Turbo-Frame", "form");
+    frame.get(posts::index::path()).await; // stores the sign-in
+    let before = app.db.query_count();
+    frame.get_html(posts::new::path()).await.assert_status(200);
     assert_eq!(app.db.query_count() - before, 1);
 
-    // posts::index doesn't take the user; the layout loads it once (plus posts, authors, comments).
+    // posts::index doesn't take the user; the layout loads it once (plus posts, authors,
+    // comments and the unread count).
     app.create::<Post>().await?;
     let before = app.db.query_count();
     client.get_html(posts::index::path()).await.assert_status(200);
-    assert_eq!(app.db.query_count() - before, 4);
+    assert_eq!(app.db.query_count() - before, 5);
     Ok(())
 }
 

@@ -22,6 +22,7 @@ mod error;
 mod error_page;
 mod files;
 pub mod form;
+pub mod format;
 pub mod http;
 pub mod jobs;
 pub mod join;
