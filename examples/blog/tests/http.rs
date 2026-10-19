@@ -7,7 +7,7 @@ use kiln::{prelude::*, testing::TestApp};
 async fn app() -> TestApp {
     let migrations = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/db/migrations"));
     let app = TestApp::configured(migrations, blog::app::configure).await.unwrap();
-    blog::seed(app.db.clone()).await.unwrap();
+    blog::seed(app.ctx()).await.unwrap();
     app
 }
 

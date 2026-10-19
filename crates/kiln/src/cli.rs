@@ -15,10 +15,43 @@ use std::{
 };
 
 use crate::{
-    App, Db, Error, Result, SecretKey, Snapshot, diff, migrate::records, routes, routes_table, write_migration,
+    App, Ctx, Db, Error, Result, SecretKey, Snapshot, diff, migrate::records, routes, routes_table, write_migration,
 };
 
-type Seed = Box<dyn FnOnce(Db) -> Pin<Box<dyn Future<Output = Result>>>>;
+type Seed = Box<dyn FnOnce(Ctx) -> Pin<Box<dyn Future<Output = Result>>>>;
+
+/// A seed function [`Cli::seed`] takes: `async fn seed(ctx: &Ctx) -> Result`, which sees the
+/// configured app (its services, storage and config, so `ctx.get::<Git>()` and
+/// `ctx.attach(..)` work), or the older `async fn seed(db: Db) -> Result`.
+pub trait SeedFn<Marker>: 'static {
+    #[doc(hidden)]
+    fn into_seed(self) -> Seed;
+}
+
+#[doc(hidden)]
+pub struct TakesCtx;
+
+#[doc(hidden)]
+pub struct TakesDb;
+
+impl<F> SeedFn<TakesCtx> for F
+where
+    F: AsyncFnOnce(&Ctx) -> Result + 'static,
+{
+    fn into_seed(self) -> Seed {
+        Box::new(move |ctx| Box::pin(async move { self(&ctx).await }))
+    }
+}
+
+impl<F, Fut> SeedFn<TakesDb> for F
+where
+    F: FnOnce(Db) -> Fut + 'static,
+    Fut: Future<Output = Result> + 'static,
+{
+    fn into_seed(self) -> Seed {
+        Box::new(move |ctx| Box::pin(self(ctx.db.clone())))
+    }
+}
 type Configure = Box<dyn FnOnce(App) -> Result<App>>;
 
 pub struct Cli {
@@ -94,13 +127,11 @@ impl Cli {
         self
     }
 
-    /// Sample data for `db seed` and `db reset`.
-    pub fn seed<F, Fut>(mut self, seed: F) -> Self
-    where
-        F: FnOnce(Db) -> Fut + 'static,
-        Fut: Future<Output = Result> + 'static,
-    {
-        self.seed = Some(Box::new(move |db| Box::pin(seed(db))));
+    /// Sample data for `db seed` and `db reset`: `async fn seed(ctx: &Ctx) -> Result`, run
+    /// with the app as `configure` sets it up (services, storage, config). A seed taking
+    /// `db: Db` still works.
+    pub fn seed<M>(mut self, seed: impl SeedFn<M>) -> Self {
+        self.seed = Some(seed.into_seed());
         self
     }
 
@@ -798,25 +829,28 @@ impl Cli {
         Ok(())
     }
 
-    async fn run_seed(self) -> Result {
-        let db = self.db().await?;
-        match self.seed {
-            Some(seed) => {
-                seed(db).await?;
-                println!("Seeded.");
-                Ok(())
-            }
-            None => Err(Error::BadRequest("this app has no seed function; pass one to `Cli::seed`".into())),
-        }
+    async fn run_seed(mut self) -> Result {
+        let Some(seed) = self.seed.take() else {
+            return Err(Error::BadRequest("this app has no seed function; pass one to `Cli::seed`".into()));
+        };
+        let app = self.app().await?;
+        seed(app.ctx().clone()).await?;
+        println!("Seeded.");
+        Ok(())
     }
 
-    async fn reset(self, allow_remote: bool) -> Result {
+    async fn reset(mut self, allow_remote: bool) -> Result {
         let url = self.database_url();
         let target = redact_database_url(&url);
         let pghost = std::env::var("PGHOST").ok();
         reset_allowed(&url, crate::config::is_production(), allow_remote, pghost.as_deref())
             .map_err(Error::BadRequest)?;
         println!("Resetting {target}");
+        // The files Kiln stored for this database's attachments go with it; read their keys
+        // while the rows still exist.
+        let old = self.db().await?;
+        let blobs = crate::storage::blob_keys(&old).await;
+        old.close().await;
         if crate::dialect::for_url(&url)?.name() == "postgres" {
             self.db().await?.execute_script("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").await?;
         } else if let Some(path) = sqlite_file(&url) {
@@ -826,7 +860,32 @@ impl Cli {
         }
         let applied = self.db().await?.migrate(&self.migrations_dir()).await?;
         println!("Recreated {target} ({} migrations).", applied.len());
-        self.run_seed().await
+        let seed = self.seed.take();
+        let app = self.app().await?;
+        if !blobs.is_empty() {
+            let storage = app.ctx().storage()?;
+            match storage.local_dir() {
+                Some(dir) => {
+                    let removed = crate::storage::remove_blobs(&storage, &blobs).await?;
+                    println!(
+                        "Removed {removed} stored file(s) under {} that the old database's attachments held.",
+                        dir.display()
+                    );
+                }
+                None => println!(
+                    "Left {} stored file(s) in {storage:?}: `db reset` only clears files on local disk.",
+                    blobs.len()
+                ),
+            }
+        }
+        match seed {
+            Some(seed) => {
+                seed(app.ctx().clone()).await?;
+                println!("Seeded.");
+                Ok(())
+            }
+            None => Err(Error::BadRequest("this app has no seed function; pass one to `Cli::seed`".into())),
+        }
     }
 }
 

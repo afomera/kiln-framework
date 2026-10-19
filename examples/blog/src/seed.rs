@@ -2,9 +2,10 @@ use kiln::prelude::*;
 
 use crate::records::*;
 
-/// Sample content for development. Does nothing if there are already users.
-pub async fn seed(db: Db) -> Result {
-    let db = &db;
+/// Sample content for development. Does nothing if there are already users. `ctx` is the
+/// configured app, so files can be stored with `ctx.attach(..)`.
+pub async fn seed(ctx: &Ctx) -> Result {
+    let db = &ctx.db;
     if User::query().exists(db).await? {
         return Ok(());
     }
@@ -59,7 +60,15 @@ pub async fn seed(db: Db) -> Result {
         let required =
             PostRequired { slug: slug.into(), title: title.into(), body: body.into(), status, author_id: author.id };
         let written = Timestamp::days_ago(days_ago);
+        // The first post gets a cover image, stored like an upload.
+        let cover = match slug {
+            "hello-kiln" => {
+                Some(ctx.attach("kiln.svg", "image/svg+xml", &include_bytes!("../assets/images/mark.svg")[..]).await?)
+            }
+            _ => None,
+        };
         let post = Post::insert(NewPost {
+            cover,
             editor_id,
             published_at: (status == PostStatus::Published).then_some(written),
             ..NewPost::new(required)
