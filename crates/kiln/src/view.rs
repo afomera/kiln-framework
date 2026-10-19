@@ -309,6 +309,7 @@ fn build_environment(root: &str) -> (Environment<'static>, Vec<HelperProblem>) {
         Ok(timestamp("time_ago", &value)?.map(crate::format::time_ago).unwrap_or_default())
     });
     env.add_filter("time_ago_tag", time_ago_tag);
+    env.add_filter("tojson", tojson);
     env.add_filter("number", number_filter);
     env.add_filter("compact_number", |value: Value| -> std::result::Result<String, minijinja::Error> {
         Ok(integer("compact_number", &value)?.map(crate::format::compact_number).unwrap_or_default())
@@ -676,6 +677,47 @@ fn time_ago_tag(value: Value) -> std::result::Result<Value, minijinja::Error> {
         escape_html(&crate::format::full_time(ts)),
         escape_html(&crate::format::time_ago(ts))
     )))
+}
+
+/// `{{ config | tojson }}` (`tojson(2)` indents): the value as JSON that can sit inside a
+/// `<script>` element or a single-quoted attribute. `<`, `>`, `&` and `'` are written as
+/// `<`-style escapes (JSON reads them back as the same characters), so neither
+/// `</script>` nor `<!--` can appear and a `'` can't end the attribute; U+2028/U+2029 are
+/// escaped for older JavaScript parsers. A double-quoted attribute is the one place it
+/// doesn't fit (JSON's own `"`s would end it): quote with `'`, or pass the value in
+/// `data={..}` to `form_start`/`button_to`, which writes JSON attributes itself.
+fn tojson(value: &Value, indent: Option<usize>) -> std::result::Result<Value, minijinja::Error> {
+    let json = match indent {
+        Some(width) => {
+            let indent = " ".repeat(width);
+            let mut out = Vec::new();
+            let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+            let mut serializer = serde_json::Serializer::with_formatter(&mut out, formatter);
+            value.serialize(&mut serializer).map(|_| String::from_utf8(out).unwrap_or_default())
+        }
+        None => serde_json::to_string(value),
+    }
+    .map_err(|e| minijinja::Error::new(ErrorKind::InvalidOperation, format!("tojson: {e}")))?;
+    Ok(Value::from_safe_string(json_for_html(&json)))
+}
+
+/// JSON text made safe to place in HTML: in a `<script>` element (`type="application/json"`
+/// or JavaScript) or a single-quoted attribute. Only escapes JSON already allows are used, so
+/// the text parses to the same value.
+pub(crate) fn json_for_html(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        match c {
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '&' => out.push_str("\\u0026"),
+            '\'' => out.push_str("\\u0027"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// `{{ stars | number }}` → `2,841`; `{{ ratio | number(2) }}` → `0.67`.
@@ -1426,5 +1468,27 @@ mod tests {
         assert!(format!("{error:#}").contains("time_ago: `soon` isn't a timestamp"), "{error:#}");
         let error = render_html("format-error2", "{{ \"many\" | number }}", context).unwrap_err();
         assert!(format!("{error:#}").contains("number: `many` isn't a number"), "{error:#}");
+    }
+
+    #[test]
+    fn tojson_cannot_break_out_of_a_script_or_attribute() {
+        let nasty = "</script><script>alert(1)</script> <!-- & ' \" \u{2028}\u{2029}";
+        let context = context! { v => context! { name => nasty, n => 3, list => vec![1, 2] } };
+        let html = render_html(
+            "tojson",
+            "<script type=\"application/json\">{{ v | tojson }}</script><div data-v='{{ v | tojson }}'></div>|{{ none | tojson }}|{{ [1] | tojson(2) }}",
+            context,
+        )
+        .unwrap();
+        let (script, rest) =
+            html.strip_prefix("<script type=\"application/json\">").unwrap().split_once("</script>").unwrap();
+        for bad in ["<", ">", "&", "'", "\u{2028}", "\u{2029}"] {
+            assert!(!script.contains(bad), "{bad:?} in {script}");
+        }
+        let parsed: serde_json::Value = serde_json::from_str(script).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "name": nasty, "n": 3, "list": [1, 2] }));
+        let (attribute, rest) = rest.strip_prefix("<div data-v='").unwrap().split_once('\'').unwrap();
+        assert_eq!(attribute, script);
+        assert_eq!(rest, "></div>|null|[\n  1\n]");
     }
 }

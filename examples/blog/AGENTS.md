@@ -376,6 +376,12 @@ generated tests passing.
 - **Templates are strict:** an undefined value is an error, not an empty string. Output in
   `.html` templates is HTML-escaped (`&`, `<`, `>`, `"`, `'`; slashes stay as they are, so
   `{{ blob.path }}` prints `src/lib.rs`); `.txt` templates aren't escaped.
+- **Data for JavaScript:** `<script type="application/json" id="tree">{{ tree | tojson }}</script>`
+  (read it with `JSON.parse(el.textContent)`), or in a **single-quoted** attribute:
+  `data-tree-paths-value='{{ paths | tojson }}'`. `tojson` writes `<`, `>`, `&`, `'` (and
+  U+2028/9) as `<`-style escapes, so the value can't close the script, open a comment or end
+  the attribute; `tojson(2)` indents. Never put it in a double-quoted attribute (its `"`s end
+  it), and don't hand-build JSON strings in views for this.
 - **Template helpers** are the app's own filters, functions and macros, usable in every
   template (pages, layouts, includes, mail) without an import, and known to `kiln check`
   (`kiln introspect template_helpers` lists them). Rust ones are plain fns with typed
@@ -388,7 +394,7 @@ generated tests passing.
   sees only its arguments, not the page's variables. A name Kiln already uses (`path`,
   `upper`, `markdown`, ..) or two helpers with one name stop the app at boot (K0406);
   `#[kiln::template_filter(name = "hue")]` registers a fn under another name. The formatting
-  filters (`time_ago`, `time_ago_tag`, `number`, `compact_number`, `filesize`, `duration`) are
+  filters (`time_ago`, `time_ago_tag`, `number`, `compact_number`, `filesize`, `duration`, `tojson`) are
   built-ins too: an app filter of the same name written before Kiln had them now fails K0406;
   delete it and use Kiln's (or rename it if it prints something different).
 - **Inside a record's own file**, column and relation names are constants (`title`,
