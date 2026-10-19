@@ -387,9 +387,15 @@ generated tests passing.
 - **Inside a record's own file**, column and relation names are constants (`title`,
   `owner`), so a binding or parameter with one of those names won't compile there; pick
   another name (the generated `owned_by` uses `who`).
-- **Queries:** filters `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `like`, `is_null`, `is_not_null`, combined with
+- **Queries:** filters `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `is_in`, `not_in`, `like`, `ilike`, `is_null`, `is_not_null`, combined with
   `.and(..)` / `.or(..)`; then `.order(..)`, `.limit(n)`, and `.all`, `.one`, `.one_or_404`, `.count`, `.exists`,
-  `.delete_all` (each takes `&ctx.db`). A request that clashes with a record's state (already sent) is
+  `.delete_all` (each takes `&ctx.db`).
+  - Lists: `issue::state.is_in([State::Open, State::Draft])`, `repository::id.is_in(&ids)` (values or references, any
+    column type); `not_in(..)` likewise. An empty list is no rows for `is_in` and every row for `not_in`, never invalid
+    SQL. On a nullable column `is_in([None, Some(id)])` also matches NULL; `not_in` never matches NULL (like `ne`).
+  - Text: `like`/`ilike` work on `String` and `Option<String>` columns. `like` is case-sensitive on Postgres but not on
+    SQLite (ASCII); `ilike` is case-insensitive on both. Never put user input in a pattern raw:
+    `user::name.ilike(kiln::like::contains(&q))` (also `starts_with`, `ends_with`, `escape`) escapes `%`, `_` and `\`. A request that clashes with a record's state (already sent) is
   `Err(Error::Conflict("Already sent.".into()))`: a 409. For a browser, turn it into a flash:
   `Redirect::to(back).notice_or_alert(ops::send(&ctx, x).await, "Sent.")`.
   - Joins, through a `belongs_to`/`has_one`: `Repository::query().join(repository::namespace).filter(namespace::path.eq(p))
@@ -398,7 +404,8 @@ generated tests passing.
     conditions; `.filter` again for another's.
   - Through a `has_many` (no join, it would repeat rows): `post::id.in_query(Comment::query().filter(..).select(comment::post_id))`,
     or `repository::namespace_id.in_query(Namespace::query().filter(..))` (a `Query<U>` yields its ids); `not_in_query`
-    too. Union access rules with `.or(..)`. `.select(col).all(&db)` plucks one column (of a joined table too).
+    too. Union access rules with `.or(..)`. `.select(col).all(&db)` plucks one column (of a joined table too);
+    `.filter`, `.order`, `.limit` work before or after `.select`.
   - Aggregates: `.count_by(reaction::emoji, &db)` → `Vec<(String, i64)>`; `.sum(col, &db)` (0 when empty),
     `.max(col, &db)` / `.min(..)` → `Option`. Queries are `Clone` to reuse a base scope.
   - Counters: `Repository::update(id).increment(repository::issue_count, 1).run(&tx).await?.issue_count` is

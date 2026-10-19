@@ -69,6 +69,98 @@ async fn subqueries_keep_their_limits_and_binds_in_order(app: TestApp) -> Result
 }
 
 #[kiln::test]
+async fn list_filters_take_every_column_type_and_empty_lists(app: TestApp) -> Result {
+    let ada = app.create_with::<User>(|u| u.name = "Ada".into()).await?;
+    let draft = app
+        .create_with::<Post>(|p| (p.title, p.status, p.author_id) = ("Draft".into(), PostStatus::Draft, ada.id))
+        .await?;
+    let edited = app
+        .create_with::<Post>(|p| (p.title, p.author_id, p.editor_id) = ("Edited".into(), ada.id, Some(ada.id)))
+        .await?;
+    let archived = app.create_with::<Post>(|p| (p.title, p.status) = ("Archived".into(), PostStatus::Archived)).await?;
+    let db = &app.db;
+    let sorted =
+        |q: Query<Post>| async move { Ok::<_, kiln::Error>(titles(&q.order(post::id.asc()).all(db).await?).join(",")) };
+
+    // Enums, strings (`&str` or `String`), ids by value or by reference.
+    let q = Post::query().filter(post::status.is_in([PostStatus::Draft, PostStatus::Archived]));
+    assert_eq!(sorted(q).await?, "Draft,Archived");
+    assert_eq!(sorted(Post::query().filter(post::title.is_in(["Edited", "Nope"]))).await?, "Edited");
+    let ids = vec![draft.id, archived.id];
+    assert_eq!(sorted(Post::query().filter(post::id.is_in(&ids))).await?, "Draft,Archived");
+    assert_eq!(sorted(Post::query().filter(post::id.not_in(&ids))).await?, "Edited");
+    let q = Post::query().filter(post::status.not_in([PostStatus::Draft]));
+    assert_eq!(sorted(q).await?, "Edited,Archived");
+
+    // Nullable columns take plain values; `None` matches NULL in `is_in` and is ignored by `not_in`.
+    assert_eq!(sorted(Post::query().filter(post::editor_id.is_in([ada.id]))).await?, "Edited");
+    assert_eq!(
+        sorted(Post::query().filter(post::editor_id.is_in([None, Some(ada.id)]))).await?,
+        "Draft,Edited,Archived"
+    );
+    assert_eq!(sorted(Post::query().filter(post::editor_id.is_in([None::<Id<User>>]))).await?, "Draft,Archived");
+    assert_eq!(sorted(Post::query().filter(post::editor_id.not_in([None::<Id<User>>]))).await?, "Edited");
+    assert_eq!(sorted(Post::query().filter(post::editor_id.not_in([Id::new(0)]))).await?, "Edited");
+
+    // Empty lists: `is_in` matches nothing, `not_in` everything, also inside `.or(..)`.
+    let none: Vec<Id<Post>> = vec![];
+    assert_eq!(sorted(Post::query().filter(post::id.is_in(&none))).await?, "");
+    assert_eq!(sorted(Post::query().filter(post::id.not_in(&none))).await?, "Draft,Edited,Archived");
+    let q = Post::query().filter(post::id.is_in(&none).or(post::id.eq(edited.id)));
+    assert_eq!(sorted(q).await?, "Edited");
+    assert_eq!(Post::query().filter(post::id.is_in(&none)).count(&app.db).await?, 0);
+    Ok(())
+}
+
+#[kiln::test]
+async fn like_escapes_input_and_ilike_ignores_case(app: TestApp) -> Result {
+    for (title, notes) in [("100% Rust", Some("Has_underscore")), ("100 percent", None), ("rust tips", Some("a\\b"))] {
+        app.create_with::<Bookmark>(|b| (b.title, b.notes) = (title.into(), notes.map(Into::into))).await?;
+    }
+    let db = &app.db;
+    let titles = |q: Query<Bookmark>| async move {
+        let rows = q.order(bookmark::id.asc()).select(bookmark::title).all(db).await?;
+        Ok::<_, kiln::Error>(rows.join(","))
+    };
+    // `%` in the input is a literal percent sign, not a wildcard.
+    assert_eq!(titles(Bookmark::query().filter(bookmark::title.like(kiln::like::contains("0%")))).await?, "100% Rust");
+    assert_eq!(titles(Bookmark::query().filter(bookmark::title.like("100%"))).await?, "100% Rust,100 percent");
+    // Case-insensitive on every backend.
+    let q = Bookmark::query().filter(bookmark::title.ilike(kiln::like::contains("RUST")));
+    assert_eq!(titles(q).await?, "100% Rust,rust tips");
+    assert_eq!(
+        titles(Bookmark::query().filter(bookmark::title.ilike(kiln::like::starts_with("RUST")))).await?,
+        "rust tips"
+    );
+    // Nullable text: NULL never matches.
+    assert_eq!(titles(Bookmark::query().filter(bookmark::notes.like(kiln::like::contains("s_u")))).await?, "100% Rust");
+    assert_eq!(titles(Bookmark::query().filter(bookmark::notes.like("%s_u%"))).await?, "100% Rust");
+    assert_eq!(
+        titles(Bookmark::query().filter(bookmark::notes.ilike(kiln::like::ends_with("A\\B")))).await?,
+        "rust tips"
+    );
+    assert_eq!(titles(Bookmark::query().filter(bookmark::notes.ilike("%"))).await?, "100% Rust,rust tips");
+    Ok(())
+}
+
+#[kiln::test]
+async fn select_takes_limits_and_orders_after_it(app: TestApp) -> Result {
+    for n in 1..=4 {
+        app.create_with::<Bookmark>(|b| b.title = format!("B{n}")).await?;
+    }
+    let after = Bookmark::query().select(bookmark::title).order(bookmark::id.desc()).limit(2);
+    let before = Bookmark::query().order(bookmark::id.desc()).limit(2).select(bookmark::title);
+    assert_eq!(after.all(&app.db).await?, ["B4", "B3"]);
+    assert_eq!(before.all(&app.db).await?, ["B4", "B3"]);
+    let page = Bookmark::query().select(bookmark::title).filter(bookmark::title.ne("B1")).order(bookmark::id.asc());
+    assert_eq!(page.page(2, 2).all(&app.db).await?, ["B4"]);
+    // As a subquery, too.
+    let newest = Bookmark::query().select(bookmark::id).order(bookmark::id.desc()).limit(1);
+    assert_eq!(Bookmark::query().filter(bookmark::id.in_query(newest)).count(&app.db).await?, 1);
+    Ok(())
+}
+
+#[kiln::test]
 async fn aggregates_count_by_and_sum(app: TestApp) -> Result {
     let ada = app.create::<User>().await?;
     for (rating, pinned) in [(Some(5), true), (Some(3), false), (None, false), (Some(4), true)] {

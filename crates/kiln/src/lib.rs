@@ -62,7 +62,9 @@ pub use migrate::{
     ColumnSnapshot, Diff, Migration, RecordDef, Snapshot, TableSnapshot, diff, diff_for, load_migrations, records,
     write_migration,
 };
-pub use query::{Column, Delete, Expr, Insert, MinMax, Order, Query, Select, Subquery, Summable, Update};
+pub use query::{
+    Column, Delete, Expr, Insert, ListValue, MinMax, Order, Query, Select, Subquery, Summable, TextColumn, Update, like,
+};
 pub use rate_limit::RateLimit;
 pub use redirect::{Redirect, ViewOrRedirect};
 pub use rel::{Append, BoxFuture, HasRel, HasRelation, Loaded, RelSet, Relation};

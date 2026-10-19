@@ -102,17 +102,105 @@ impl<T: Record, V: ToValue> Column<T, V> {
         self.compare(">=", value.into().to_value())
     }
 
+    /// The column's value is one of `values`: `issue::state.is_in([State::Open, State::Draft])`,
+    /// `repository::id.is_in(&ids)`. Takes values or references to them, of the column's type
+    /// (`&str` for text, plain values for an `Option` column). An empty list matches no
+    /// rows; `None` in the list on a nullable column matches NULL.
     pub fn is_in<I>(self, values: I) -> Expr<T>
     where
         I: IntoIterator,
-        I::Item: Into<V>,
+        I::Item: ListValue<V>,
     {
-        let binds: Vec<Value> = values.into_iter().map(|v| v.into().to_value()).collect();
-        if binds.is_empty() {
-            return Expr::new("0 = 1".to_owned(), vec![]);
+        let (binds, null) = list_binds::<V, _>(values);
+        let column = self.sql();
+        match (binds.is_empty(), null) {
+            (true, false) => Expr::new("0 = 1".to_owned(), vec![]),
+            (true, true) => Expr::new(format!("{column} IS NULL"), vec![]),
+            (false, false) => Expr::new(format!("{column} IN ({})", marks(binds.len())), binds),
+            (false, true) => Expr::new(format!("({column} IN ({}) OR {column} IS NULL)", marks(binds.len())), binds),
         }
-        let marks = vec!["?"; binds.len()].join(", ");
-        Expr::new(format!("{} IN ({marks})", self.sql()), binds)
+    }
+
+    /// The column's value is none of `values`. An empty list matches every row. Like `ne`,
+    /// a NULL never matches (SQL's `NOT IN`); keep those rows with `col.is_null().or(col.not_in(..))`.
+    /// `None` in the list is ignored.
+    pub fn not_in<I>(self, values: I) -> Expr<T>
+    where
+        I: IntoIterator,
+        I::Item: ListValue<V>,
+    {
+        let (binds, null) = list_binds::<V, _>(values);
+        let column = self.sql();
+        match (binds.is_empty(), null) {
+            (true, false) => Expr::new("1 = 1".to_owned(), vec![]),
+            (true, true) => Expr::new(format!("{column} IS NOT NULL"), vec![]),
+            // NOT IN already leaves out NULLs; a NULL bind would make it match nothing.
+            (false, _) => Expr::new(format!("{column} NOT IN ({})", marks(binds.len())), binds),
+        }
+    }
+}
+
+/// `?, ?, ?`.
+fn marks(n: usize) -> String {
+    vec!["?"; n].join(", ")
+}
+
+/// A list's binds without its NULLs, and whether it had one.
+fn list_binds<V, I>(values: I) -> (Vec<Value>, bool)
+where
+    I: IntoIterator,
+    I::Item: ListValue<V>,
+{
+    let mut null = false;
+    let mut binds = Vec::new();
+    for value in values {
+        match value.list_value() {
+            Value::Null => null = true,
+            value => binds.push(value),
+        }
+    }
+    (binds, null)
+}
+
+/// A value [`Column::is_in`] and [`Column::not_in`] accept for a column of type `V`: a `V`
+/// or `&V`, a `&str` for text, and a `V` or `&V` for an `Option<V>` column.
+pub trait ListValue<V> {
+    fn list_value(self) -> Value;
+}
+
+impl<V: ToValue> ListValue<V> for V {
+    fn list_value(self) -> Value {
+        self.to_value()
+    }
+}
+
+impl<V: ToValue> ListValue<V> for &V {
+    fn list_value(self) -> Value {
+        self.to_value()
+    }
+}
+
+impl<V: ToValue> ListValue<Option<V>> for V {
+    fn list_value(self) -> Value {
+        self.to_value()
+    }
+}
+
+impl<V: ToValue> ListValue<Option<V>> for &V {
+    fn list_value(self) -> Value {
+        self.to_value()
+    }
+}
+
+impl ListValue<String> for &str {
+    fn list_value(self) -> Value {
+        Value::Text(self.to_owned())
+    }
+}
+
+impl ListValue<Option<String>> for &str {
+    fn list_value(self) -> Value {
+        Value::Text(self.to_owned())
     }
 }
 
@@ -126,9 +214,63 @@ impl<T: Record, V> Column<T, Option<V>> {
     }
 }
 
-impl<T: Record> Column<T, String> {
-    pub fn like(self, pattern: &str) -> Expr<T> {
-        self.compare("LIKE", Value::Text(pattern.to_owned()))
+/// Text columns, `String` or `Option<String>` (a NULL never matches).
+pub trait TextColumn {}
+impl TextColumn for String {}
+impl TextColumn for Option<String> {}
+
+impl<T: Record, V: TextColumn> Column<T, V> {
+    /// SQL `LIKE`: `%` is any run of characters, `_` any one, `\` escapes them; build
+    /// patterns from user input with [`like::contains`] (and friends), which escape it.
+    /// Postgres compares case-sensitively; SQLite ignores ASCII case. For the same answer
+    /// everywhere, use [`Column::ilike`].
+    pub fn like(self, pattern: impl AsRef<str>) -> Expr<T> {
+        Expr::new(format!("{} LIKE ? ESCAPE '\\'", self.sql()), vec![Value::Text(pattern.as_ref().to_owned())])
+    }
+
+    /// Case-insensitive `LIKE` on every backend: `user::name.ilike(like::contains(&q))`.
+    /// Written `LOWER(col) LIKE LOWER(?)`, so Postgres folds any letters and SQLite ASCII
+    /// ones (as ILIKE and SQLite's LIKE do).
+    pub fn ilike(self, pattern: impl AsRef<str>) -> Expr<T> {
+        Expr::new(
+            format!("LOWER({}) LIKE LOWER(?) ESCAPE '\\'", self.sql()),
+            vec![Value::Text(pattern.as_ref().to_owned())],
+        )
+    }
+}
+
+/// `LIKE` patterns from user input, for [`Column::like`] and [`Column::ilike`]: `%`, `_` and
+/// `\` in the input match only themselves.
+///
+/// ```ignore
+/// Repository::query().filter(repository::name.ilike(kiln::like::contains(&params.q)))
+/// ```
+pub mod like {
+    /// The input with `%`, `_` and `\` escaped, to put inside a pattern of your own.
+    pub fn escape(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        for c in input.chars() {
+            if matches!(c, '%' | '_' | '\\') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    /// Matches text containing `input`.
+    pub fn contains(input: &str) -> String {
+        format!("%{}%", escape(input))
+    }
+
+    /// Matches text starting with `input`.
+    pub fn starts_with(input: &str) -> String {
+        format!("{}%", escape(input))
+    }
+
+    /// Matches text ending with `input`.
+    pub fn ends_with(input: &str) -> String {
+        format!("%{}", escape(input))
     }
 }
 
@@ -587,6 +729,42 @@ pub struct Select<T, V, J = ()> {
     sql: String,
     name: &'static str,
     _marker: PhantomData<fn() -> V>,
+}
+
+/// A `select` keeps building like its query, so `.limit(..)`, `.order(..)` and `.filter(..)`
+/// work before or after it.
+impl<T: Record, V, J> Select<T, V, J> {
+    pub fn filter<U, I>(mut self, expr: Expr<U>) -> Self
+    where
+        U: InScope<T, J, I>,
+    {
+        self.query = self.query.filter(expr);
+        self
+    }
+
+    pub fn order<U, I>(mut self, order: Order<U>) -> Self
+    where
+        U: InScope<T, J, I>,
+    {
+        self.query = self.query.order(order);
+        self
+    }
+
+    pub fn limit(mut self, n: u64) -> Self {
+        self.query = self.query.limit(n);
+        self
+    }
+
+    pub fn offset(mut self, n: u64) -> Self {
+        self.query = self.query.offset(n);
+        self
+    }
+
+    /// One-based page of `per` rows.
+    pub fn page(mut self, page: u64, per: u64) -> Self {
+        self.query = self.query.page(page, per);
+        self
+    }
 }
 
 impl<T: Record, V: FromColumn, J> Select<T, V, J> {
