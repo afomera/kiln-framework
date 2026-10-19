@@ -87,7 +87,7 @@ generated tests passing.
 | CSS, JS, images | `assets/` (JS entry point: `assets/application.js`) | linked with `{{ asset("app.css") }}`; JS modules load through the import map; CSS references other assets by path (`url("../fonts/a.woff2")`, `@import "tokens.css"`) |
 | Stimulus controllers | `assets/controllers/{name}_controller.js` | `export default class extends Controller` (from `"@hotwired/stimulus"`); registered automatically as `data-controller="{name}"` (`_` → `-`, `/` → `--`) |
 | Import-map pins | `config/importmap.toml` | `"@pierre/diffs" = "vendor/npm/@pierre/diffs@1.5.2.js"` (a file under `assets/`) or `"x" = "https://.."`; written by `kiln importmap pin` |
-| Files served as-is | `public/` (`robots.txt`, `favicon.svg`) | served at the site root when no route matches |
+| Files served as-is | `public/` (`robots.txt`, `favicon.svg`) | served at the site root (GET/HEAD), before routes that merely match the path (`/{owner}` doesn't swallow `/favicon.svg`); only a route for exactly that path wins over the file. `public/index.html` is `/` when no route is |
 | Presentation methods | `src/parts/{record}.rs` | `#[part] impl Record` + `#[record(.., parts)]` |
 | Template filters and functions (every template, no import) | `src/helpers/{name}.rs` (`pub mod helpers;` in `src/lib.rs`) | `#[kiln::template_filter] pub fn avatar_hue(name: &str) -> u32` is `{{ user.name \| avatar_hue }}`; `#[kiln::template_function] pub fn initials(name: &str) -> String` is `{{ initials(user.name) }}` |
 | Template macros (every template, no import) | `templates/helpers/{name}.html.jinja` | `{% macro icon(name, size=16) %}..{% endmacro %}`; any template calls `{{ icon("git-branch") }}` |

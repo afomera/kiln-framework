@@ -607,6 +607,10 @@ async fn handle_request(State(shared): State<Arc<Shared>>, request: Request, nex
                 None => None,
             };
             page.or_else(|| assets::serve_kiln(path))
+        } else if crate::routing::route_for("GET", path).is_none() {
+            // A `public/` file wins over routes that merely match it (`/{owner}` and
+            // `/favicon.svg`); a route written for exactly this path still wins.
+            shared.assets.as_ref().and_then(|a| a.serve_public_file(path))
         } else {
             None
         };
