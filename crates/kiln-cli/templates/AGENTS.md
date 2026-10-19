@@ -19,7 +19,7 @@ Run them from the app directory.
 | Email | `kiln g mail welcome_email` (with a preview at `/kiln/mail/previews`) |
 | Notification (inbox + email + live) | `kiln g notification comment_posted [--to User]` (adds the `/notifications` inbox and `/settings/notifications` the first time) |
 | Stimulus controller | `kiln g controller clipboard` → `assets/controllers/clipboard_controller.js` (`data-controller="clipboard"`; `admin/users` is `admin--users`) |
-| JavaScript package (no npm) | `kiln importmap pin @pierre/diffs[@1.5.2]` downloads it from jsDelivr into `assets/vendor/npm/` and pins it in `config/importmap.toml`; then `import { .. } from "@pierre/diffs"`. `--cdn` pins the CDN URL instead; `kiln importmap unpin <pkg>` |
+| JavaScript package (no npm) | `kiln importmap pin @pierre/diffs[@1.5.2]` downloads it from jsDelivr into `assets/vendor/npm/` and pins it in `config/importmap.toml`; then `import { .. } from "@pierre/diffs"`. `--cdn` pins the CDN URL instead; `kiln importmap unpin <pkg>`. Modules a package loads on demand (Shiki's grammars and themes) come from jsDelivr unless pinned by subpath: `kiln importmap pin @shikijs/langs/rust,tsx @shikijs/themes/github-dark` (at the version the vendored package asks for) |
 | Passwords, sign-up, resets, sign-in list | `kiln g auth` (once; replaces the demo sign-in) |
 | API tokens (personal access tokens) | `kiln g api_tokens` (after `kiln g auth`): `/settings/api_tokens` to create (shown once) and revoke, `GET /api/me`, tests. Scopes are listed in `src/forms/api_token_form.rs` |
 | Schema change | edit the record struct → `kiln db diff <snake_case_name>` → review the SQL → `kiln db migrate` |
@@ -32,7 +32,7 @@ Run them from the app directory.
 | Orient | `kiln introspect` before changing an unfamiliar app: every route (args, pipeline, return type), record (columns, relations), view (template, fields), form, policy, op signature, job, mail and config, with `file:line`. `--json` for the full detail; narrow with a section (`kiln introspect records`) or `--find Event` |
 | See it work | `kiln mcp` (in `.mcp.json`): `request` sends a request through the app as any user (`as: "User:1"` or an email) and returns the page as text, every SQL statement, the jobs enqueued and the mail sent (`perform_jobs: true` runs the queued jobs first, so mail sent later shows too; `files` uploads); `query` runs read-only SQL on the dev database; also `introspect`, `mail`, `jobs`, `check`, `explain`, `test`. Non-GET requests need `kiln mcp --write`. Without MCP, the app binary does the same: `cargo run -- request POST /posts --as 1 --form title=Hi --perform-jobs` (`request --help` for every option), `cargo run -- db query "SELECT .."` |
 | Routes | `kiln routes` |
-| Run | `kiln dev` (port 3000; `--port 4000` for another): runs `Procfile.dev`, rebuilds and restarts on src/ changes, restarts crashed processes. In a terminal it's a TUI (the `routes` entry lists the app's routes, refreshed on each build; `kiln routes` too): `1`-`9`/Tab select, `j`/`k` `g`/`G` scroll, `r` restart (on build: rebuild), `s` stop/start, `/` search (`n`/`N`), `f` filter, `m` all-output stream, `c` clear, `o` open /kiln, `K` check, `T` test, `q` quit. Piped, in CI or with `--inline` it prints `web \| ...` lines; `--json` prints NDJSON events (start, output, exit, restarting, failed, build, ready). Stopping it (q, Ctrl-C, SIGTERM) stops every process it started and frees the port. |
+| Run | `kiln dev` (port 3000; `--port 4000` for another): runs `Procfile.dev`, rebuilds and restarts on src/ changes and when a template is added, removed or renamed (edits only live-reload), restarts crashed processes. In a terminal it's a TUI (the `routes` entry lists the app's routes, refreshed on each build; `kiln routes` too): `1`-`9`/Tab select, `j`/`k` `g`/`G` scroll, `r` restart (on build: rebuild), `s` stop/start, `/` search (`n`/`N`), `f` filter, `m` all-output stream, `c` clear, `o` open /kiln, `K` check, `T` test, `q` quit. Piped, in CI or with `--inline` it prints `web \| ...` lines; `--json` prints NDJSON events (start, output, exit, restarting, failed, build, ready). Stopping it (q, Ctrl-C, SIGTERM) stops every process it started and frees the port. |
 | Jobs | `kiln jobs` (counts, queues, failures), `kiln jobs retry [id]`, `cancel <id>`, `run <id>`, `pause <queue>`, `resume <queue>`, `discard-failed` |
 | Schedules, batches | `kiln schedules [pause\|resume\|run <job>]`, `kiln batches [cancel <id>]` |
 | Inspect the running app | `/kiln` in development: routes, records, jobs, schedules, batches, mail, broadcasts, sign-ins, each searchable, with controls (retry, cancel, pause, run now) |
@@ -142,6 +142,13 @@ generated tests passing.
   gives `Authorized<Update, Post>` or a 403; ops take the proof, and `kiln check` (K0301)
   flags writes without one. For showing UI: `user.can::<Update, _>(&post)`. Other users get
   403, not 404, on records they may not touch.
+- **Access values:** when a permission needs queries (memberships, teams, grants), resolve
+  an access value first (`RepoAccess::resolve(&ctx.db, Some(&user), repo).await?`, holding the
+  record and the viewer's role) and write the policy for it: `impl Allows<Admin, RepoAccess>
+  for User`. Then declare which records its proof covers, in the same file:
+  `impl kiln::policy::Covers<(Repository, RepositoryCollaborator)> for RepoAccess {}`. K0301
+  then accepts `Authorized<_, RepoAccess>` for writes to those records and requires a proof for
+  every write to them.
 - **Signed-in user, in Rust:** an action takes `user: Current<User>` (or
   `Option<Current<User>>` for pages that work signed out). Ops never look the user up; they
   get it, or an `Authorized<..>` proof, as an argument.
@@ -446,6 +453,10 @@ generated tests passing.
   filters (`time_ago`, `time_ago_tag`, `number`, `compact_number`, `filesize`, `duration`, `tojson`) are
   built-ins too: an app filter of the same name written before Kiln had them now fails K0406;
   delete it and use Kiln's (or rename it if it prints something different).
+  `#[kiln::template_filter(name = "hue")]` registers a fn under another name. A view field
+  (or `{% set %}`/loop/macro-argument name) called like a function or helper macro hides it
+  in that template, its layout and partials (`path`, `avatar`, `empty`): `kiln check` flags
+  it (K0407); name the field for what it holds (`file_path`). Filters don't clash.
 - **Inside a record's own file**, column and relation names are constants (`title`,
   `owner`), so a binding or parameter with one of those names won't compile there; pick
   another name (the generated `owned_by` uses `who`).

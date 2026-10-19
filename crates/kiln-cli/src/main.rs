@@ -15,6 +15,7 @@ mod mcp;
 mod names;
 mod new;
 mod release;
+mod shadow_check;
 mod template_check;
 mod template_scan;
 

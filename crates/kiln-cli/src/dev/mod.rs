@@ -10,7 +10,8 @@
 //! Without a `Procfile.dev`, it runs `web: $APP serve`. Processes whose command uses `$APP`
 //! restart after every successful rebuild; the rest (asset watchers) keep running. Templates
 //! and assets are read from disk on every request in development, so editing them needs no
-//! rebuild. A service that crashes is restarted (after a second, up to five times in a row).
+//! rebuild; adding, removing or renaming a template does (views check theirs when they
+//! compile), and `kiln dev` rebuilds for it. A service that crashes is restarted (after a second, up to five times in a row).
 //!
 //! In a terminal it shows a TUI ([`tui`]); piped, in CI, or with `--inline` it prints
 //! prefixed lines ([`inline`]), and with `--json` NDJSON events. However it's stopped (q,

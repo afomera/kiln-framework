@@ -133,7 +133,21 @@ only by checking the policy, that the signed-in user may do this.
   pub async fn update_post(ctx: &Ctx, post: Authorized<Update, Post>, input: Valid<PostForm>) -> Result<Post>
 
 This makes \"forgot to check permissions\" a missing argument instead of a security bug.
-Code that runs without a viewer (jobs, seeds) uses `policy::as_system`.",
+Code that runs without a viewer (jobs, seeds) uses `policy::as_system`.
+
+Access values. When a permission needs database lookups (memberships, teams, grants), the
+app resolves an access value first and the policy checks that: `impl Allows<Admin,
+RepoAccess> for User`, with ops taking `Authorized<Admin, RepoAccess>`. Declare which records
+that proof covers, next to the policy in src/policies/:
+
+  impl kiln::policy::Covers<(Repository, RepositoryCollaborator, RepositoryInvitation)> for RepoAccess {}
+
+Each covered record is then guarded, and a function that writes it must take
+`Authorized<_, Repository>` or `Authorized<_, RepoAccess>`. Without the declaration, writes
+to `Repository` aren't checked at all, and a record with a policy of its own
+(`Allows<Update, RepositoryInvitation>` for the invitee) is flagged where an admin writes it
+under the `RepoAccess` proof. When the finding names a proof the function does take, declaring
+that it covers the record is usually the fix.",
     ),
     (
         "K0302",
@@ -232,6 +246,28 @@ parse. The app refuses to boot until it's fixed.
 
 Rename the helper (`#[kiln::template_filter(name = \"avatar_hue\")]` keeps the Rust name),
 or rename the macro. `kiln introspect template_helpers` lists the app's helpers.",
+    ),
+    (
+        "K0407",
+        "A field or template variable hides a template helper",
+        "A view's (or mail's) fields are its template's variables, and a variable wins over a
+global of the same name. So a field called `path` turns every `path(\"posts::show\", ..)` in
+the template, its layout and its partials into a call on a string, and the page fails only
+when it renders (\"string is not callable\"). The same goes for the app's helpers: a field
+`avatar` hides the `avatar()` macro from templates/helpers/, a field `empty` hides `empty()`.
+
+  pub struct Blob { pub path: String }        // hides path()
+  pub struct Blob { pub file_path: String }   // fine
+
+Rename the field (and its uses in the template). Inside a template, a `{% set %}`, loop,
+`{% with %}` or macro-argument name hides the helper the same way, which is flagged when the
+template also calls it: `{% macro empty(icon_name, title) %}{{ icon(icon_name) }}` rather than
+`empty(icon, ..)`.
+
+Filters live in their own namespace, so a field may share a filter's name
+(`avatar_hue`). The names come from the app itself (`templates --variables`), so built-ins,
+`#[template_function]`s and helper macros are all covered; `kiln introspect template_helpers`
+lists the app's own.",
     ),
     (
         "K0412",
