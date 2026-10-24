@@ -1,135 +1,118 @@
 <h1>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/kiln-wordmark-dark.svg">
-    <img src="assets/brand/kiln-wordmark.svg" alt="Kiln" height="56">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/afomera/kiln-framework/main/assets/brand/kiln-wordmark-dark.svg">
+    <img src="https://raw.githubusercontent.com/afomera/kiln-framework/main/assets/brand/kiln-wordmark.svg" alt="Kiln" height="56">
   </picture>
 </h1>
 
-A full-stack Rust web framework where the compiler is the reviewer. Published on crates.io as `kiln-framework` (with `kiln-framework-macros` and `kiln-framework-cli`), since `kiln` is taken; apps still `use kiln::prelude::*` and the command is `kiln`.
+A full-stack Rust web framework where the compiler is the reviewer.
 
-Spec: [Kiln Framework Spec](https://claude.ai/artifact/PNHemnZU3NnUq51gfW65uv)
+Kiln gives you what a batteries-included framework does — records and migrations, forms, sessions, mail, jobs, file uploads, Turbo and Stimulus — and leans on Rust's type system to catch mistakes before they ship. A missing preload, a post updated without permission, or a link to a route that doesn't exist won't compile, or fails `kiln check`, so it never reaches production.
 
-## Quick start
+> Kiln is early (0.0.x). Things will change, and it isn't ready for production apps yet.
 
-```sh
-make install            # builds the CLI and links it as `kiln-dev` in ~/.local/bin
-cd examples/blog
-kiln-dev db reset       # create storage/development.sqlite3, migrate, seed
-kiln-dev dev            # http://127.0.0.1:3000 (sign in as ada@example.com)
-kiln-dev check          # compile + conventions + schema + template routes
-kiln-dev test
+## A taste
+
+The struct is the schema. `kiln db diff` turns changes to it into a migration you review.
+
+```rust
+#[derive(Record, Debug, Clone)]
+#[record(table = "posts", belongs_to(author: User), has_many(comments: Comment))]
+pub struct Post {
+    pub id: Id<Post>,
+    #[index(unique)]
+    pub slug: String,
+    pub title: String,
+    pub body: RichText,
+    pub status: PostStatus,
+    pub author_id: Id<User>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
 ```
 
-`make` rebuilds the CLI; the installed link picks it up. `make install BIN_DIR=~/bin BIN_NAME=kiln` installs elsewhere or under another name; `make test`, `make lint` and `make uninstall` do what they say.
+An action is a function with a route. Its arguments say what it needs, and the types carry proof: `ops::update_post` only accepts a post the user was authorized to update.
 
-New app: `kiln-dev new journal` creates a standalone app with sign-in, a layout, a `User` record, its first migration, tests and `AGENTS.md`, linked to this repo's `kiln` crate.
-
-Agents working in an app start with its `AGENTS.md` ([the template](crates/kiln-cli/templates/AGENTS.md)).
-
-## Status: M3 (agent tooling)
-
-M0–M1 built the core, M2 the full stack, M3 the tools agents use; work since M3 fills out the query layer, APIs and assets. Published as 0.0.1.
-
-### Core (M1)
-
-| Piece | Where |
-| --- | --- |
-| Records: the struct is the schema; typed columns, `Id<T>`, queries, `insert`/`update`/`delete` | `crates/kiln/src/query.rs`, `crates/kiln-macros/src/record.rs` |
-| `Loaded<T, (rels..)>` preloading; N+1 is a compile error | `crates/kiln/src/rel.rs` |
-| Schema diffs: `kiln db diff <name>` writes reviewed SQL from the structs, including SQLite table rebuilds and Postgres ALTERs; `db migrate`, `db status`, drift detection, `db undo`, `db squash` (one file per past year) | `crates/kiln/src/migrate.rs` |
-| Transactions: `ctx.db.transaction(\|tx\| async move { .. })` | `crates/kiln/src/db.rs` |
-| `#[action(PATCH "/posts/{slug}")]`, typed `path(..)` helpers, link-time route registry | `crates/kiln-macros/src/action.rs` |
-| API pipeline: `#[action(GET "/api/posts", pipeline = Api)]`, `Json<T>`, JSON/form bodies through `Form<T>`, problem+json errors, no session cookie | `crates/kiln/src/app.rs`, `error_page.rs` |
-| Sessions (signed cookies), flash, CSRF, `_method` override, `Current<User>`; `app.layout_data(..)` for per-request layout values (`{{ layout_data.unread }}`) | `crates/kiln/src/session.rs`, `app.rs` |
-| Forms: `#[derive(Form)]` + `#[validate]` + `#[form(textarea, label, hint, placeholder)]`, `Form<T>` rejects unknown fields, `or_render` (422), async `CheckWith`; template helpers `form_start`/`fields`/`field`/`form_end` render inputs with `required`/`maxlength` from the rules; `form_start`/`button_to` take `id`, `data={..}`, `attrs={..}`, and `button_to` a `{% call %}` block for icon buttons | `crates/kiln/src/form.rs`, `view.rs` |
-| Time: `Timestamp::days_from_now(7)`, `hours_ago(2)`, `+ kiln::time::SignedDuration`; `{{ ts \| datetime }}`, `\| time_ago`, `\| time_ago_tag`; numbers: `\| number`, `\| compact_number`, `\| filesize`, `\| duration` (also `kiln::format::*`) | `crates/kiln/src/types.rs`, `format.rs` |
-| Policies with proof types: `Allows<Update, Post>`, `authorize` → `Authorized<Update, Post>` | `crates/kiln/src/policy.rs` |
-| Views, layouts, parts, strict templates, error pages (HTML + Markdown for agents) | `crates/kiln/src/view.rs`, `error_page.rs` |
-| Test harness: `#[kiln::test]`, `TestApp` with migrations, factories, `as_user`, `post_form`, `assert_flash` | `crates/kiln/src/testing.rs` |
-| `kiln` CLI: `new`, generators (`resource`, `record`, `action`, `op`, `part`), `db`, `routes`, `check`, `test`, `dev --port` | `crates/kiln-cli` |
-
-### Full stack (M2 and since)
-
-| Piece | Where |
-| --- | --- |
-| Postgres behind a `Dialect` interface (`kiln new --database postgres`); SQLite stays the default. Kiln's own tables can live in a separate database | `crates/kiln/src/dialect.rs`, `db.rs` |
-| Queries: typed joins (filtering on an unjoined table is a compile error), `has_many(.., through = ..)`, subqueries, aggregates, row locks, `increment`, raw `db.sql` | `crates/kiln/src/query.rs`, `join.rs`, `sql.rs` |
-| Record constraints, cascades, `one_of` and `has_one` | `crates/kiln-macros/src/record.rs` |
-| Jobs, schedules and batches, enqueued on a transaction so they run only after commit; `kiln jobs`, `schedules`, `batches` | `crates/kiln/src/jobs.rs`, `schedule.rs`, `batch.rs` |
-| Mail with previews, notifications and notification settings | `crates/kiln/src/mail.rs`, `notify.rs` |
-| Auth with password settings; API tokens whose scopes deny by default (`#[action(.., pipeline = Api, scope = "write")]`); rate limits | `crates/kiln/src/auth.rs`, `rate_limit.rs` |
-| Turbo, realtime streams, live reload; Stimulus by default and import-map pins (`kiln importmap pin`) | `crates/kiln/src/turbo.rs`, `realtime.rs`, `dev_reload.rs`, `assets.rs` |
-| Fingerprinted assets, cached forever; stylesheets' `url(..)` and `@import` references rewritten to fingerprinted URLs | `crates/kiln/src/assets.rs` |
-| Rich text (Lexxy) with attachments, file uploads, direct uploads, image variants | `crates/kiln/src/rich_text.rs`, `files.rs`, `storage.rs` |
-| Markdown and syntax highlighting: `\| markdown`, `\| highlight`, a `Markdown` field type | `crates/kiln/src/markdown.rs` |
-| Catch-all route captures: `#[action(GET "/{owner}/{repo}/tree/{*path}")]` | `crates/kiln/src/routing.rs` |
-| Cache; `#[derive(Config)]` with encrypted secrets (`kiln secrets`) | `crates/kiln/src/cache.rs`, `config.rs` |
-| Signed outbound webhooks and an SSRF-guarded HTTP client | `crates/kiln/src/webhooks.rs`, `http.rs` |
-| The `/kiln` command center and a welcome page for `/` in development | `crates/kiln/src/devtools.rs`, `welcome.rs` |
-| `kiln dev`: a terminal UI with a routes pane, process groups, crash restarts, `--inline` and `--json` | `crates/kiln-cli/src/dev/` |
-| Deploys: `kiln build` makes a single-binary `dist/`, `kiln build --docker` a production image; `make release` | `crates/kiln-cli`, `scripts/release.sh` |
-
-### Agent tooling (M3)
-
-| Piece | Where |
-| --- | --- |
-| `kiln introspect [--json]`: routes, records, views, forms, policies, ops, jobs, mail, config and templates, with file:line | `crates/kiln-cli/src/introspect.rs` |
-| `kiln explain <code>`: the long form of every check and error-page code | `crates/kiln-cli/src/explain.rs` |
-| `kiln mcp`: an MCP server with introspect, request (as any user), read-only query, mail, jobs, check, explain and test tools | `crates/kiln-cli/src/mcp.rs` |
-| App-written lint rules (`#[lint]` in `src/lints/`) that `kiln check` runs | `crates/kiln/src/lint.rs` |
-
-### `kiln g resource`
-
-```sh
-kiln g resource Bookmark title:string url:string 'notes:text?' 'rating:integer?' pinned:bool owner:ref:User
+```rust
+#[action(PATCH "/posts/{slug}")]
+pub async fn update(ctx: Ctx, user: Current<User>, slug: Param<String>, form: Form<PostForm>) -> Result<Redirect> {
+    let post = Post::find_by(post::slug.eq(&*slug)).one_or_404(&ctx.db).await?;
+    let post = user.authorize::<Update, _>(post)?;
+    let input = form.validate().or_render(|form| Edit { form, post: (*post).clone() })?;
+    let post = ops::update_post(&ctx, post, input).await?;
+    Ok(Redirect::to(posts::show::path(&post.slug)).notice("Post updated."))
+}
 ```
 
-writes the record, migration, form, policy, three ops, seven actions, four views, four templates, a factory and eight tests, updates the module files, and runs `kiln db diff`. The blog's `Bookmark` resource is that command's unedited output; it passes `kiln check` and its tests.
+## Getting started
 
-### `kiln check`
+Kiln needs Rust 1.99 or newer. Install the `kiln` command from crates.io:
 
-| Code | Rule |
-| --- | --- |
-| K0001 | The app compiles (`cargo check --all-targets`); the first compiler error is printed in full |
-| K0002 | The app binary can report its schema status |
-| K0003 | The app's own rules (`src/lints/`) can run |
-| K0101 | Records, forms, views, parts and actions live in their directories; a record's file is named after it |
-| K0102 | One `#[action]` per file |
-| K0103 | (warn) The action function is named after its file |
-| K0110 | No two routes match the same requests |
-| K0202 | The record structs match `db/snapshot.json` (no undiffed schema change) |
-| K0301 | A function that writes a policy-guarded record (`Post::insert/update/delete`) takes the matching `Authorized<_, Post>` proof |
-| K0203 | (warn) Migrations not yet applied to the development database |
-| K0204 | `db/snapshot.json` was written with a migration that's since been deleted (`kiln db undo` restores it) |
-| K0302 | (warn) A data-changing action has no test that calls its path helper |
-| K0304 | No `policy::as_system` in an action |
-| K0401 | A template, its layout and its includes read only what the view provides |
-| K0402 | Every `path("..")` in a template names a real route |
-| K0403 | Every `include`/`extends` names a real template |
-| K0404 | Every `data-controller` names a real Stimulus controller |
-| K0405 | Every import-map pin loads |
-| K0412 | A template, its layout and its includes read only the relations the view loaded |
-| K0501 | No raw `sqlx` outside `src/records/` |
-| K0601 | No environment reads outside `src/main.rs` |
-| K0701 | Jobs, mail and notifications inside a transaction are enqueued on it, not on the pool |
+```sh
+cargo install kiln-framework-cli
+```
 
-Error pages carry `K1xxx` codes (404s, CSRF, missing scopes, rate limits, database errors, ...); `kiln explain` covers those too.
+Then make an app:
 
-### What the tests prove
+```sh
+kiln new journal        # sign-in, a layout, a User record, its first migration, tests and AGENTS.md
+cd journal
+kiln db reset           # create the database, migrate, seed
+kiln dev                # http://127.0.0.1:3000
+kiln check              # compile + conventions + schema + template routes
+kiln test
+```
 
-- `examples/blog/tests/ui/`: code that must not compile, with the compiler output recorded. Using an unpreloaded relation, mixing `Id<User>` and `Id<Post>`, filtering with another table's column, route captures without a `Param`, wrong path-helper argument types, missing templates or layouts, and part mistakes.
-- `tests/posts.rs`: sign-in, CRUD, 422 re-rendering with kept input, unique-slug checks, unknown form fields (400), missing CSRF tokens (403), policies (403), and transactional deletes.
-- `tests/http.rs`: preloading is one query per relation, layouts, optional relations, error reports for browsers and agents.
-- `tests/api.rs`: JSON lists without leaking emails, JSON 404s, field errors as JSON, unknown JSON fields (400), and API routes ignoring the session cookie.
-- `crates/kiln/src/migrate.rs`: diff output, including the rebuild path for NOT NULL columns.
-- The rest of `examples/blog/tests/` covers each M2 piece and what came after it: jobs and batches, mail, notifications, uploads, cache, sessions, joins and queries, row locks, API tokens and scopes, webhooks, catch-all routes, split databases, assets and the dev tools.
+### Using Postgres
 
-## Known issues
+New apps use SQLite (`storage/development.sqlite3`) by default. For Postgres, pass `--database postgres`:
 
-- **rustc incremental-compilation ICE.** On rustc 1.98.1 and 1.99.1, adding a field to a record while `src/factories.rs` has `async fn` trait impls crashes incremental compilation (`encountered incremental compilation error with evaluate_obligation`, `rustc_middle/src/verify_ich.rs:82`). In the blog, adding a field to `Post` does it every time. The real error (e.g. E0063, missing field) still prints first, and the next build after fixing it succeeds. Workarounds: `cargo clean -p <app>`, or `CARGO_INCREMENTAL=0`, which avoids it. To be reported upstream with a reproduction.
-- zsh treats `?` as a glob, so quote optional fields: `'notes:text?'`.
-- Factories live in `src/factories.rs` (not `tests/`) because of Rust's orphan rule.
+```sh
+kiln new journal --database postgres
+```
+
+The app connects to `postgres://localhost/journal_development`, with tests in `journal_test`. `kiln new` migrates and seeds right away, so start a Postgres server first; Kiln creates the databases if they don't exist. To use another server, set `DATABASE_URL` and `TEST_DATABASE_URL`:
+
+```sh
+DATABASE_URL=postgres://user:pass@db.internal/journal_development kiln new journal --database postgres
+```
+
+`kiln db reset` won't drop a database on another machine unless you pass `--allow-remote`.
+
+Generate a whole resource — record, migration, form, policy, actions, views, templates and tests — in one go:
+
+```sh
+kiln g resource Bookmark title:string url:string 'notes:text?' pinned:bool owner:ref:User
+```
+
+For a fuller app, [`examples/blog`](https://github.com/afomera/kiln-framework/tree/main/examples/blog) uses most of the framework.
+
+## What's in the box
+
+- **Records and queries**: typed columns and IDs, joins, preloading, transactions, row locks; SQLite by default, Postgres too
+- **Migrations from your structs**, with drift detection, undo and squash
+- **Actions, forms and policies**: typed routes and path helpers, validation that re-renders with your input, CSRF, sessions and flash
+- **Views and templates** that are checked against what the view provides
+- **Jobs, schedules and batches**, enqueued only after the transaction commits
+- **Mail and notifications**, with previews
+- **Auth and API tokens**, scoped and deny-by-default, with rate limits
+- **Hotwire**: Turbo, realtime streams, Stimulus and import maps; live reload in development
+- **Files and rich text**: uploads, direct uploads, image variants, the Lexxy editor, Markdown
+- **Deploys**: `kiln build` makes a single binary, or a Docker image
+- **Agent tooling**: every app ships an `AGENTS.md`, and `kiln introspect`, `kiln explain` and `kiln mcp` let coding agents see inside it
+
+## Docs
+
+- [Features](https://github.com/afomera/kiln-framework/blob/main/docs/features.md): the full list, and where each piece lives
+- [`kiln check`](https://github.com/afomera/kiln-framework/blob/main/docs/checks.md): every check code
+- [Working with agents](https://github.com/afomera/kiln-framework/blob/main/docs/agents.md)
+- [Developing Kiln](https://github.com/afomera/kiln-framework/blob/main/docs/development.md)
+- [Known issues](https://github.com/afomera/kiln-framework/blob/main/docs/known-issues.md)
+
+The design is written up in the [Kiln Framework Spec](https://claude.ai/artifact/PNHemnZU3NnUq51gfW65uv).
+
+Kiln is published on crates.io as `kiln-framework` (with `kiln-framework-macros` and `kiln-framework-cli`), since `kiln` is taken; apps still `use kiln::prelude::*` and the command is `kiln`.
 
 ## License
 
-Kiln is © 2026 [Andrea Fomera](https://afomera.dev), dual-licensed under either of [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option. Vendored libraries keep their own licenses: Turbo (MIT) and Lexxy with what it bundles (MIT; DOMPurify under Apache 2.0), in `crates/kiln/vendor/`.
+Kiln is © 2026 [Andrea Fomera](https://afomera.dev), dual-licensed under either of [MIT](https://github.com/afomera/kiln-framework/blob/main/LICENSE-MIT) or [Apache 2.0](https://github.com/afomera/kiln-framework/blob/main/LICENSE-APACHE), at your option. Vendored libraries keep their own licenses: Turbo (MIT) and Lexxy with what it bundles (MIT; DOMPurify under Apache 2.0), in `crates/kiln/vendor/`.
