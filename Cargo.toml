@@ -4,15 +4,15 @@ members = ["crates/kiln", "crates/kiln-cli", "crates/kiln-macros", "examples/blo
 
 [workspace.package]
 edition = "2024"
-version = "0.0.3"
+version = "0.0.4"
 license = "MIT OR Apache-2.0"
 rust-version = "1.99"
 repository = "https://github.com/afomera/kiln-framework"
 
 [workspace.dependencies]
 # Versions as well as paths: crates.io resolves the version, the workspace the path.
-kiln = { path = "crates/kiln", package = "kiln-framework", version = "0.0.3" }
-kiln-macros = { path = "crates/kiln-macros", package = "kiln-framework-macros", version = "0.0.3" }
+kiln = { path = "crates/kiln", package = "kiln-framework", version = "0.0.4" }
+kiln-macros = { path = "crates/kiln-macros", package = "kiln-framework-macros", version = "0.0.4" }
 axum = "0.8"
 inventory = "0.3"
 jiff = "0.2"
